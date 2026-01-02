@@ -1,78 +1,44 @@
-# Projektkontext (AI)
+# docs/ai-context.md
 
-## 1. Projektziel
-- Lokales Tool, das MTG Arena-Spieler:innen eine sammlungsbewusste Deck-Beratung liefert, ohne externe Dienste; Kern ist ein deterministischer, regelbasierter Advisor.
-- Zielnutzer: privacy-sensitive Spieler auf macOS/Windows, die nachvollziehbare Empfehlungen wollen; Kernnutzen ist eine verlässliche `collection.json`-Extraktion aus MTGA-Logs als Basis für spätere Ratschläge.
-- Nicht: Live-Tracker/Overlay, Cloud-Service oder LLM-getriebenes Produkt; keine Abhängigkeit von Meta-Feeds in Phase 1.
+## Projektziel
+- Lokales Tool für MTG-Arena-Spieler:innen, das eine sammlungsbewusste Deck-Beratung ermöglicht.
+- Kernpfad: deterministischer, regelbasierter Advisor auf Basis eines zuverlässigen Exports der eigenen Sammlung aus MTGA-Logs.
+- Zielgruppe: privacy-sensitive Nutzer:innen auf macOS/Windows; nachvollziehbare, erklärbare Empfehlungen.
+- Nicht-Ziele (Phase 1): Live-Tracker/Overlay, Cloud-Service, verpflichtende externe Meta-Feeds oder LLM-getriebene Entscheidungen.
 
-## 2. Aktueller Entwicklungsstand
-- Reifegrad: frühe Planung/Phase 0–1 (Dokumentation vorhanden, keine Implementierung).
-- Vorhanden: Zieldefinition, Prinzipien, Beispiel-Datenformen (`collection.json`, `arena_deck.json`, `advisor_result.json`, `meta_signals.json`), Scope für Phase 1 (logbasierter Export).
-- Experimentell/offen: keine Parser, keine CLI, kein Advisor; Log-Annahmen und Pfaderkennung sind nur dokumentiert, nicht validiert.
+## Phase-1 Scope (konservativ)
+- **In Scope**: Einmaliger, lokaler Export der Sammlung aus MTGA-Logs zu `collection.json`.
+- **Out of Scope**: Meta-Importe, Deck-Empfehlungen, Live-Telemetrie, GUI-Overlay, externe APIs.
+- **Offline-first**: Keine Netzwerkaufrufe im Kernpfad.
+- **Deterministisch & erklärbar**: Ausgabe muss auf Logs zurückführbar sein; keine stillen Annahmen.
 
-## 3. Technische Architektur
-- Ordnerstruktur: `README.md` (Kurzüberblick); `docs/` mit Dev-Setup, Roadmap, Daten-Schemas, Source-Analysis, Phase-1-Scope; keine Code-Module vorhanden.
-- Verantwortungen (geplant): Log-Finder/Parser (lokale MTGA-Logs → strukturierte Events), Exporter (`collection.json`), Regel-Engine (deterministische Empfehlungen), optionale Meta-Ingestion (offline/importiert), Ausgabe-Formatter (`advisor_result.json`).
-- Datenflüsse: MTGA-Logs (Player.log, ggf. Rotation) → defensive Parser → normalisierte Karten-IDs/Owned-Counter → `collection.json` → (optional) Deck-Input + Meta-Signale → regelbasierter Advisor → erklärbare Empfehlungen.
-- Entscheidungen: Offline-first, keine externen APIs für Kernpfad; deterministische Regeln mit Transparenz; LLM nur optional/ergänzend; macOS/Windows als Ziel, Linux optional; single-run Export statt dauerndem Daemon; Arena-native Card-IDs in Phase 1 (kein Mapping zu externen Datenquellen).
+## Kanonische Log-Quellen
+- **Primärquelle**: `Player.log`.
+- **Rotation/Caching**: `Player-prev.log` wird einbezogen (Snapshot-Cache + Reproduzierbarkeit).
+- **Fallback**: `output_log.txt` nur „best effort“, klar als unsicher markiert; keine „complete“-Claims daraus.
 
-## 4. Roadmap (Ist-Sicht)
-- Kurzfristig: Phase 1 – robuster, lokaler Log-Parser + `collection.json`; Risiken: Log-Format-Drift, OS-Pfadvarianten, unvollständige Logs/Staleness.
-- **[Neu]** Phase 1a – Log-Ingestion mit Rotation + Snapshot-Cache (`Player.log` + `Player-prev.log`), Snapshot-first als Gatekeeper für `collection.completeness`.
-- **[Neu]** Phase 1b – Parser-Härtung: „Detailed Logs“-Erkennung, unknown-event Telemetrie, klare Fehlermeldungen ohne stillen Fallback; Ausgabe mit 3-stufiger Vollständigkeit.
-- Mittelfristig: Phase 2–3 – regelbasierter Advisor + optionale Meta-Imports; Risiken: Regelabdeckung vs. Erklärbarkeit, Meta-Datenqualität ohne Netzwerk, Schema-Versionierung.
-- Langfristig: Phase 4–5 – Service-Layer/MCP + optionale LLM-Ergänzungen; Risiken: erhöhte Betriebs- und Datenschutzkomplexität, Wahrung eines voll-offline Pfads.
+## Snapshot- und Delta-Semantik
+- **Snapshot-first**: „complete“ setzt einen Snapshot-Event voraus (z. B. GetPlayerCardsV3 oder äquivalent).
+- **Delta-Events** dürfen nur angewendet werden, wenn ein Snapshot als Basis existiert.
+- **Ohne Snapshot**: `collection.completeness` darf nicht `complete` sein; Ausgabe muss Warnung/What-if signalisieren.
 
-## 5. Leitplanken & Prinzipien
-- Architekturprinzipien: deterministisch vor probabilistisch; erklärbare Regeln; lokale/offline-first Ausführung; defensive Parser mit klaren Fehlermeldungen.
-- Technische No-Gos: verpflichtende Netzwerkaufrufe für Kernfunktionen; Abhängigkeit von unoffiziellen APIs; GUI/Overlay-Pflicht; stille Fallbacks ohne Warnung.
-- Zu vermeidende Abhängigkeiten: gehostete Deck/Meta-Feeds im Kernpfad; Plattform-spezifische Annahmen (Windows-only Pfade); dauerhafte Daemons.
-- Anforderungen: deterministische Outputs mit klaren Quellen; markierte Unsicherheit bei Teil- oder Stalldaten; erklärbare Empfehlungsschritte; bevorzugt vollständig offline.
+## Vollständigkeits-Semantik (3-stufig)
+- **Werte**: `complete`, `partial`, `unknown`.
+- **Geltungsbereiche**: getrennt für `cards`, `wildcards`, `source`.
+- **Regel**: `unknown` wird niemals als 0 interpretiert.
 
-## Phase-1 Entscheidungen (konsolidiert)
+## Wildcards-Entscheidung (sofort nutzbar, aber guarded)
+- Wildcards werden **sofort** extrahiert und dürfen im Ranking/Advice verwendet werden, **nur wenn** `wildcards.completeness == "complete"`.
+- Wenn Wildcards nicht sicher bestimmt sind: Empfehlungen müssen als **What-if** formuliert werden (keine harten Zusagen).
 
-### Konservativitätsprinzip
-- Das Tool ist **konservativ**: Es macht keine „craftbar“- oder „vollständig“-Aussagen, wenn Inputs nicht eindeutig vollständig sind.
-- **Keine stillen Annahmen**: „unknown“ wird nie als 0 interpretiert.
+## Normalisierung und Schlüssel
+- **ArenaCardId ist Primärschlüssel** der Sammlung in Phase 1.
+- Keine automatische Normalisierung auf externe IDs oder Set/CollectorNumber.
+- Reprints/Varianten/Styles werden nicht zusammengelegt, solange kein expliziter Equivalence-Layer existiert (Phase 2+).
 
-### Outputs und Scope
-- **collection.json (Kernartefakt, Phase 1):**
-  - Primärinhalt: `ArenaCardId -> count` (Owned Cards + Counts).
-  - Enthält zusätzlich **optional** Wildcards, aber strikt getrennt vom Karten-Block (siehe unten).
-  - Muss Metadaten tragen: `schema`, `asOf`, `source`, `completeness`.
-
-- **Wildcards im Kernpfad (Phase 1, für Ranking nutzbar):**
-  - Wildcards werden **sofort** analysiert und dürfen in Empfehlungen verwendet werden, **aber nur**, wenn `wildcards.completeness == "complete"`.
-  - Wenn Wildcards nicht vollständig sicher bestimmbar sind: Empfehlungen müssen als „What-if“ formuliert werden (keine harten Zusagen).
-
-### Normalisierung und Schlüssel
-- **Arena IDs sind die Quelle der Wahrheit (Phase 1):**
-  - `ArenaCardId` ist Primärschlüssel für Collection-Zählung.
-  - Keine automatische Normalisierung über Set/CollectorNumber/Oracle in Phase 1.
-  - Reprints/Varianten/Styles werden nicht zusammengelegt, solange kein expliziter Equivalence-Layer existiert (Phase 2+).
-
-### Kanonische Log-Quellen
-- **Kanonisch:** `Player.log` (primäre Quelle).
-- **Rotation/Caching:** `Player-prev.log` wird einbezogen (Snapshot-Cache + Reproduzierbarkeit).
-- **Fallback:** `output_log.txt` nur Best-effort, klar als unsicher markiert. Kein stiller Ersatz, keine „complete“-Claims daraus.
-
-### Snapshot + Delta Semantik (Collection final)
-- **Snapshot-first:** „complete“ Collection erfordert einen Snapshot-Event (z. B. GetPlayerCardsV3 oder äquivalent).
-- **Delta-Events** werden nur angewendet, wenn ein Snapshot als Basis existiert.
-- Fehlt der Snapshot: `collection.completeness != "complete"` (Warnung, What-if Modus).
-
-### Vollständigkeit (3-stufig)
-- Outputs nutzen explizit:
-  - `complete` (vollständig und belastbar)
-  - `partial` (teilweise, nur eingeschränkt verwendbar)
-  - `unknown` (nicht bestimmbar)
-- Diese Vollständigkeit gilt getrennt für:
-  - Karten (`cards`)
-  - Wildcards (`wildcards`)
-  - Quelle/Log-Lage (`source`)
-
-### Empfehlung für JSON-Struktur (Phase 1)
-- collection.json soll mindestens folgendes ermöglichen:
+## collection.json (Phase-1 Kernartefakt)
+- Pflichtfelder: `schema`, `asOf`, `source`, `completeness`, `cards`.
+- Wildcards sind optional, aber strikt getrennt und mit eigener Vollständigkeit versehen.
 
 ```json
 {
@@ -98,26 +64,20 @@
 }
 ```
 
-## 6. Offene Fragen & Annahmen
-- Pfaderkennung für MTGA-Logs auf macOS/Windows muss getestet; Umgang mit unterschiedlichen Installationspfaden unklar.
-- Schema-Versionierung und Drift-Erkennung für Log-Parser und Outputs fehlen; Bedarf an minimalem Baseline-Sample unklar.
-- Umgang mit Kartenvarianten/Styles/Finish in Logs (nur IDs vs. weitere Felder) ist offen; Naming/Normalization nur teilweise dokumentiert.
+## Fehler- und Warnverhalten
+- **Fehlende Logs**: Abbruch mit klarer Meldung (keine Ausgabe).
+- **Teilweise Logs**: Ausgabe möglich, aber `completeness` < `complete` und Warnung.
+- **Format-Drift**: klare Fehlermeldung, kein stilles Trunkieren.
+- **Stale Data**: Warnung, falls Snapshot zu alt.
 
-## 7. Umgang mit AI
-- AI hält sich strikt an dieses Dokument; keine stillen Annahmen.
-- Bei fehlenden Informationen: nachfragen und Unsicherheiten markieren.
-- Vorschläge müssen deterministisch begründet und roadmap-konform sein; keine „Best Practices“ ohne Bezug zu Logs/Scope.
-- LLM-Einsatz ist optional und darf Kernpfad (lokaler Export + regelbasierter Advisor) nicht beeinflussen.
+## Erkenntnisse aus externer Repo-Analyse
+- **Parser-Pipeline**: Event-Dispatch nach robustem Log-Splitting (UnityCrossThreadLogger/Client GRE), dann typed Parser pro Event.
+- **Defensive JSON-Extraktion**: Mehrzeilige Payloads, partielle JSON-Blöcke, mehrere Events pro Chunk.
+- **Rotation-Handling**: Snapshot-Cache + Delta-Apply (nur mit Snapshot-Basis).
+- **Nicht-Ziele bestätigt**: Keine Online-Accounts, keine Overlay-/GUI-Pflicht, keine Pflicht-APIs.
+- **Risiken**: Log-Drift (Eventnamen/Strukturen), Plattformpfade variieren; daher Parser-Versionierung, Unknown-Event-Telemetrie, konfigurierbare Pfade.
 
-## 8. Erkenntnisse aus externer Repo-Analyse
-- Empfohlene Architekturentscheidungen:
-  - Parser-Pipeline mit Event-Dispatch: robustes Log-Splitting (UnityCrossThreadLogger/Client GRE) → Event-Label-Dispatch → typed Parser pro Event (GetPlayerCards, Inventory, Decks).
-  - Defensive JSON-Extraktion: mehrzeilige Payloads, partielle JSON-Blöcke, Mehrfach-Events pro Chunk.
-- Bewusste Nicht-Ziele:
-  - Kein verpflichtender Upload/Cloud-Sync; keine Server-Abhängigkeit im Kernpfad.
-  - Keine Overlay-/In-Game-UI-Pflicht in Phase 1.
-  - Kein Zwang zu Scryfall/externen APIs für die Collection-Rekonstruktion.
-- Risiken & offene Fragen (aus Repo-Befunden abgeleitet):
-  - Log-Drift: Eventnamen/Strukturen ändern (z. B. Payload-Layouts), daher Parser-Versionierung & „unknown event“ Telemetrie notwendig.
-  - Plattformpfade variieren (Windows/macOS, Steam/Wine); Pfaderkennung muss getestet und konfigurierbar sein.
-  - Umgang mit Varianten (Styles, Reprints, Sondereditionen) bleibt unklar, wenn nur Arena-ID + Count vorliegt.
+## Leitplanken für spätere Phasen
+- Kernpfad bleibt offline und deterministisch.
+- LLM-Einsatz ist optional und darf den Kernpfad nicht beeinflussen.
+- Meta-Signale dürfen nur als zusätzliche Eingabe erfolgen und sind klar vom Kernpfad getrennt.
