@@ -41,6 +41,13 @@
 - Keine Reprint/Variant/Style-Normalisierung in Phase 1.
 - Externe Mapping-Layer erst ab Phase 2+.
 
+## Leitplanken für spätere Phasen
+### Phase 2: Meta-Signale (optional, pluggable)
+- Meta ist nicht Kernpfad.
+- Zwei Quellen: Offline-Import + optionaler Connector (monetarisierbar).
+- Beide normalisieren in ein gemeinsames internes Format (`meta_signals.json` oder DB-Entities).
+- Advisor funktioniert deterministisch auch ohne Meta (degradierter Modus).
+
 ## `collection.json` (Phase-1 Kernartefakt)
 - Enthält: `schema`, `asOf`, `source`, `collection.completeness`, `completeness` (cards/wildcards/source), `cards`, `wildcards`.
 - Minimal-Beispiel:
