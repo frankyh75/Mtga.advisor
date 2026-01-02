@@ -18,6 +18,8 @@
 
 ## 4. Roadmap (Ist-Sicht)
 - Kurzfristig: Phase 1 – robuster, lokaler Log-Parser + `collection.json`; Risiken: Log-Format-Drift, OS-Pfadvarianten, unvollständige Logs/Staleness.
+- **[Neu]** Phase 1a – Log-Ingestion mit Rotation + Snapshot-Cache (`Player.log` + `Player-prev.log`), deterministische Sammlung via Snapshot + Delta-Updates.
+- **[Neu]** Phase 1b – Parser-Härtung: „Detailed Logs“-Erkennung, unknown-event Telemetrie, klare Fehlermeldungen ohne stillen Fallback.
 - Mittelfristig: Phase 2–3 – regelbasierter Advisor + optionale Meta-Imports; Risiken: Regelabdeckung vs. Erklärbarkeit, Meta-Datenqualität ohne Netzwerk, Schema-Versionierung.
 - Langfristig: Phase 4–5 – Service-Layer/MCP + optionale LLM-Ergänzungen; Risiken: erhöhte Betriebs- und Datenschutzkomplexität, Wahrung eines voll-offline Pfads.
 
@@ -38,3 +40,21 @@
 - Bei fehlenden Informationen: nachfragen und Unsicherheiten markieren.
 - Vorschläge müssen deterministisch begründet und roadmap-konform sein; keine „Best Practices“ ohne Bezug zu Logs/Scope.
 - LLM-Einsatz ist optional und darf Kernpfad (lokaler Export + regelbasierter Advisor) nicht beeinflussen.
+
+## 8. Erkenntnisse aus externer Repo-Analyse
+- Empfohlene Architekturentscheidungen:
+  - Snapshot-first + Delta: primärer Collection-Snapshot aus `PlayerInventory.GetPlayerCardsV3`, danach `Inventory.Updated`-Deltas anwenden; bei fehlendem Snapshot nur warnen (kein stilles Fallback).
+  - Log-Ingestion mit Rotation/Caching: kombiniere `Player.log` + `Player-prev.log`, halte lokale Snapshots (z. B. letzte 3–5) für Reproduzierbarkeit und Offline-Betrieb.
+  - Parser-Pipeline mit Event-Dispatch: robustes Log-Splitting (UnityCrossThreadLogger/Client GRE) → Event-Label-Dispatch → typed Parser pro Event (GetPlayerCards, Inventory, Decks).
+  - Explizite „Detailed Logs“-Prüfung mit klaren Fehlermeldungen und UX-Hinweisen, nicht still weiterarbeiten.
+  - Defensive JSON-Extraktion: mehrzeilige Payloads, partielle JSON-Blöcke, Mehrfach-Events pro Chunk.
+  - Lokale IDs als Quelle der Wahrheit: Arena IDs als Primärschlüssel; externe Mapping/Name-Auflösung nur optionaler, separater Pfad.
+- Bewusste Nicht-Ziele:
+  - Kein verpflichtender Upload/Cloud-Sync; keine Server-Abhängigkeit im Kernpfad.
+  - Keine Overlay-/In-Game-UI-Pflicht in Phase 1.
+  - Kein Zwang zu Scryfall/externen APIs für die Collection-Rekonstruktion.
+- Risiken & offene Fragen (aus Repo-Befunden abgeleitet):
+  - Log-Drift: Eventnamen/Strukturen ändern (z. B. Payload-Layouts), daher Parser-Versionierung & „unknown event“ Telemetrie notwendig.
+  - „Collection final“ abhängig von letztem Snapshot-Event; reine Deltas ohne Snapshot liefern keine sichere Vollständigkeit.
+  - Plattformpfade variieren (Windows/macOS, Steam/Wine); Pfaderkennung muss getestet und konfigurierbar sein.
+  - Umgang mit Varianten (Styles, Reprints, Sondereditionen) bleibt unklar, wenn nur Arena-ID + Count vorliegt.
