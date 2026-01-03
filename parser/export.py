@@ -137,9 +137,12 @@ def _iso_now() -> str:
 
 def _parse_iso_timestamp(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _apply_staleness_warning(report, reference_time: str) -> None:
