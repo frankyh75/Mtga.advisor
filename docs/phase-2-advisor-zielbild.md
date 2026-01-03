@@ -10,27 +10,51 @@
 - Konservativitätsprinzip: Ohne vollständige Evidenz keine harten Aussagen.
 - Format-agnostisch: Alle Modelle müssen format-parameterisiert sein.
 
-## 1) Gemeinsame Datenbasis (für Constructed & Jump In)
+## 1) Unterstützte Arena-Formate & Beratungslogik
 
-### 1.1 Eingabedaten (Minimal)
+### 1.1 Unterstützte Constructed-Formate (verbindlich)
+- **Standard** (rotierend)
+- **Pioneer** (Explorer vollständig ersetzt)
+- **Historic**
+- **Timeless**
+- **Alchemy** (digital-only + Rebalances)
+- **Brawl** (Singleton, Commander-Logik)
+
+> **Wichtig:** Die Format-Priorität wird vom User festgelegt. Das System bleibt format-agnostisch und nutzt Parameter, nicht feste Reihenfolge.
+
+### 1.2 Beratungslogik pro Format (Constructed)
+| Format | Sinnvolle Beratung | Erlaubte Vereinfachungen | Risiken, die explizit kommuniziert werden müssen |
+|---|---|---|---|
+| **Standard** | Completion, Crafts, Upgrade-Pfade, Rotation-Impact auf Investitionen. | Rotation nur als Zeitfenster (keine Meta-Winrate). | Rotationsrisiko („Karten rotieren bald“), Metadaten fehlen. |
+| **Pioneer** | Completion, Crafts, Upgrade-Pfade, Long-Term-Value. | Keine Rotation; Fokus auf Besitz/Deckstruktur. | Große Card-Pool-Varianz; Meta-Insights fehlen. |
+| **Historic** | Completion, Crafts, Upgrade-Pfade, Legalität prüfen (bannings/nerfs). | Keine Meta-Winrates; nur Legalität/Pool-Checks. | Rebalance/Bans möglich; Pool-Größe erhöht Unsicherheit. |
+| **Timeless** | Completion, Crafts, Upgrade-Pfade, Legalität/Restricted prüfen. | Nur deterministische Logik; keine Strength-Skala. | Sehr großer Pool + Restriktionen; Meta fehlt. |
+| **Alchemy** | Completion, Crafts, Upgrade-Pfade mit **Rebalance-Status**. | Vereinfachung: Rebalance-Indikator + Hinweis, keine Detail-Simulation. | Digitale Rebalances und digital-only Karten können sich ändern. |
+| **Brawl** | Commander-spezifische Checks (Singleton, Commander-Farbidentität, Deckgröße). | Vereinfachung: Commander-Synergie heuristisch (Typ/Keyword/Theme-Tags). | Heuristik-Unsicherheit, Singleton-Varianz, Commander-Logik nur näherungsweise. |
+
+---
+
+## 2) Gemeinsame Datenbasis (für Constructed & Jump In)
+
+### 2.1 Eingabedaten (Minimal)
 | Datenquelle | Zweck | Pflicht? | Hinweise |
 |---|---|---|---|
 | `collection.json` (Phase-1) | Besitzstände (Karten + Wildcards) | Pflicht | Vollständigkeitsstatus (`complete|partial|unknown`) beachten. |
 | `arena_deck.json` | Ziel-Decklisten | Optional | Nutzer kann eigene Decks importieren. |
 | Lokale Karten-Metadaten (Arena IDs → Name, Farbe, Typ, Mana Value, Rarity, Set, Legalitäten) | Rollen-/Kurvenheuristiken | Pflicht für Phase 2 | Offline-DB; keine Cloud-Abhängigkeit. [ANNAHME] |
-| Format-Konfiguration (Legalitäten, Rotation, BO1/BO3) | Format-Parametrisierung | Pflicht | Parametrisiert pro Format, keine feste Reihenfolge. |
+| Format-Konfiguration (Legalitäten, Rotation, BO1/BO3, Rebalances, Brawl-Regeln) | Format-Parametrisierung | Pflicht | Parametrisiert pro Format, keine feste Reihenfolge. |
 | Jump-In Pool-Listen (Half-Decks inkl. Rarity) | Jump-In Beratung | Pflicht | Vollständige Listen verfügbar. [BELEGT] |
 | Gold/Gems/Vault (Inventar) | Gold-Ausgaben-Advisor | Optional/unsicher | Verfügbarkeit unklar; Fallbacks nötig. [BELEGT]/[ANNAHME] |
 | Nutzerpräferenz (Constructed vs Limited, Budget-Tempo, Lieblingsfarben) | Empfehlungen | Optional | Lokale Settings. |
 
-### 1.2 Vollständigkeit & Konservativität (verbindlich)
+### 2.2 Vollständigkeit & Konservativität (verbindlich)
 - **Keine „craftbar/complete“-Aussagen** bei `completeness != complete`.
 - Bei `partial/unknown`: nur **What-if**-Aussagen, mit sichtbarem Hinweis.
 - Jede Empfehlung muss sichtbare Gründe (Regeln + genutzte Daten) liefern.
 
 ---
 
-## 2) TEIL A – Constructed Advisor
+## 3) TEIL A – Constructed Advisor
 
 ### A1) Wildcard-Nutzung (C/U/R/M)
 
@@ -148,7 +172,7 @@
 
 ---
 
-## 3) TEIL B – Jump In („Leg los!“) Advisor
+## 4) TEIL B – Jump In („Leg los!“) Advisor
 
 ### B1) Eingabedaten
 - Jump-In Pool-Listen (Half-Decks mit vollständigen Kartenlisten + Rarity). [BELEGT]
@@ -190,13 +214,15 @@
 
 ---
 
-## 4) TEIL C – GUI & UX (Web / iPad)
+## 5) TEIL C – GUI & UX (Web / iPad)
 
 ### C1) Gemeinsames GUI-Konzept
 - **Home:** „Was soll ich jetzt tun?“ → 1 primärer CTA.
 - **Zwei Hauptbereiche:**
   - **Constructed Advisor** (Decks/Wildcards/Gold)
   - **Jump-In Advisor**
+- **Optionaler, klar getrennter Bereich:**
+  - **Draft Training (Offline-Simulator)** – kein Kernwert, kein Upsell-Druck
 - **Kernmuster:**
   - Ampel-Badges (grün/gelb/rot)
   - Icons für Rarity, Gold, Format
@@ -211,6 +237,7 @@
 | Multi-Deck-Vergleich | ❌ | ✅ | „Premium Badge“ klein + Tooltip |
 | Jump-In Top-3 Empfehlungen | ✅ | ✅ | Basis-Funktion |
 | Jump-In Vollanalyse/Filter | ❌ | ✅ | Hinweis „Mehr Optionen in Premium“ |
+| Draft Training (Offline-Simulator) | ✅ | ✅ | Optionaler Modus, klar getrennt |
 | Verlauf/History (local) | ❌ | ✅ | Premium Badge |
 
 ### C3) Sofortige Handlung
@@ -219,16 +246,16 @@
 
 ---
 
-## 5) Free / Trial / Premium – Feature-Grenzen (verbindlich)
+## 6) Free / Trial / Premium – Feature-Grenzen (verbindlich)
 
-### 5.1 Global
+### 6.1 Global
 | Ebene | Zeit / Lizenz | Kernprinzip |
 |---|---|---|
 | **Free** | dauerhaft | Grundfunktionalität ohne Paywall |
 | **Trial (7 Tage)** | volle Features | Voller Umfang zum Ausprobieren |
 | **Premium Unlock** | einmalig | Offline nutzbar, Lizenzprüfung nur bei Updates |
 
-### 5.2 Feature-Tabelle (Constructed vs Jump In)
+### 6.2 Feature-Tabelle (Constructed vs Jump In vs Draft Training)
 | Bereich | Free | 7-Tage Trial | Premium Unlock |
 |---|---|---|---|
 | Constructed – Completion | Basis-Score + Missing Cards | Voll | Voll |
@@ -239,28 +266,56 @@
 | Jump-In – Top-3 Empfehlungen | ✅ | ✅ | ✅ |
 | Jump-In – Vollanalyse + Filter | ❌ | ✅ | ✅ |
 | Jump-In – Lernwert/Rotation-Details | ❌ | ✅ | ✅ |
+| Draft Training – Offline-Simulator | ✅ | ✅ | ✅ |
+| Draft Training – Szenarien/Übungsdecks | ✅ | ✅ | ✅ |
 | Meta-Signals (optional, import/connector) | ❌ | ✅ | ✅ |
 
 ---
 
-## 6) Forschungsnotizen & Unsicherheiten
+## 7) TEIL D – Draft Training (optional, klar getrennt)
 
-### 6.1 Gold/Gems – typische Open-Source-Ansätze
+### D1) Ziel & Scope (verbindlich)
+- **Draft ist kein Kernwert**, kein Premium-Zwang.
+- **Kein Meta-/Winrate-Advisor**, keine Cloud-Statistiken.
+- **Offline Draft-Training / Simulator**:
+  - Karten lesen lernen
+  - Synergien erkennen
+  - Entscheidungsfindung trainieren
+- Vergleichbare Positionierung: Draft-Training wie „DraftSensei“-Stil (ohne globale Daten).
+
+### D2) Abgrenzung zum Constructed Advisor
+- **Eigenständiger Modus** im UI, klar getrennt von Constructed/Jump-In.
+- **Keine** Priorisierung in Onboarding („nicht in Draft drängen“).
+- Empfehlungen sind **Lern-/Übungsorientiert**, nicht Meta-optimiert.
+
+---
+
+## 8) Nicht-Ziele & explizite Abgrenzungen
+- **Kein Draft-Meta-Advisor** (keine globalen Winrates/Pickrates).
+- **Keine veralteten Formate** (z. B. Explorer).
+- **Kein Format-Zwang**: Priorisierung durch User, nicht durch System.
+- **Keine Cloud-Pflicht** für Kernfunktionen (Constructed/Jump-In/Draft Training).
+
+---
+
+## 9) Forschungsnotizen & Unsicherheiten
+
+### 9.1 Gold/Gems – typische Open-Source-Ansätze
 - **[BELEGT]** MTGA Tracker verarbeitet `Inventory`-Events und erkennt Inventory-Changes inkl. Gold/Gems (aus Logs), mit optionalem Upload. Quelle: [mtgatracker/mtgatracker](https://github.com/mtgatracker/mtgatracker) (`legal/privacy.md`, `app/dispatchers.py`).
 - **[BEST PRACTICE]** Bei unsicheren Daten: Gold/Gems als optional behandeln + Szenario-Modus anbieten.
 - **[ANNAHME]** Vollständige, zuverlässige Gold/Gems-Daten sind nicht garantiert; UI muss „unbekannt“ tolerieren.
 
-### 6.2 Jump-In Pools – typische Datenhaltung
+### 9.2 Jump-In Pools – typische Datenhaltung
 - **[BELEGT]** Open-Source JSON-Datasets für Jump-In-Pakete existieren (z. B. `mtg-jump-in` veröffentlicht strukturierte Packet-Listen). Quelle: [bluelovers/mtg-jump-in](https://github.com/bluelovers/mtg-jump-in).
 
-### 6.3 Meta-Daten – Import vs Connector
+### 9.3 Meta-Daten – Import vs Connector
 - **[BELEGT]** Meta-Signale sind optional und sollen als Offline-Import + optionaler Connector modelliert werden (Phase-2 Leitplanke). Quelle: `docs/ai-context.md`.
 - **[BEST PRACTICE]** Format-gebundene Meta-Snapshots in versionierten JSON-Dateien (`meta_signals.json`) mit klarer Quelle/Datum.
 - **[ANNAHME]** Falls Meta fehlt: Advisor nutzt rein deterministische Regeln (Degradationsmodus).
 
 ---
 
-## 7) Implikationen für Web-App vs iOS-App
+## 10) Implikationen für Web-App vs iOS-App
 
 ### Identisch (Kern)
 - Datenschemata, Heuristiken, Scores, Erklärlogik.
