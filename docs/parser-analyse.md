@@ -1,6 +1,6 @@
 # Parser-Analyse: MTGA Collection-Rekonstruktion aus Logs
 
-Hinweis: Offene Fragen für die fachliche Abklärung sind in `docs/Frank.md` gesammelt.
+Hinweis: Offene Fragen werden als **unknown/offen** markiert; keine stillen Annahmen.
 
 ## Schritt 0 – Kontext-Validierung (kurz)
 

@@ -4,6 +4,18 @@
 - Lokales, deterministisches Tool für sammlungsbewusste Deck-Beratung ohne Cloud/LLM im Kernpfad.
 - Phase-1-Kernnutzen: verlässliche `collection.json`-Extraktion aus MTGA-Logs als Basis für spätere Empfehlungen.
 
+## Dokument-Hierarchie & Zweck
+**Vorrangregel:** `ai-context.md` > Phase-Dokumente > Schemas > Analysen.
+
+- `docs/ai-context.md`: Normativer Projektkontext, Prioritäten und verbindliche Leitplanken.
+- `docs/phase-1-collection-export.md`: Phase-1 Scope & Anforderungen für die Log-basierte Sammlungsextraktion.
+- `docs/phase-2-advisor-zielbild.md`: Normatives Zielbild für den Advisor (Phase 2).
+- `docs/data-schemas.md`: Beispielhafte Datenformen; muss mit `ai-context.md` konsistent bleiben.
+- `docs/roadmap.md`: Grober Phasenplan mit Prioritäten.
+- `docs/dev-setup.md`: Entwicklungsprinzipien und lokale Setup-Entscheidungen.
+- `docs/parser-analyse.md`: Informative Analyse externer Parser (nicht normativ).
+- `docs/source-analysis.md`: Informative Forschungsfragen & Quellenanalyse (nicht normativ).
+
 ## Phase-1 Scope (konservativ)
 - **Nur** Log-basierte Sammlungsextraktion + strukturierter Export (`collection.json`).
 - Kein Live-Overlay, kein Dauer-Daemon, keine externen APIs im Kernpfad.
