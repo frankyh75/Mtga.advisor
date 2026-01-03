@@ -38,6 +38,8 @@ class ParsedEvent:
 class CollectionReport:
     cards: dict[int, int] | None
     wildcards: dict[str, int] | None
+    wildcards_baseline_present: bool
+    pending_wildcard_deltas: dict[str, int] | None
     as_of: str | None
     snapshot_seen: bool
     completeness: dict[str, str]
@@ -105,10 +107,24 @@ def extract_json(chunks: Iterable[LogChunk]) -> Iterator[ParsedEvent]:
 def dispatch(events: Iterable[ParsedEvent]) -> CollectionReport:
     cards: dict[int, int] | None = None
     wildcards: dict[str, int] | None = None
+    wildcards_baseline_present = False
+    pending_wildcard_deltas: dict[str, int] | None = None
     snapshot_seen = False
     as_of: str | None = None
     evidence: list[str] = []
     warnings: list[str] = []
+
+    def _accumulate_wildcard_deltas(
+        target: dict[str, int] | None,
+        deltas: dict,
+    ) -> dict[str, int]:
+        if target is None:
+            target = {}
+        for key, value in deltas.items():
+            if not isinstance(value, int):
+                continue
+            target[key] = target.get(key, 0) + value
+        return target
 
     for event in events:
         if event.data is None:
@@ -129,14 +145,26 @@ def dispatch(events: Iterable[ParsedEvent]) -> CollectionReport:
                     for key, value in snapshot_wildcards.items()
                     if isinstance(value, int)
                 }
+                wildcards_baseline_present = True
+                if pending_wildcard_deltas:
+                    wildcards = _accumulate_wildcard_deltas(wildcards, pending_wildcard_deltas)
+                    pending_wildcard_deltas = None
             else:
                 wildcards = None
+                wildcards_baseline_present = False
             as_of = event.data.get("asOf") or event.timestamp
             continue
 
         if event.event == "Inventory.Updated":
             if not snapshot_seen:
                 warnings.append("delta-before-snapshot")
+                delta = event.data.get("delta", {})
+                delta_wildcards = delta.get("wildcards")
+                if isinstance(delta_wildcards, dict):
+                    pending_wildcard_deltas = _accumulate_wildcard_deltas(
+                        pending_wildcard_deltas,
+                        delta_wildcards,
+                    )
                 continue
             evidence.append(event.event)
             delta = event.data.get("delta", {})
@@ -150,12 +178,13 @@ def dispatch(events: Iterable[ParsedEvent]) -> CollectionReport:
                 cards[card_id] = cards.get(card_id, 0) + quantity
             delta_wildcards = delta.get("wildcards")
             if isinstance(delta_wildcards, dict):
-                if wildcards is None:
-                    wildcards = {}
-                for key, value in delta_wildcards.items():
-                    if not isinstance(value, int):
-                        continue
-                    wildcards[key] = wildcards.get(key, 0) + value
+                if wildcards_baseline_present and wildcards is not None:
+                    wildcards = _accumulate_wildcard_deltas(wildcards, delta_wildcards)
+                else:
+                    pending_wildcard_deltas = _accumulate_wildcard_deltas(
+                        pending_wildcard_deltas,
+                        delta_wildcards,
+                    )
             as_of = event.timestamp or as_of
 
     if not snapshot_seen:
@@ -163,6 +192,8 @@ def dispatch(events: Iterable[ParsedEvent]) -> CollectionReport:
         return CollectionReport(
             cards=None,
             wildcards=None,
+            wildcards_baseline_present=False,
+            pending_wildcard_deltas=pending_wildcard_deltas,
             as_of=as_of,
             snapshot_seen=False,
             completeness=completeness,
@@ -171,7 +202,7 @@ def dispatch(events: Iterable[ParsedEvent]) -> CollectionReport:
         )
 
     cards_completeness = "complete" if cards is not None else "unknown"
-    wildcards_completeness = "complete" if wildcards is not None else "unknown"
+    wildcards_completeness = "complete" if wildcards_baseline_present else "unknown"
     completeness = {
         "cards": cards_completeness,
         "wildcards": wildcards_completeness,
@@ -180,6 +211,8 @@ def dispatch(events: Iterable[ParsedEvent]) -> CollectionReport:
     return CollectionReport(
         cards=cards,
         wildcards=wildcards,
+        wildcards_baseline_present=wildcards_baseline_present,
+        pending_wildcard_deltas=pending_wildcard_deltas,
         as_of=as_of,
         snapshot_seen=True,
         completeness=completeness,
