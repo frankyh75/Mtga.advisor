@@ -1,0 +1,29 @@
+{
+  "cards": {
+    "100001": 2,
+    "100002": 2,
+    "100003": 4,
+    "100004": 2
+  },
+  "diagnostics": {
+    "completeness": {
+      "cards": "complete",
+      "source": "complete",
+      "wildcards": "complete"
+    },
+    "evidence": [
+      "PlayerInventory.GetPlayerCardsV3",
+      "PlayerInventory.GetPlayerCardsV3",
+      "Inventory.Updated"
+    ],
+    "warnings": []
+  },
+  "schema": "collection.v1",
+  "source": "local-logs",
+  "wildcards": {
+    "common": 12,
+    "mythic": 1,
+    "rare": 2,
+    "uncommon": 8
+  }
+}

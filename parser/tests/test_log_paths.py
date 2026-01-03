@@ -9,6 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from parser.log_paths import (  # noqa: E402
     MissingLogsError,
+    OS_MATRIX,
     PathConfig,
     build_strategies,
     build_validation_tasks,
@@ -39,3 +40,8 @@ def test_validation_tasks_for_unresolved_strategies(tmp_path: Path) -> None:
     task_ids = {task.task_id for task in tasks}
     assert "validate-windows-standalone" in task_ids
     assert "validate-windows-steam" in task_ids
+
+
+def test_os_matrix_maps_platform_variants() -> None:
+    assert OS_MATRIX["windows"] == ("standalone", "steam")
+    assert OS_MATRIX["macos"] == ("standalone", "steam")
