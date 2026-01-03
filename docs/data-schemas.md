@@ -5,28 +5,31 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
 ## collection.json
 ```json
 {
-  "schema_version": "0.1",
-  "exported_at": "2025-01-01T12:00:00Z",
+  "schema": "collection.v1",
+  "asOf": "2025-01-01T12:00:00Z",
   "source": {
-    "type": "mtga_log",
-    "path": "C:/Users/.../Player.log",
-    "platform": "windows"
+    "log": "C:/Users/.../Player.log",
+    "usedPrevLog": true,
+    "detailedLogs": "true|false|unknown",
+    "confidence": "high|medium|low"
   },
-  "cards": [
-    {
-      "arena_id": 12345,
-      "name": "Lightning Strike",
-      "set": "M21",
-      "rarity": "uncommon",
-      "owned": 4,
-      "finish": "nonfoil"
-    }
-  ],
+  "collection": {
+    "completeness": "complete|partial|unknown"
+  },
+  "completeness": {
+    "cards": "complete|partial|unknown",
+    "wildcards": "complete|partial|unknown",
+    "source": "complete|partial|unknown"
+  },
+  "cards": { "12345": 2, "67890": 1 },
   "wildcards": {
     "common": 12,
-    "uncommon": 8,
+    "uncommon": 9,
     "rare": 4,
-    "mythic": 1
+    "mythic": 1,
+    "asOf": "2025-01-01T12:00:00Z",
+    "completeness": "complete|partial|unknown",
+    "evidence": ["<event-type>"]
   }
 }
 ```
