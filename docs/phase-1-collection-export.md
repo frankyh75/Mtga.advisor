@@ -34,6 +34,8 @@
 - **Considered log files**
   - MTGA player log(s) (e.g., `Player.log`), including rotated or archived versions when present.
   - Any MTGA log file explicitly documented to contain collection inventory events.
+  - macOS Standardpfad: `~/Library/Logs/Wizards of the Coast/MTGA/` (enthält `Player.log` und `Player-prev.log`).
+  - Windows LocalLow (Standalone): `%USERPROFILE%/AppData/LocalLow/Wizards Of The Coast/MTGA/` (enthält `Player.log` und `Player-prev.log`).
 - **Minimal required records**
   - A collection snapshot event or equivalent record containing card identifiers and owned quantities.
   - If only deltas are present, a complete baseline event is required to avoid reconstruction errors.

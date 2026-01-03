@@ -17,6 +17,12 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - `mtga-export collection`: Exportiert die lokale MTGA-Sammlung aus Logs in die definierten Output-Artefakte.
 - `mtga-export serve`: Startet einen lokalen Server für die Ausgabe-Artefakte (nur lokal, ohne Online-Services).
 
+## Nutzung (Lokal)
+- Sammlung exportieren (Auto-Discovery der Logs auf macOS/Windows): `python -m cli.main collection --output out`
+- Explizite Log-Pfade angeben (falls Auto-Discovery scheitert): `python -m cli.main collection --log /pfad/zu/Player.log --log /pfad/zu/Player-prev.log --output out`
+- macOS Standardpfad: `~/Library/Logs/Wizards of the Coast/MTGA/`; Windows LocalLow: `%USERPROFILE%/AppData/LocalLow/Wizards Of The Coast/MTGA/`.
+- Artefakte im Browser anzeigen: `python -m cli.main serve --output out --port 8000` und dann `http://127.0.0.1:8000/` öffnen.
+
 ## Architecture Decision Records (ADRs)
 - [ADR 0001: Tech-Stack](docs/adr/0001-tech-stack.md)
 - [ADR 0002: CLI-UX](docs/adr/0002-cli-ux.md)
