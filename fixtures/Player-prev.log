@@ -1,0 +1,2 @@
+[2024-12-31T23:50:00Z] [UnityCrossThreadLogger] PlayerInventory.GetPlayerCardsV3
+[2024-12-31T23:50:00Z] [UnityCrossThreadLogger] {"playerId":"anon-0001","cards":[{"id":100001,"quantity":1},{"id":100002,"quantity":0},{"id":100003,"quantity":4}],"wildcards":{"common":10,"uncommon":8,"rare":4,"mythic":1},"asOf":"2024-12-31T23:50:00Z"}

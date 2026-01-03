@@ -1,0 +1,33 @@
+{
+  "schema": "collection.v1",
+  "asOf": "2025-01-01T12:01:12Z",
+  "source": {
+    "log": "fixtures/Player.log",
+    "usedPrevLog": true,
+    "detailedLogs": "unknown",
+    "confidence": "medium"
+  },
+  "collection": {
+    "completeness": "partial"
+  },
+  "completeness": {
+    "cards": "partial",
+    "wildcards": "partial",
+    "source": "partial"
+  },
+  "cards": {
+    "100001": 2,
+    "100002": 2,
+    "100003": 4,
+    "100004": 2
+  },
+  "wildcards": {
+    "common": 12,
+    "uncommon": 8,
+    "rare": 2,
+    "mythic": 1,
+    "asOf": "2025-01-01T12:01:12Z",
+    "completeness": "partial",
+    "evidence": ["PlayerInventory.GetPlayerCardsV3", "Inventory.Updated"]
+  }
+}
