@@ -6,29 +6,50 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
 ```json
 {
   "schema": "collection.v1",
-  "asOf": "2025-01-01T12:00:00Z",
-  "source": {
-    "log": "C:/Users/.../Player.log",
-    "usedPrevLog": true,
-    "detailedLogs": "true|false|unknown",
-    "confidence": "high|medium|low"
-  },
-  "collection": {
-    "completeness": "complete|partial|unknown"
-  },
-  "completeness": {
-    "cards": "complete|partial|unknown",
-    "wildcards": "complete|partial|unknown",
-    "source": "complete|partial|unknown"
-  },
+  "source": "local-logs",
   "cards": { "12345": 2, "67890": 1 },
   "wildcards": {
     "common": 12,
     "uncommon": 9,
     "rare": 4,
-    "mythic": 1,
-    "asOf": "2025-01-01T12:00:00Z",
-    "completeness": "complete|partial|unknown",
+    "mythic": 1
+  },
+  "diagnostics": {
+    "completeness": {
+      "cards": "complete|partial|unknown",
+      "wildcards": "complete|partial|unknown",
+      "source": "complete|partial|unknown"
+    },
+    "warnings": ["<warning-code>"],
+    "evidence": ["<event-type>"]
+  }
+}
+```
+
+## run-report.json
+```json
+{
+  "schema": "run-report.v1",
+  "runId": "run-2025-01-01T12:00:00Z",
+  "startedAt": "2025-01-01T12:00:00Z",
+  "finishedAt": "2025-01-01T12:01:12Z",
+  "source": "local-logs",
+  "logs": ["C:/Users/.../Player.log", "C:/Users/.../Player-prev.log"],
+  "outputs": {
+    "collection": "out/collection.json",
+    "rawSamples": "out/raw-samples"
+  },
+  "summary": {
+    "cardsCount": 4,
+    "wildcardsIncluded": true
+  },
+  "diagnostics": {
+    "completeness": {
+      "cards": "complete|partial|unknown",
+      "wildcards": "complete|partial|unknown",
+      "source": "complete|partial|unknown"
+    },
+    "warnings": ["<warning-code>"],
     "evidence": ["<event-type>"]
   }
 }
