@@ -1,0 +1,4 @@
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] PlayerInventory.GetPlayerCardsV3
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"playerId":"anon-0001","cards":[{"id":100001,"quantity":2},{"id":100002,"quantity":1},{"id":100003,"quantity":4}],"wildcards":{"common":12,"uncommon":8,"rare":3,"mythic":1},"asOf":"2025-01-01T12:00:00Z"}
+[2025-01-01T12:01:12Z] [UnityCrossThreadLogger] Inventory.Updated
+[2025-01-01T12:01:12Z] [UnityCrossThreadLogger] {"playerId":"anon-0001","delta":{"cards":[{"id":100002,"quantity":+1},{"id":100004,"quantity":+2}],"wildcards":{"rare":-1}},"reason":"synthetic-pack-open"}

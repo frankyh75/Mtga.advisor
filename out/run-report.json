@@ -1,0 +1,21 @@
+{
+  "schema": "run-report.v1",
+  "runId": "synthetic-2025-01-01T12-01-12Z",
+  "startedAt": "2025-01-01T12:00:00Z",
+  "finishedAt": "2025-01-01T12:01:12Z",
+  "source": "local-logs",
+  "logs": [
+    "fixtures/Player.log",
+    "fixtures/Player-prev.log",
+    "fixtures/output_log.txt"
+  ],
+  "results": {
+    "collectionExport": "out/collection.json",
+    "cardsCount": 4,
+    "wildcardsIncluded": true
+  },
+  "warnings": [
+    "Fixtures are synthetic and do not represent real player data.",
+    "output_log.txt is best-effort and not authoritative for completeness."
+  ]
+}

@@ -1,0 +1,2 @@
+[2025-01-01T12:02:30Z] [INFO] (OutputLog) Synthetic telemetry marker
+[2025-01-01T12:02:30Z] [INFO] (OutputLog) {"event":"BestEffort","detail":"Not authoritative for completeness"}
