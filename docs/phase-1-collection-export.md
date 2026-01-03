@@ -59,6 +59,32 @@
   - If a card appears multiple times in logs, the latest complete snapshot is authoritative.
   - If only partial data is available, `owned` may be lower bound and must be flagged.
 
+## UI Sketches (Phase 1)
+**JSON-View: Collection/Report**
+- **Page goal**: Human-readable view of the exported `collection.json`.
+- **Primary content**
+  - Read-only JSON viewer with collapsible nodes.
+  - Header showing `generatedAt`, `source`, and snapshot timestamp (if available).
+  - Summary counts: total cards tracked, total owned copies, number of unknown/partial entries.
+- **Key interactions**
+  - Search/filter by card ID.
+  - Toggle between raw JSON and formatted view.
+  - Copy/export button for the raw JSON payload.
+
+**Warnings/Completeness**
+- **Page goal**: Explain export quality and any limitations.
+- **Primary content**
+  - Status banner: Complete / Partial / Stale / Failed.
+  - List of warnings with timestamps (e.g., missing logs, stale snapshot).
+  - “What was read” list of log file paths and snapshot time used.
+- **Key interactions**
+  - Expandable details for each warning (reason, impacted data).
+  - Guidance actions (e.g., “Launch MTGA and retry”).
+
+## Phase 1 Data Restrictions
+- **No images**: Phase 1 does not include card art, icons, or any other images.
+- **No external sources**: Phase 1 does not call external APIs, websites, or third-party data sources.
+
 ## Failure Modes
 - **Missing logs**
   - Surface: “No MTGA log files found. Launch MTGA and retry.”
