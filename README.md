@@ -10,7 +10,12 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 ## Scope-Lock (Phase 0/1)
 - **Phase 0:** Planung, Quellenanalyse, und Festlegung der technischen Richtung. Kein produktiver Code erforderlich.
 - **Phase 1:** Lokaler, deterministischer CLI-Export der MTGA-Sammlung aus Logs. Keine Online-Services, keine Meta-Logik, keine UI.
+- **Explizit:** Keine Advisor-Logik in Phase 0/1.
 - **Nicht in Scope:** Live-Tracking, Hintergrunddienste, externe Accounts, oder Meta-basierte Empfehlungen.
+
+## CLI-Kommandos
+- `mtga-export collection`: Exportiert die lokale MTGA-Sammlung aus Logs in die definierten Output-Artefakte.
+- `mtga-export serve`: Startet einen lokalen Server für die Ausgabe-Artefakte (nur lokal, ohne Online-Services).
 
 ## Architecture Decision Records (ADRs)
 - [ADR 0001: Tech-Stack](docs/adr/0001-tech-stack.md)
