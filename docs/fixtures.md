@@ -11,4 +11,4 @@ Diese Fixtures dienen ausschließlich als synthetische Beispiele für lokale MTG
 ## Annahmen
 - **Snapshot-first-Logik:** `fixtures/Player.log` enthält einen Snapshot (`PlayerInventory.GetPlayerCardsV3`), an den eine synthetische Delta-Aktualisierung angelehnt ist.
 - **Rotation:** `fixtures/Player-prev.log` repräsentiert einen älteren Snapshot, um Log-Rotation zu simulieren.
-- **Exports:** `out/collection.json` und `out/run-report.json` sind Beispielausgaben, die nur Form und Felder illustrieren; sie sind keine formale Spezifikation.
+- **Exports:** `out/collection.json`, `out/run-report.json` und `out/raw-samples/` sind Beispielausgaben, die nur Form und Felder illustrieren; sie sind keine formale Spezifikation.

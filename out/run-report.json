@@ -1,21 +1,32 @@
 {
-  "schema": "run-report.v1",
-  "runId": "synthetic-2025-01-01T12-01-12Z",
-  "startedAt": "2025-01-01T12:00:00Z",
+  "diagnostics": {
+    "completeness": {
+      "cards": "complete",
+      "source": "complete",
+      "wildcards": "complete"
+    },
+    "evidence": [
+      "PlayerInventory.GetPlayerCardsV3",
+      "Inventory.Updated"
+    ],
+    "warnings": []
+  },
   "finishedAt": "2025-01-01T12:01:12Z",
-  "source": "local-logs",
   "logs": [
-    "fixtures/Player.log",
     "fixtures/Player-prev.log",
+    "fixtures/Player.log",
     "fixtures/output_log.txt"
   ],
-  "results": {
-    "collectionExport": "out/collection.json",
+  "outputs": {
+    "collection": "out/collection.json",
+    "rawSamples": "out/raw-samples"
+  },
+  "runId": "run-2025-01-01T12:00:00Z",
+  "schema": "run-report.v1",
+  "source": "local-logs",
+  "startedAt": "2025-01-01T12:00:00Z",
+  "summary": {
     "cardsCount": 4,
     "wildcardsIncluded": true
-  },
-  "warnings": [
-    "Fixtures are synthetic and do not represent real player data.",
-    "output_log.txt is best-effort and not authoritative for completeness."
-  ]
+  }
 }

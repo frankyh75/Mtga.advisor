@@ -43,12 +43,15 @@
   - Card metadata (names, images, rarities) unless present in the same collection record.
 
 ## Output Data
-- **Output file**: `collection.json`
-- **Shape**
+- **Output files**: `collection.json`, `run-report.json`, `raw-samples/`
+- **Shape (`collection.json`)**
   - Top-level object with:
-    - `generatedAt` (ISO 8601 timestamp of export)
+    - `schema` (versioned identifier)
     - `source` (string; e.g., `local-logs`)
     - `cards` (object keyed by Arena-native card IDs)
+    - `diagnostics` (completeness, warnings, evidence)
+- **Shape (`run-report.json`)**
+  - Contains run timestamps, log file list, output paths, and a diagnostics summary.
 - **Card identifier strategy**
   - Use Arena-native card identifiers as they appear in logs.
   - Do not attempt to map to external IDs in Phase 1.
@@ -64,7 +67,7 @@
 - **Page goal**: Human-readable view of the exported `collection.json`.
 - **Primary content**
   - Read-only JSON viewer with collapsible nodes.
-  - Header showing `generatedAt`, `source`, and snapshot timestamp (if available).
+  - Header showing `source` and any snapshot timestamp referenced in diagnostics (if available).
   - Summary counts: total cards tracked, total owned copies, number of unknown/partial entries.
 - **Key interactions**
   - Search/filter by card ID.
