@@ -1,0 +1,23 @@
+{
+  "data": {
+    "delta": {
+      "cards": [
+        {
+          "id": 100002,
+          "quantity": 1
+        },
+        {
+          "id": 100004,
+          "quantity": 2
+        }
+      ],
+      "wildcards": {
+        "rare": -1
+      }
+    },
+    "playerId": "anon-0001",
+    "reason": "synthetic-pack-open"
+  },
+  "event": "Inventory.Updated",
+  "path": "fixtures/Player.log"
+}

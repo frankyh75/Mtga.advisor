@@ -1,0 +1,32 @@
+{
+  "diagnostics": {
+    "completeness": {
+      "cards": "complete",
+      "source": "complete",
+      "wildcards": "complete"
+    },
+    "evidence": [
+      "PlayerInventory.GetPlayerCardsV3",
+      "PlayerInventory.GetPlayerCardsV3",
+      "Inventory.Updated"
+    ],
+    "warnings": []
+  },
+  "finishedAt": "2025-01-02T00:00:05Z",
+  "logs": [
+    "fixtures/Player-prev.log",
+    "fixtures/Player.log"
+  ],
+  "outputs": {
+    "collection": "<collection-path>",
+    "rawSamples": "<raw-samples-path>"
+  },
+  "runId": "run-2025-01-02T00:00:00Z",
+  "schema": "run-report.v1",
+  "source": "local-logs",
+  "startedAt": "2025-01-02T00:00:00Z",
+  "summary": {
+    "cardsCount": 4,
+    "wildcardsIncluded": true
+  }
+}

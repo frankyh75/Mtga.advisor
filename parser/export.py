@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import re
 from typing import Iterable
 
 from .pipeline import ParsedEvent, chunk, dispatch, extract_json, ingest
+
+STALE_SNAPSHOT_DAYS = 7
+STALE_SNAPSHOT_WARNING = "stale-snapshot"
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ def export_collection(paths: Iterable[Path], output_dir: Path) -> ExportPaths:
     started_at = _iso_now()
     events = list(extract_json(chunk(ingest(sorted_paths))))
     report = dispatch(events)
+    _apply_staleness_warning(report, started_at)
 
     _write_raw_samples(raw_samples_dir, events)
     collection_path = output_dir / "collection.json"
@@ -129,3 +133,22 @@ def _slug(value: str) -> str:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _apply_staleness_warning(report, reference_time: str) -> None:
+    if not report.snapshot_seen or not report.as_of:
+        return
+    reference_dt = _parse_iso_timestamp(reference_time)
+    snapshot_dt = _parse_iso_timestamp(report.as_of)
+    if reference_dt is None or snapshot_dt is None:
+        return
+    if reference_dt - snapshot_dt > timedelta(days=STALE_SNAPSHOT_DAYS):
+        if STALE_SNAPSHOT_WARNING not in report.warnings:
+            report.warnings.append(STALE_SNAPSHOT_WARNING)

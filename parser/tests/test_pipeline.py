@@ -71,3 +71,22 @@ def test_snapshot_without_wildcards_keeps_unknown_after_delta(tmp_path: Path) ->
     assert report.wildcards is None
     assert report.wildcards_baseline_present is False
     assert report.pending_wildcard_deltas == {"rare": -1}
+
+
+def test_no_logs_returns_unknown_completeness() -> None:
+    report = parse_collection([])
+
+    assert report.snapshot_seen is False
+    assert report.cards is None
+    assert report.wildcards is None
+    assert report.completeness["cards"] == "unknown"
+
+
+def test_malformed_json_is_ignored(tmp_path: Path) -> None:
+    log = """[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] PlayerInventory.GetPlayerCardsV3
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"playerId":"anon","cards":[{"id":100001,"quantity":2}
+"""
+    report = parse_collection([_write_log(tmp_path, log)])
+
+    assert report.snapshot_seen is False
+    assert report.cards is None

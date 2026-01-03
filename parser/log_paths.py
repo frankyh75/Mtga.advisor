@@ -57,6 +57,11 @@ MACOS_LOGS_HINT = (
 )
 STEAM_HINT = "Setze den Steam-Userdata-Pfad in der Konfiguration oder prüfe den Steam-Installationspfad."
 
+OS_MATRIX = {
+    "windows": ("standalone", "steam"),
+    "macos": ("standalone", "steam"),
+}
+
 
 def detect_platform() -> str:
     import sys

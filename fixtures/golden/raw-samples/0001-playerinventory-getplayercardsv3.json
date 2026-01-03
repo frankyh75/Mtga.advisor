@@ -1,0 +1,28 @@
+{
+  "data": {
+    "asOf": "2024-12-31T23:50:00Z",
+    "cards": [
+      {
+        "id": 100001,
+        "quantity": 1
+      },
+      {
+        "id": 100002,
+        "quantity": 0
+      },
+      {
+        "id": 100003,
+        "quantity": 4
+      }
+    ],
+    "playerId": "anon-0001",
+    "wildcards": {
+      "common": 10,
+      "mythic": 1,
+      "rare": 4,
+      "uncommon": 8
+    }
+  },
+  "event": "PlayerInventory.GetPlayerCardsV3",
+  "path": "fixtures/Player-prev.log"
+}
