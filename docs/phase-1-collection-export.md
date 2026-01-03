@@ -24,6 +24,7 @@
 - Windows and macOS are expected to provide local log files.
 - iOS/Android logs are out of scope (no local log access assumption).
 - Path discovery may be OS-specific; unknown platforms should fail with a clear message.
+- macOS log path (confirmed): `~/Library/Logs/Wizards of the Coast/MTGA/`.
 
 **About data completeness and freshness**
 - Export is only as accurate as the most recent log data available.
