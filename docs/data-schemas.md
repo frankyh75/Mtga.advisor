@@ -15,6 +15,7 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
     "mythic": 1
   },
   "diagnostics": {
+    "collectionCompleteness": "complete|partial|unknown",
     "completeness": {
       "cards": "complete|partial|unknown",
       "wildcards": "complete|partial|unknown",
@@ -22,7 +23,19 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
     },
     "warnings": ["<warning-code>"],
     "evidence": ["<event-type>"]
-  }
+  },
+  "cardsSeenInDecks": [12345, 67890],
+  "decks": [
+    {
+      "id": "deck-uuid",
+      "name": "Mono-Red Aggro",
+      "format": "Standard",
+      "mainDeck": [{ "cardId": 12345, "quantity": 4 }],
+      "sideboard": [{ "cardId": 67890, "quantity": 2 }],
+      "commandZone": [],
+      "companions": []
+    }
+  ]
 }
 ```
 
@@ -35,6 +48,13 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
   "finishedAt": "2025-01-01T12:01:12Z",
   "source": "local-logs",
   "logs": ["C:/Users/.../Player.log", "C:/Users/.../Player-prev.log"],
+  "logMetadata": [
+    {
+      "path": "C:/Users/.../Player.log",
+      "sizeBytes": 123456,
+      "mtime": "2025-01-01T12:00:00Z"
+    }
+  ],
   "outputs": {
     "collection": "out/collection.json",
     "rawSamples": "out/raw-samples"
@@ -44,6 +64,7 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
     "wildcardsIncluded": true
   },
   "diagnostics": {
+    "collectionCompleteness": "complete|partial|unknown",
     "completeness": {
       "cards": "complete|partial|unknown",
       "wildcards": "complete|partial|unknown",

@@ -59,6 +59,7 @@
 - Zwei Quellen: Offline-Import + optionaler Connector (monetarisierbar).
 - Beide normalisieren in ein gemeinsames internes Format (`meta_signals.json` oder DB-Entities).
 - Advisor funktioniert deterministisch auch ohne Meta (degradierter Modus).
+- Deck-Analyse + CardDB Roadmap: `docs/deck-analysis-roadmap.md`.
 
 ## `collection.json` (Phase-1 Kernartefakt)
 - Enthält: `schema`, `asOf`, `source`, `collection.completeness`, `completeness` (cards/wildcards/source), `cards`, `wildcards`.

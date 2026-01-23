@@ -40,6 +40,7 @@ def test_export_collection_matches_golden_samples(tmp_path: Path, monkeypatch: p
         _fixture_path("golden", "run-report.json").read_text(encoding="utf-8")
     )
     run_report_golden["outputs"] = run_report_actual["outputs"]
+    run_report_golden["logMetadata"] = run_report_actual["logMetadata"]
     assert run_report_actual == run_report_golden
 
     golden_samples = _fixture_path("golden", "raw-samples")
