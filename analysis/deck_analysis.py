@@ -245,6 +245,38 @@ def _build_synergies(stats: dict) -> list[dict]:
                 "reason": "Enchantment payoffs indicate a potential enchantment synergy core.",
             }
         )
+    if stats["token_maker"] >= 6:
+        synergies.append(
+            {
+                "id": "tokens.v1",
+                "score": _score(stats["token_maker"], stats["total_cards"]),
+                "reason": "Token makers are common; token synergies may be strong.",
+            }
+        )
+    if stats["lifegain_payoff"] >= 3:
+        synergies.append(
+            {
+                "id": "lifegain.v1",
+                "score": _score(stats["lifegain_payoff"], stats["total_cards"]),
+                "reason": "Lifegain payoffs appear in the list; lifegain synergies may be relevant.",
+            }
+        )
+    if stats["graveyard_synergy"] >= 4:
+        synergies.append(
+            {
+                "id": "graveyard.v1",
+                "score": _score(stats["graveyard_synergy"], stats["total_cards"]),
+                "reason": "Multiple graveyard signals detected; consider graveyard-centric lines.",
+            }
+        )
+    if stats["sweeper"] >= 2:
+        synergies.append(
+            {
+                "id": "sweeper.v1",
+                "score": _score(stats["sweeper"], stats["total_cards"]),
+                "reason": "Board wipes present; deck likely plays a control posture.",
+            }
+        )
     return synergies
 
 
@@ -317,6 +349,15 @@ def _build_recommendations(stats: dict) -> list[dict]:
                 "reason": "Card draw density is low; add draw effects for consistency.",
                 "confidence": "low",
                 "id": "card-draw-low.v1",
+            }
+        )
+    if stats["ramp"] / total < 0.04:
+        recs.append(
+            {
+                "id": "ramp-low.v1",
+                "type": "add",
+                "reason": "Ramp is scarce; consider adding mana acceleration.",
+                "confidence": "low",
             }
         )
     nonlands = stats["nonlands"] or 1

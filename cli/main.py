@@ -212,6 +212,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Optional: nur ein spezifisches Deck analysieren (DeckId).",
     )
+    analysis_cmd.add_argument(
+        "--include-saved",
+        action="store_true",
+        help="Saved Decks zusaetzlich zu Last-Played analysieren.",
+    )
 
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
     serve.add_argument("--host", default=DEFAULT_HOST, help="Host (Standard: 127.0.0.1).")
@@ -358,7 +363,14 @@ def _run_deck_analysis(args: argparse.Namespace) -> int:
         return 1
     log_paths = resolved or []
     report = parse_collection(log_paths)
-    decks = [deck for deck in (report.decks or []) if deck.get("source") == "last_played"]
+    if args.include_saved:
+        decks = [
+            deck
+            for deck in (report.decks or [])
+            if deck.get("source") in ("last_played", "saved")
+        ]
+    else:
+        decks = [deck for deck in (report.decks or []) if deck.get("source") == "last_played"]
     if args.deck_id:
         decks = [deck for deck in decks if deck.get("id") == args.deck_id]
     if not decks:

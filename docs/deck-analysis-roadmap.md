@@ -30,6 +30,7 @@ This document captures the architecture plan and roadmap to reach **concrete dec
   - `synergies[]` and `recommendations[]`
 - Optional: `deck-analysis-summary.json` (index of analyzed decks)
 - CLI: `mtga-export deck-analysis` writes outputs to `out/deck-analysis/` and `out/deck-analysis-summary.json`.
+- Option: `--include-saved` includes Saved Decks in addition to Last Played.
 - CLI: `mtga-export carddb import` and `mtga-export carddb info` manage local SQLite CardDB.
 - Optional mapping: `data/mtga_to_scryfall.csv` (cardId,scryfall_id,oracle_id) for fallback mapping.
 

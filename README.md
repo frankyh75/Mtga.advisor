@@ -24,7 +24,7 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - `mtga-export decks`: Zeigt eine kurze Deckvorschau aus Logs (Quelle, Format, Kartenanzahl).
 - `mtga-export carddb import`: Importiert eine lokale Scryfall Bulk JSON Datei in SQLite.
 - `mtga-export carddb info`: Zeigt CardDB Statistiken und Metadaten.
-- `mtga-export deck-analysis`: Erzeugt Analyse fuer Last-Played Decks in `out/deck-analysis/*.json` und `out/deck-analysis-summary.json`.
+- `mtga-export deck-analysis`: Erzeugt Analyse fuer Last-Played Decks in `out/deck-analysis/*.json` und `out/deck-analysis-summary.json` (mit `--include-saved` optional Saved Decks).
 - `mtga-export serve`: Startet einen lokalen Server für die Ausgabe-Artefakte (nur lokal, ohne Online-Services).
 
 ## Nutzung (Lokal)
