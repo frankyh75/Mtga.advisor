@@ -23,12 +23,13 @@ def export_deck_analysis(
     *,
     conn: sqlite3.Connection,
     output_dir: Path,
+    mapping: dict[int, dict[str, str]] | None = None,
 ) -> DeckAnalysisPaths:
     output_dir.mkdir(parents=True, exist_ok=True)
     deck_dir = output_dir / "deck-analysis"
     deck_dir.mkdir(parents=True, exist_ok=True)
 
-    lookup = CardLookup(conn)
+    lookup = CardLookup(conn, mapping=mapping)
     deck_files: list[Path] = []
     summary_entries: list[dict] = []
 

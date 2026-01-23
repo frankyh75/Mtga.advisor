@@ -37,3 +37,5 @@ def test_build_deck_analysis_maps_cards(tmp_path: Path) -> None:
     assert result.payload["mappingCoverage"] == 1.0
     assert result.payload["unknownCards"] == []
     assert result.payload["cards"][0]["name"] == "Test Card One"
+    assert "synergies" in result.payload
+    assert "recommendations" in result.payload

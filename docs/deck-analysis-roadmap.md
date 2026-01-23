@@ -23,7 +23,7 @@ This document captures the architecture plan and roadmap to reach **concrete dec
 - Local CardDB derived from **Scryfall Bulk Data** (offline cache).
 
 ## Outputs (New)
-- `deck-analysis.json` (per deck) with:
+- `deck-analysis.json` (per deck, **last played** decks by default) with:
   - `deckId`, `name`, `format`
   - card list with enriched fields (name, mana_cost, types, keywords, oracle_text)
   - `mappingCoverage` and `unknownCards`
@@ -31,6 +31,7 @@ This document captures the architecture plan and roadmap to reach **concrete dec
 - Optional: `deck-analysis-summary.json` (index of analyzed decks)
 - CLI: `mtga-export deck-analysis` writes outputs to `out/deck-analysis/` and `out/deck-analysis-summary.json`.
 - CLI: `mtga-export carddb import` and `mtga-export carddb info` manage local SQLite CardDB.
+- Optional mapping: `data/mtga_to_scryfall.csv` (cardId,scryfall_id,oracle_id) for fallback mapping.
 
 ### Example: deck-analysis.json
 ```json

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Sequence
 
 from parser.export import export_collection
@@ -127,6 +128,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("data/carddb/carddb.sqlite"),
         help="Pfad zur SQLite Datenbank.",
     )
+    carddb_import.add_argument(
+        "--language",
+        type=str,
+        default="en",
+        help="Sprache der Bulk Datei (Standard: en).",
+    )
+    carddb_import.add_argument(
+        "--bulk-version",
+        type=str,
+        help="Optional: Bulk-Version/Datum (z. B. 2026-01-23).",
+    )
     carddb_info = carddb_sub.add_parser("info", help="Zeigt kurze CardDB Statistiken.")
     carddb_info.add_argument(
         "--db",
@@ -182,6 +194,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/carddb/carddb.sqlite"),
         help="Pfad zur SQLite CardDB.",
+    )
+    analysis_cmd.add_argument(
+        "--mapping-csv",
+        type=Path,
+        default=Path("data/mtga_to_scryfall.csv"),
+        help="Optional: Mapping CSV (cardId,scryfall_id,oracle_id).",
     )
     analysis_cmd.add_argument(
         "--output",
@@ -296,11 +314,15 @@ def _run_carddb(args: argparse.Namespace) -> int:
             _error(f"Bulk Datei nicht gefunden: {args.input.as_posix()}")
             return 1
         conn = open_db(args.db)
+        fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        meta = {"bulk_source": "local", "language": args.language, "fetched_at": fetched_at}
+        if args.bulk_version:
+            meta["bulk_version"] = args.bulk_version
         result = import_bulk_json(
             conn,
             args.input,
             source=args.source,
-            meta={"bulk_source": "local"},
+            meta=meta,
         )
         print(
             f"CardDB importiert: {result.cards_inserted} Karten ({result.source}) -> {args.db.as_posix()}"
@@ -325,7 +347,7 @@ def _run_carddb(args: argparse.Namespace) -> int:
 
 def _run_deck_analysis(args: argparse.Namespace) -> int:
     from analysis.export import export_deck_analysis
-    from carddb import open_db
+    from carddb import load_mapping, open_db
 
     resolved, error = _resolve_logs(args)
     if error:
@@ -336,14 +358,15 @@ def _run_deck_analysis(args: argparse.Namespace) -> int:
         return 1
     log_paths = resolved or []
     report = parse_collection(log_paths)
-    decks = report.decks or []
+    decks = [deck for deck in (report.decks or []) if deck.get("source") == "last_played"]
     if args.deck_id:
         decks = [deck for deck in decks if deck.get("id") == args.deck_id]
     if not decks:
-        _error("Keine Decks gefunden.")
+        _error("Keine Last-Played Decks gefunden.")
         return 1
     conn = open_db(args.db)
-    export_paths = export_deck_analysis(decks, conn=conn, output_dir=args.output)
+    mapping = load_mapping(args.mapping_csv)
+    export_paths = export_deck_analysis(decks, conn=conn, output_dir=args.output, mapping=mapping)
     print(f"Deck-Analyse Summary: {export_paths.summary}")
     print(f"Deck-Analyse Dateien: {export_paths.deck_dir}")
     return 0

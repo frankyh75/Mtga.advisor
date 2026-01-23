@@ -5,8 +5,9 @@ import sqlite3
 
 
 class CardLookup:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, mapping: dict[int, dict[str, str]] | None = None) -> None:
         self._conn = conn
+        self._mapping = mapping or {}
 
     def lookup_arena_id(self, arena_id: int) -> dict | None:
         oracle = self._query_oracle_by_arena(arena_id)
@@ -15,6 +16,15 @@ class CardLookup:
         oracle_id = self._query_printing_oracle_id(arena_id)
         if oracle_id:
             return self._query_oracle_by_id(oracle_id)
+        mapping = self._mapping.get(arena_id, {})
+        oracle_id = mapping.get("oracle_id")
+        if oracle_id:
+            return self._query_oracle_by_id(oracle_id)
+        scryfall_id = mapping.get("scryfall_id")
+        if scryfall_id:
+            oracle_id = self._query_printing_oracle_by_scryfall(scryfall_id)
+            if oracle_id:
+                return self._query_oracle_by_id(oracle_id)
         return None
 
     def _query_oracle_by_arena(self, arena_id: int) -> dict | None:
@@ -22,7 +32,7 @@ class CardLookup:
         cursor.execute(
             """
             SELECT oracle_id, name, mana_cost, type_line, oracle_text,
-                   keywords_json, color_identity_json, legalities_json, arena_id
+                   keywords_json, color_identity_json, legalities_json, arena_id, scryfall_id
             FROM cards_oracle
             WHERE arena_id = ?
             """,
@@ -51,12 +61,30 @@ class CardLookup:
             return value
         return None
 
+    def _query_printing_oracle_by_scryfall(self, scryfall_id: str) -> str | None:
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT oracle_id
+            FROM cards_printings
+            WHERE scryfall_id = ?
+            """,
+            (scryfall_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        value = row[0]
+        if isinstance(value, str):
+            return value
+        return None
+
     def _query_oracle_by_id(self, oracle_id: str) -> dict | None:
         cursor = self._conn.cursor()
         cursor.execute(
             """
             SELECT oracle_id, name, mana_cost, type_line, oracle_text,
-                   keywords_json, color_identity_json, legalities_json, arena_id
+                   keywords_json, color_identity_json, legalities_json, arena_id, scryfall_id
             FROM cards_oracle
             WHERE oracle_id = ?
             """,
@@ -69,9 +97,21 @@ class CardLookup:
 
 
 def _row_to_card(row: tuple) -> dict:
-    oracle_id, name, mana_cost, type_line, oracle_text, keywords_json, color_json, legal_json, arena_id = row
+    (
+        oracle_id,
+        name,
+        mana_cost,
+        type_line,
+        oracle_text,
+        keywords_json,
+        color_json,
+        legal_json,
+        arena_id,
+        scryfall_id,
+    ) = row
     return {
         "oracleId": oracle_id,
+        "scryfallId": scryfall_id,
         "name": name,
         "manaCost": mana_cost,
         "typeLine": type_line,

@@ -139,8 +139,8 @@ def test_carddb_import_and_info(tmp_path: Path, capsys: pytest.CaptureFixture[st
 def test_deck_analysis_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     log_path = tmp_path / "Player.log"
     log_path.write_text(
-        """[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] DeckGetDeckLists
-[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"Decks":{"deck-1":{"MainDeck":[{"cardId":100001,"quantity":2},{"cardId":100002,"quantity":1}],"Sideboard":[{"cardId":100003,"quantity":1}]}}}
+        """[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] EventGetCoursesV2
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"Courses":[{"InternalEventName":"Historic_Ladder","CourseDeckSummary":{"DeckId":"deck-1","Name":"Last Played","Attributes":[{"name":"Format","value":"Explorer"}]},"CourseDeck":{"MainDeck":[{"cardId":100001,"quantity":2},{"cardId":100002,"quantity":1}],"Sideboard":[{"cardId":100003,"quantity":1}]}}]}
 """,
         encoding="utf-8",
     )

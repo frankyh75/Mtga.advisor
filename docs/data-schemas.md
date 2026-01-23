@@ -138,6 +138,52 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
 }
 ```
 
+## deck-analysis.json
+```json
+{
+  "schema": "deck-analysis.v1",
+  "deckId": "deck-uuid",
+  "name": "Example Deck",
+  "format": "Standard",
+  "source": "last_played",
+  "analyzedAt": "2026-01-23T12:00:00Z",
+  "mappingCoverage": 0.93,
+  "unknownCards": [999999],
+  "cards": [
+    {
+      "cardId": 70401,
+      "scryfallId": "scryfall-uuid",
+      "oracleId": "oracle-uuid",
+      "name": "Lightning Strike",
+      "manaCost": "{1}{R}",
+      "typeLine": "Instant",
+      "types": ["Instant"],
+      "oracleText": "Lightning Strike deals 3 damage to any target.",
+      "keywords": ["Burn"],
+      "quantity": 4
+    }
+  ],
+  "synergies": [
+    {
+      "id": "artifact-payoff.v1",
+      "score": 0.25,
+      "reason": "Multiple artifact payoffs suggest an artifact-centered game plan."
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "interaction-low.v1",
+      "type": "add",
+      "reason": "Interaction count is low; add removal or counterspells.",
+      "confidence": "medium"
+    }
+  ],
+  "diagnostics": {
+    "coverageWarning": false
+  }
+}
+```
+
 ## meta_signals.json
 ```json
 {

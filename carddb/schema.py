@@ -38,6 +38,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_cards_oracle_name ON cards_oracle(name)",
+    "CREATE INDEX IF NOT EXISTS idx_cards_oracle_scryfall ON cards_oracle(scryfall_id)",
     "CREATE INDEX IF NOT EXISTS idx_cards_oracle_arena ON cards_oracle(arena_id)",
     "CREATE INDEX IF NOT EXISTS idx_cards_printings_oracle ON cards_printings(oracle_id)",
     "CREATE INDEX IF NOT EXISTS idx_cards_printings_arena ON cards_printings(arena_id)",
