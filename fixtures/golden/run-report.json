@@ -1,5 +1,6 @@
 {
   "diagnostics": {
+    "collectionCompleteness": "complete",
     "completeness": {
       "cards": "complete",
       "source": "complete",

@@ -50,6 +50,7 @@ def test_collection_command_exports_with_explicit_logs(tmp_path: Path, monkeypat
         _fixture_path("golden", "run-report.json").read_text(encoding="utf-8")
     )
     run_report_expected["outputs"] = run_report_actual["outputs"]
+    run_report_expected["logMetadata"] = run_report_actual["logMetadata"]
     assert run_report_actual == run_report_expected
 
 
@@ -89,3 +90,134 @@ def test_collection_command_discovers_logs(tmp_path: Path, monkeypatch: pytest.M
 
     assert exit_code == 0
     assert (tmp_path / "out" / "collection.json").exists()
+
+
+def test_decks_command_outputs_preview(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_path = tmp_path / "Player.log"
+    log_path.write_text(
+        """[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] DeckGetDeckLists
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"Decks":{"deck-1":{"MainDeck":[{"cardId":100001,"quantity":2},{"cardId":100002,"quantity":1}],"Sideboard":[{"cardId":100003,"quantity":1}]}}}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["decks", "--log", str(log_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Decks gefunden: 1" in captured.out
+    assert "[saved]" in captured.out
+    assert "main=3" in captured.out
+    assert "side=1" in captured.out
+
+
+def test_carddb_import_and_info(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "carddb.sqlite"
+    oracle_path = _fixture_path("scryfall-oracle-mini.json")
+
+    exit_code = main(
+        [
+            "carddb",
+            "import",
+            "--input",
+            str(oracle_path),
+            "--source",
+            "oracle",
+            "--db",
+            str(db_path),
+        ]
+    )
+
+    assert exit_code == 0
+
+    exit_code = main(["carddb", "info", "--db", str(db_path)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "oracle=2" in captured.out
+
+
+def test_deck_analysis_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_path = tmp_path / "Player.log"
+    log_path.write_text(
+        """[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] EventGetCoursesV2
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"Courses":[{"InternalEventName":"Historic_Ladder","CourseDeckSummary":{"DeckId":"deck-1","Name":"Last Played","Attributes":[{"name":"Format","value":"Explorer"}]},"CourseDeck":{"MainDeck":[{"cardId":100001,"quantity":2},{"cardId":100002,"quantity":1}],"Sideboard":[{"cardId":100003,"quantity":1}]}}]}
+""",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "carddb.sqlite"
+    oracle_path = _fixture_path("scryfall-oracle-mini.json")
+    main(
+        [
+            "carddb",
+            "import",
+            "--input",
+            str(oracle_path),
+            "--source",
+            "oracle",
+            "--db",
+            str(db_path),
+        ]
+    )
+    output_dir = tmp_path / "out"
+
+    exit_code = main(
+        [
+            "deck-analysis",
+            "--log",
+            str(log_path),
+            "--db",
+            str(db_path),
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Deck-Analyse Summary" in captured.out
+    assert (output_dir / "deck-analysis-summary.json").exists()
+    assert (output_dir / "deck-analysis" / "deck-1.json").exists()
+
+
+def test_deck_analysis_include_saved(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_path = tmp_path / "Player.log"
+    log_path.write_text(
+        """[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] DeckGetDeckLists
+[2025-01-01T12:00:00Z] [UnityCrossThreadLogger] {"Decks":{"deck-1":{"MainDeck":[{"cardId":100001,"quantity":2}],"Sideboard":[]}}}
+""",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "carddb.sqlite"
+    oracle_path = _fixture_path("scryfall-oracle-mini.json")
+    main(
+        [
+            "carddb",
+            "import",
+            "--input",
+            str(oracle_path),
+            "--source",
+            "oracle",
+            "--db",
+            str(db_path),
+        ]
+    )
+    output_dir = tmp_path / "out"
+
+    exit_code = main(
+        [
+            "deck-analysis",
+            "--log",
+            str(log_path),
+            "--db",
+            str(db_path),
+            "--output",
+            str(output_dir),
+            "--include-saved",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Deck-Analyse Summary" in captured.out
+    assert (output_dir / "deck-analysis-summary.json").exists()
+    assert (output_dir / "deck-analysis" / "deck-1.json").exists()

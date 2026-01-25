@@ -6,6 +6,7 @@
     "100004": 2
   },
   "diagnostics": {
+    "collectionCompleteness": "complete",
     "completeness": {
       "cards": "complete",
       "source": "complete",

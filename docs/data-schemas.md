@@ -15,6 +15,7 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
     "mythic": 1
   },
   "diagnostics": {
+    "collectionCompleteness": "complete|partial|unknown",
     "completeness": {
       "cards": "complete|partial|unknown",
       "wildcards": "complete|partial|unknown",
@@ -22,7 +23,19 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
     },
     "warnings": ["<warning-code>"],
     "evidence": ["<event-type>"]
-  }
+  },
+  "cardsSeenInDecks": [12345, 67890],
+  "decks": [
+    {
+      "id": "deck-uuid",
+      "name": "Mono-Red Aggro",
+      "format": "Standard",
+      "mainDeck": [{ "cardId": 12345, "quantity": 4 }],
+      "sideboard": [{ "cardId": 67890, "quantity": 2 }],
+      "commandZone": [],
+      "companions": []
+    }
+  ]
 }
 ```
 
@@ -35,6 +48,13 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
   "finishedAt": "2025-01-01T12:01:12Z",
   "source": "local-logs",
   "logs": ["C:/Users/.../Player.log", "C:/Users/.../Player-prev.log"],
+  "logMetadata": [
+    {
+      "path": "C:/Users/.../Player.log",
+      "sizeBytes": 123456,
+      "mtime": "2025-01-01T12:00:00Z"
+    }
+  ],
   "outputs": {
     "collection": "out/collection.json",
     "rawSamples": "out/raw-samples"
@@ -44,6 +64,7 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
     "wildcardsIncluded": true
   },
   "diagnostics": {
+    "collectionCompleteness": "complete|partial|unknown",
     "completeness": {
       "cards": "complete|partial|unknown",
       "wildcards": "complete|partial|unknown",
@@ -114,6 +135,52 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
       "text": "Deck is light on one-drops; add early threats."
     }
   ]
+}
+```
+
+## deck-analysis.json
+```json
+{
+  "schema": "deck-analysis.v1",
+  "deckId": "deck-uuid",
+  "name": "Example Deck",
+  "format": "Standard",
+  "source": "last_played",
+  "analyzedAt": "2026-01-23T12:00:00Z",
+  "mappingCoverage": 0.93,
+  "unknownCards": [999999],
+  "cards": [
+    {
+      "cardId": 70401,
+      "scryfallId": "scryfall-uuid",
+      "oracleId": "oracle-uuid",
+      "name": "Lightning Strike",
+      "manaCost": "{1}{R}",
+      "typeLine": "Instant",
+      "types": ["Instant"],
+      "oracleText": "Lightning Strike deals 3 damage to any target.",
+      "keywords": ["Burn"],
+      "quantity": 4
+    }
+  ],
+  "synergies": [
+    {
+      "id": "artifact-payoff.v1",
+      "score": 0.25,
+      "reason": "Multiple artifact payoffs suggest an artifact-centered game plan."
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "interaction-low.v1",
+      "type": "add",
+      "reason": "Interaction count is low; add removal or counterspells.",
+      "confidence": "medium"
+    }
+  ],
+  "diagnostics": {
+    "coverageWarning": false
+  }
 }
 ```
 

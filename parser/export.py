@@ -59,18 +59,25 @@ def export_collection(paths: Iterable[Path], output_dir: Path) -> ExportPaths:
 def _build_collection_payload(report) -> dict:
     cards = report.cards or {}
     wildcards = report.wildcards or {}
+    cards_seen_in_decks = sorted(report.cards_seen_in_decks or [])
 
-    return {
+    payload = {
         "schema": "collection.v1",
         "source": "local-logs",
         "cards": {str(card_id): count for card_id, count in sorted(cards.items())},
         "wildcards": {key: value for key, value in sorted(wildcards.items())},
         "diagnostics": {
+            "collectionCompleteness": report.collection_completeness,
             "completeness": report.completeness,
             "warnings": list(report.warnings),
             "evidence": list(report.evidence),
         },
     }
+    if cards_seen_in_decks:
+        payload["cardsSeenInDecks"] = cards_seen_in_decks
+    if report.decks:
+        payload["decks"] = report.decks
+    return payload
 
 
 def _build_run_report_payload(
@@ -90,6 +97,7 @@ def _build_run_report_payload(
         "finishedAt": finished_at,
         "source": "local-logs",
         "logs": [path.as_posix() for path in paths],
+        "logMetadata": _build_log_metadata(paths),
         "outputs": {
             "collection": collection_path.as_posix(),
             "rawSamples": raw_samples_dir.as_posix(),
@@ -99,6 +107,7 @@ def _build_run_report_payload(
             "wildcardsIncluded": report.wildcards is not None,
         },
         "diagnostics": {
+            "collectionCompleteness": report.collection_completeness,
             "completeness": report.completeness,
             "warnings": list(report.warnings),
             "evidence": list(report.evidence),
@@ -117,6 +126,26 @@ def _write_raw_samples(raw_samples_dir: Path, events: list[ParsedEvent]) -> None
             "data": event.data,
         }
         _write_json(raw_samples_dir / sample_name, payload)
+
+
+def _build_log_metadata(paths: Iterable[Path]) -> list[dict]:
+    metadata: list[dict] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        metadata.append(
+            {
+                "path": path.as_posix(),
+                "sizeBytes": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+        )
+    return metadata
 
 
 def _write_json(path: Path, payload: dict) -> None:

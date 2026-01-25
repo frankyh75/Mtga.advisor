@@ -1,0 +1,20 @@
+[
+  {
+    "id": "print-1",
+    "oracle_id": "oracle-1",
+    "name": "Test Card One",
+    "set": "tst",
+    "collector_number": "1",
+    "lang": "en",
+    "arena_id": 100001
+  },
+  {
+    "id": "print-2",
+    "oracle_id": "oracle-2",
+    "name": "Test Card Two",
+    "set": "tst",
+    "collector_number": "2",
+    "lang": "en",
+    "arena_id": 100002
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "scryfall-1",
+    "oracle_id": "oracle-1",
+    "name": "Test Card One",
+    "mana_cost": "{1}{W}",
+    "type_line": "Creature — Human",
+    "oracle_text": "Vigilance",
+    "keywords": ["Vigilance"],
+    "color_identity": ["W"],
+    "legalities": {"standard": "legal"},
+    "arena_id": 100001
+  },
+  {
+    "id": "scryfall-2",
+    "oracle_id": "oracle-2",
+    "name": "Test Card Two",
+    "mana_cost": "{2}{U}",
+    "type_line": "Instant",
+    "oracle_text": "Draw two cards.",
+    "keywords": [],
+    "color_identity": ["U"],
+    "legalities": {"standard": "not_legal"},
+    "arena_id": 100002
+  }
+]
