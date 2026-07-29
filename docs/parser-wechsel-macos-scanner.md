@@ -45,7 +45,7 @@ MTGA-Prozess (läuft)
     │
     ├── User gibt 5 Anker-Karten ein (garantiert in Collection)
     │
-    ├── Pattern-Scanner sucht Anker-IDs im Heap
+    ├── Pattern-Scanner sucht alle Anker-IDs in einem Heap-Durchlauf
     │   └── mach_vm_region() → Regionen iterieren
     │   └── data.find(needle) → Pattern in jeder Region
     │
@@ -112,10 +112,20 @@ Unverändert: `collection.json` (Schema `collection.v1`)
 }
 ```
 
+## Aktueller Implementierungsstand
+
+- Memory-Scan auf macOS erzeugt `collection.json` und `run-report.json`.
+- Der Scanner sucht mehrere Ankerkarten in einem Speicher-Durchlauf statt einmal pro Anker.
+- `run-report.json` enthält Regionen, gelesene Bytes, Lesefehler, Treffer pro Anker und Validierung.
+- `mtga-export run` ist der kanonische Phase-1-Einstieg; auf macOS nutzt er Memory-Scanning.
+- `mtga-export validate` prüft bestehende `collection.json`-Artefakte.
+
 ## Offene Punkte
 
 - [ ] Pattern-Scanner unter Rosetta 2 testen (MTGA läuft als x86_64)
-- [ ] Performance optimieren (Heap kann mehrere GB gross sein)
+- [x] Performance-Basis optimiert: Multi-Anchor-Scan in einem Speicher-Durchlauf
+- [ ] Performance weiter optimieren: Region-Caching/Filter nach erfolgreichen Scans
 - [ ] `sudo`-Wrapper für bequemeren Aufruf
-- [ ] Automatische Prozess-Erkennung (Steam vs. Standalone)
-- [ ] Integration: Memory-Scan-Output in bestehende Pipeline
+- [x] Automatische Prozess-Erkennung mit mehreren Kandidatennamen
+- [x] Integration: Memory-Scan-Output in `collection.json`/`run-report.json`
+- [ ] Hybrid-Ergänzung: Wildcards/Inventory aus Logs vollständig anbinden

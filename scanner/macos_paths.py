@@ -22,6 +22,26 @@ def get_macos_mtga_data_path() -> Path | None:
         / "MTGA_Data"
         / "Downloads"
         / "Raw",
+        # Alternative MTGA-App-Container-Pfade
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Wizards Of The Coast"
+        / "MTGA"
+        / "MTGA_Data"
+        / "Downloads"
+        / "Raw",
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Wizards of the Coast"
+        / "MTGA"
+        / "MTGA_Data"
+        / "Downloads"
+        / "Raw",
+        # Epic Games Launcher default install location.
+        Path("/Users/Shared/Epic Games/MagicTheGathering/MTGA.app/Contents/Resources/MTGA_Data/Downloads/Raw"),
+        Path("/Users/Shared/Epic Games/MagicTheGathering/MTGA_Data/Downloads/Raw"),
         # Steam
         Path.home()
         / "Library"
@@ -43,17 +63,32 @@ def get_macos_mtga_data_path() -> Path | None:
 
 
 def get_macos_log_path() -> Path:
-    """Pfad zu MTGA Player.log auf macOS."""
-    return Path.home() / "Library" / "Logs" / "Wizards Of The Coast" / "MTGA" / "Player.log"
+    """Pfad zu MTGA Player.log auf macOS.
+
+    Der Log-Pfad variiert bei manchen Installationen leicht in der Gross-/Kleinschreibung.
+    """
+    candidates = [
+        Path.home() / "Library" / "Logs" / "Wizards Of The Coast" / "MTGA" / "Player.log",
+        Path.home() / "Library" / "Logs" / "Wizards of the Coast" / "MTGA" / "Player.log",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
 
 
-def get_macos_mtga_process_name() -> str:
-    """Name des MTGA-Prozesses auf macOS.
+def get_macos_mtga_process_names() -> tuple[str, ...]:
+    """Mögliche MTGA-Prozessnamen auf macOS.
 
     MTGA läuft unter Rosetta 2, der Prozess heisst normalerweise 'MTGA'.
     Steam-Version könnte 'MTGA' oder 'MTGALauncher' heissen.
     """
-    return "MTGA"
+    return ("MTGA", "MTGALauncher", "MTGArena")
+
+
+def get_macos_mtga_process_name() -> str:
+    """Name des bevorzugten MTGA-Prozesses auf macOS."""
+    return get_macos_mtga_process_names()[0]
 
 
 def get_default_cache_dir() -> Path:

@@ -1,5 +1,48 @@
 # Phase 1 Gesamtplan (Mtga.advisor)
 
+## Aktueller Abschlussplan nach Parser-Wechsel
+
+Phase 1 bleibt auf lokale, deterministische Collection-Erfassung beschränkt. Der Hauptpfad ist jetzt:
+
+```text
+macOS: Memory-Scan -> collection.json + run-report.json
+Logs:  Wildcards/Inventory-Deltas/Metadaten, Fallbacks und Validierung
+```
+
+### Abschluss-Tasks
+
+1. **Kanonischer Export**
+   - [x] `mtga-export scan` erzeugt Memory-Scan-Artefakte.
+   - [x] `mtga-export run` nutzt auf macOS den Memory-Scan als Hauptpfad.
+   - [ ] Manueller MacBook-Test von `sudo -E .venv/bin/python -m cli.main run --output out`.
+
+2. **Scanner-Stabilität**
+   - [x] `pymem-osx`-Attach mit `sudo` verifiziert.
+   - [x] macOS-Region-Iteration via `mach_vm_region_recurse` funktionsfähig.
+   - [x] Speicherlesefehler werden intern gezählt statt noisy ausgegeben.
+   - [ ] Komfortlösung für `sudo` entscheiden: Wrapper, Helper oder bewusst dokumentierter manueller Aufruf.
+
+3. **Performance**
+   - [x] Mehrere Ankerkarten werden in einem Speicher-Durchlauf gesucht.
+   - [ ] Region-Caching/Region-Filter prüfen, falls reale Laufzeit weiter zu hoch ist.
+
+4. **Validierung**
+   - [x] Anchor-Mengen werden gegen den finalen Collection-Block validiert.
+   - [x] Karten-IDs und Mengenbereiche werden geprüft.
+   - [x] `mtga-export validate` validiert bestehende `collection.json`-Artefakte.
+   - [ ] Manueller MacBook-Test von `python -m cli.main validate --output out-memory`.
+
+5. **Hybrid-Ergänzung**
+   - [ ] Wildcards/Gold/Gems aus Logs/Inventory anbinden.
+   - [ ] `wildcards.completeness` nur auf `complete` setzen, wenn die Quelle belastbar ist.
+   - [ ] DeckSummariesV2 nur als `partial` Fallback/Validierung verwenden.
+
+6. **Phase-1 Abschlusskriterium**
+   - [ ] `run`, `scan`, `validate`, `serve` sind dokumentiert und getestet.
+   - [ ] `pytest` grün.
+   - [ ] README und Scanner-Testplan widersprechen nicht mehr dem Memory-Scan-Hauptpfad.
+   - [ ] Keine Advisor-Logik in Phase 1.
+
 ## A) Phase-1 Definition of Done (DoD) — Checkliste (DONE/NOT DONE)
 **Phase 1 gilt als DONE, wenn ALLE Punkte erfüllt sind:**
 

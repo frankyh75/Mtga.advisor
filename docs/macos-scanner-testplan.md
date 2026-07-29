@@ -1,7 +1,7 @@
 # macOS Scanner — Testplan
 
 **Ziel:** Memory-Scanning der MTGA-Collection via `pymem-osx` auf macOS testen.
-**Branch:** `main` (Commit `93e0d3d`)
+**Branch:** `main` (Commit `9547424`)
 **Ausführender:** Frank auf MacBook (MTGA aktiv)
 
 ---
@@ -26,7 +26,7 @@ pip install pymem-osx requests
 
 # 3. Aktuellen Stand prüfen
 git log --oneline -3
-# → sollte 93e0d3d oder neuer zeigen
+# → sollte 9547424 oder neuer zeigen
 ```
 
 ## Test 1: Karten-DB laden (ohne MTGA)
@@ -118,7 +118,7 @@ if found:
 
 ```bash
 # MTGA läuft, Decks-Ansicht geöffnet, Collection gescrollt
-sudo python3 -m scanner.memory_scanner
+sudo -E .venv/bin/python -m cli.main scan --output out-memory
 ```
 
 **Erwartet:** Interaktive Abfrage von 5 Anker-Karten, dann Scan, dann Ausgabe:
@@ -133,6 +133,28 @@ sudo python3 -m scanner.memory_scanner
 - `❌ Keine validen Datenblöcke gefunden` → `find_blocks()` parst nichts
   - Möglicherweise anderes Speicher-Layout unter Rosetta 2
   - `find_blocks()`-Logik in `scanner/memory_scanner.py` anpassen
+- Output prüfen: `out-memory/collection.json` und `out-memory/run-report.json`
+
+## Test 6: Export validieren
+
+```bash
+python3 -m cli.main validate --output out-memory
+```
+
+**Erwartet:** `Valid: True`, Kartenanzahl und Gesamtmenge werden ausgegeben.
+
+**Wenn fehlschlägt:**
+- `anchor-mismatch` → gespeicherte Anker oder Mengen stimmen nicht zum Export
+- `invalid-quantities` → Parser hat wahrscheinlich einen falschen Speicherblock gewählt
+- `unknown-card-ids` → Karten-DB ist unvollständig oder veraltet
+
+## Test 7: Kanonischer Phase-1-Befehl
+
+```bash
+sudo -E .venv/bin/python -m cli.main run --output out
+```
+
+**Erwartet:** Auf macOS wird der Memory-Scan verwendet und `out/collection.json` plus `out/run-report.json` werden erzeugt.
 
 ## Fehlerdiagnose
 
@@ -175,9 +197,11 @@ pip install pymem-osx --no-cache-dir
 
 ## Erfolgskriterien
 
-- [ ] Test 1: Karten-DB geladen (> 10000 Einträge)
-- [ ] Test 2: macOS-Pfade korrekt
-- [ ] Test 3: pymem-osx attached an MTGA
-- [ ] Test 4: Pattern-Scanner findet Karten-IDs
-- [ ] Test 5: Collection wird vollständig extrahiert
-- [ ] Output: `collection.json` mit gleichem Schema wie Log-Parsing
+- [x] Test 1: Karten-DB geladen (> 10000 Einträge)
+- [x] Test 2: macOS-Pfade korrekt
+- [x] Test 3: pymem-osx attached an MTGA
+- [x] Test 4: Pattern-Scanner findet Karten-IDs
+- [x] Test 5: Collection wird vollständig extrahiert
+- [ ] Test 6: Export-Validierung läuft auf dem MacBook
+- [ ] Test 7: `mtga-export run` läuft auf dem MacBook
+- [x] Output: `collection.json` mit gleichem Schema wie Log-Parsing

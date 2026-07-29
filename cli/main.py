@@ -12,6 +12,10 @@ from parser.log_paths import (
     detect_platform,
     discover_logs,
 )
+from scanner.card_database import load_card_database
+from scanner.memory_scanner import scan_collection_detailed as scan_memory_collection_detailed
+from scanner.memory_scanner import validate_collection
+from scanner.memory_scanner import write_collection_artifacts
 from server.app import DEFAULT_HOST, DEFAULT_PORT, run_server
 
 
@@ -67,6 +71,55 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=[],
         help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
+    )
+
+    scan = subparsers.add_parser("scan", help="Scannt die macOS-Collection aus dem MTGA-Prozessspeicher.")
+    scan.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out-memory"),
+        help="Ausgabeverzeichnis (Standard: ./out-memory).",
+    )
+    scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken pro Anker aus.")
+
+    run = subparsers.add_parser("run", help="Kanonischer Phase-1-Export: macOS Memory-Scan, sonst Log-Export.")
+    run.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Ausgabeverzeichnis (Standard: ./out).",
+    )
+    run.add_argument(
+        "--platform",
+        choices=["windows", "macos", "unknown"],
+        help="Plattform überschreiben (Standard: automatische Erkennung).",
+    )
+    run.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken aus, wenn Memory-Scan verwendet wird.")
+    run.add_argument(
+        "--log",
+        dest="logs",
+        action="append",
+        type=Path,
+        help="Pfad zu einer Logdatei für nicht-macOS oder expliziten Log-Export.",
+    )
+    run.add_argument("--windows-local-low", type=Path, help="Override für Windows LocalLow MTGA Pfad.")
+    run.add_argument("--windows-steam-userdata", type=Path, help="Override für Windows Steam userdata Pfad.")
+    run.add_argument("--macos-logs", type=Path, help="Override für macOS Log-Pfad.")
+    run.add_argument("--macos-steam-userdata", type=Path, help="Override für macOS Steam userdata Pfad.")
+    run.add_argument(
+        "--custom-log-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
+    )
+
+    validate = subparsers.add_parser("validate", help="Validiert ein bestehendes collection.json Artefakt.")
+    validate.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Verzeichnis mit collection.json (Standard: ./out).",
     )
 
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
@@ -126,12 +179,63 @@ def _run_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_scan(args: argparse.Namespace) -> int:
+    result = scan_memory_collection_detailed(debug=args.debug)
+    if result is None:
+        return 1
+    collection_path, run_report_path = write_collection_artifacts(result.collection, args.output, scan_result=result)
+    print(f"Collection exportiert: {collection_path}")
+    print(f"Run-Report: {run_report_path}")
+    return 0
+
+
+def _run_run(args: argparse.Namespace) -> int:
+    platform = args.platform or detect_platform()
+    if platform == "macos" and not args.logs:
+        return _run_scan(args)
+    return _run_collection(args)
+
+
+def _run_validate(args: argparse.Namespace) -> int:
+    collection_path = args.output / "collection.json"
+    if not collection_path.exists():
+        _error(f"collection.json nicht gefunden: {collection_path}")
+        return 1
+
+    try:
+        import json
+
+        payload = json.loads(collection_path.read_text(encoding="utf-8"))
+        cards = {int(card_id): int(quantity) for card_id, quantity in payload.get("cards", {}).items()}
+    except (OSError, ValueError, TypeError) as exc:
+        _error(f"collection.json konnte nicht gelesen werden: {exc}")
+        return 1
+
+    validation = validate_collection(cards, db=load_card_database())
+    print(f"Valid: {validation['valid']}")
+    print(f"Cards: {validation['cardsCount']} unique, {validation['totalCards']} total")
+    if validation["errors"]:
+        print(f"Errors: {', '.join(validation['errors'])}")
+    if validation["warnings"]:
+        print(f"Warnings: {', '.join(validation['warnings'])}")
+    if validation["unknownCardIdsCount"]:
+        suffix = " (truncated)" if validation["unknownCardIdsTruncated"] else ""
+        print(f"Unknown card IDs: {validation['unknownCardIdsCount']}{suffix}")
+    return 0 if validation["valid"] else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "collection":
         return _run_collection(args)
+    if args.command == "scan":
+        return _run_scan(args)
+    if args.command == "run":
+        return _run_run(args)
+    if args.command == "validate":
+        return _run_validate(args)
     if args.command == "serve":
         return _run_serve(args)
     parser.print_help()

@@ -3,25 +3,44 @@
 Mtga.advisor is an early-stage, private project focused on MTG Arena deck advising with collection-aware and meta-aware recommendations.
 
 ## Project Notes
-- This is a private repository in an early planning phase.
-- The focus is MTG Arena deck advising and deterministic recommendations.
+- This is a private repository in an active implementation phase.
+- The current focus is the collection ingestion pipeline for MTG Arena.
 - LLM usage is optional and not required for core functionality.
 
 ## Scope-Lock (Phase 0/1)
-- **Phase 0:** Planung, Quellenanalyse, und Festlegung der technischen Richtung. Kein produktiver Code erforderlich.
-- **Phase 1:** Lokaler, deterministischer CLI-Export der MTGA-Sammlung aus Logs. Keine Online-Services, keine Meta-Logik, keine UI.
+- **Phase 0:** Planung, Quellenanalyse und Festlegung der technischen Richtung.
+- **Phase 1:** Lokale, deterministische Collection-Erfassung als Grundlage fuer spaetere Empfehlungen.
+- **Aktueller Plan:** Log-Parsing bleibt fuer Deltas und Metadaten erhalten, aber die Vollcollection soll auf macOS per Memory-Scanning aus dem laufenden MTGA-Prozess kommen.
 - **Explizit:** Keine Advisor-Logik in Phase 0/1.
-- **Nicht in Scope:** Live-Tracking, Hintergrunddienste, externe Accounts, oder Meta-basierte Empfehlungen.
+- **Nicht in Scope:** Live-Tracking, Hintergrunddienste, externe Accounts oder Meta-basierte Empfehlungen.
 
 ## CLI-Kommandos
+- `mtga-export run`: Kanonischer Phase-1-Export. Nutzt auf macOS den Memory-Scan, sonst den Log-Export.
 - `mtga-export collection`: Exportiert die lokale MTGA-Sammlung aus Logs in die definierten Output-Artefakte.
-- `mtga-export serve`: Startet einen lokalen Server für die Ausgabe-Artefakte (nur lokal, ohne Online-Services).
+- `mtga-export scan`: Exportiert die macOS-Vollcollection per Memory-Scan aus dem laufenden MTGA-Prozess.
+- `mtga-export validate`: Validiert ein bestehendes `collection.json`-Artefakt.
+- `mtga-export serve`: Startet einen lokalen Server fuer die Ausgabe-Artefakte.
 
 ## Nutzung (Lokal)
-- Sammlung exportieren (Auto-Discovery der Logs auf macOS/Windows): `python -m cli.main collection --output out`
-- Explizite Log-Pfade angeben (falls Auto-Discovery scheitert): `python -m cli.main collection --log /pfad/zu/Player.log --log /pfad/zu/Player-prev.log --output out`
-- macOS Standardpfad: `~/Library/Logs/Wizards of the Coast/MTGA/`; Windows LocalLow: `%USERPROFILE%/AppData/LocalLow/Wizards Of The Coast/MTGA/`.
-- Artefakte im Browser anzeigen: `python -m cli.main serve --output out --port 8000` und dann `http://127.0.0.1:8000/` öffnen.
+- Kanonischer Export: `sudo -E .venv/bin/python -m cli.main run --output out`
+- Log-basierter Export: `python -m cli.main collection --output out`
+- Explizite Log-Pfade angeben, falls Auto-Discovery scheitert: `python -m cli.main collection --log /pfad/zu/Player.log --log /pfad/zu/Player-prev.log --output out`
+- Artefakte im Browser anzeigen: `python -m cli.main serve --output out --port 8000` und dann `http://127.0.0.1:8000/` oeffnen.
+- macOS Memory-Scan: MTGA starten, in die Decks-Ansicht wechseln, dann `sudo -E .venv/bin/python -m cli.main scan --output out-memory`
+- Bestehenden Export validieren: `python -m cli.main validate --output out-memory`
+
+## Phase-1 Abschlussstand
+- Der macOS-Memory-Scanner sucht mehrere Ankerkarten in einem Speicher-Durchlauf und reduziert damit die Scan-Zeit gegenüber einem separaten Vollscan pro Anker.
+- `collection.json` bleibt das kanonische Artefakt für spätere Advisor-Logik.
+- `run-report.json` enthält Scan-Statistiken, Anchor-Matches und Validierungsergebnis.
+- Wildcards bleiben beim reinen Memory-Scan bewusst `unknown`; harte Craft-Empfehlungen sind erst erlaubt, wenn Wildcards aus Logs/Inventory vollständig validiert sind.
+- `sudo` ist aktuell weiterhin erforderlich, weil `pymem-osx` über `task_for_pid()` auf den MTGA-Prozess zugreift.
+
+## Architektur
+- `parser/`: Log-basierte Extraktion von Snapshots, Deltas und Metadaten.
+- `scanner/`: macOS Memory-Scanning mit `pymem-osx`, Pattern-Scan und Karten-Datenbank.
+- `docs/parser-wechsel-macos-scanner.md`: Begründung fuer den Wechsel zum Memory-Scanning.
+- `docs/macos-scanner-testplan.md`: Testplan fuer die Scanner-Validierung auf macOS.
 
 ## Architecture Decision Records (ADRs)
 - [ADR 0001: Tech-Stack](docs/adr/0001-tech-stack.md)

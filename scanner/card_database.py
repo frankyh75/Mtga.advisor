@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import gzip
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from .macos_paths import get_default_cache_dir, get_macos_mtga_data_path
 
-LOOKUP_FILE = get_default_cache_dir() / "arena_id_lookup.json"
+
+def _lookup_file() -> Path:
+    return get_default_cache_dir() / "arena_id_lookup.json"
 
 
 def load_local_mtga_database() -> dict[int, dict[str, Any]]:
@@ -103,27 +104,58 @@ def load_local_mtga_database() -> dict[int, dict[str, Any]]:
 
 def fetch_scryfall_database() -> dict[int, dict[str, Any]]:
     """Lädt Kartendaten von der Scryfall-API (Bulk-Download)."""
+    try:
+        import requests
+    except ImportError:
+        print("❌ requests ist nicht installiert. Scryfall-Fallback nicht verfügbar.")
+        return {}
+
     print("🌐 Lade Kartendaten von Scryfall API...")
     try:
-        bulk_meta = requests.get(
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mtga.advisor/0.1",
+        }
+        bulk_response = requests.get(
             "https://api.scryfall.com/bulk-data/default-cards",
             timeout=30,
-        ).json()
-        cards_data = requests.get(bulk_meta["download_uri"], timeout=120).json()
+            headers=headers,
+        )
+        bulk_response.raise_for_status()
+        bulk_meta = bulk_response.json()
+        download_uri = bulk_meta.get("download_uri") or bulk_meta.get("jsonl_download_uri")
+        if not download_uri:
+            raise ValueError("Scryfall bulk metadata enthält keine Download-URL")
 
         lookup: dict[int, dict[str, Any]] = {}
-        for c in cards_data:
-            arena_id = c.get("arena_id")
-            if arena_id:
-                lookup[arena_id] = {
-                    "name": c.get("name", "Unknown"),
-                    "set": c.get("set", "").upper(),
-                    "collector_number": c.get("collector_number", ""),
-                }
+        cards_response = requests.get(download_uri, timeout=120, headers=headers, stream=True)
+        cards_response.raise_for_status()
+
+        if str(download_uri).endswith(".jsonl.gz"):
+            with gzip.GzipFile(fileobj=cards_response.raw) as gz:
+                for raw_line in gz:
+                    if not raw_line.strip():
+                        continue
+                    _add_scryfall_card(lookup, json.loads(raw_line))
+            return lookup
+
+        for c in cards_response.json():
+            _add_scryfall_card(lookup, c)
         return lookup
     except Exception as e:
         print(f"❌ Scryfall-Download fehlgeschlagen: {e}")
         return {}
+
+
+def _add_scryfall_card(lookup: dict[int, dict[str, Any]], card: dict[str, Any]) -> None:
+    """Übernimmt eine Scryfall-Karte, falls sie eine Arena-ID hat."""
+    arena_id = card.get("arena_id")
+    if arena_id:
+        lookup[arena_id] = {
+            "name": card.get("name", "Unknown"),
+            "set": card.get("set", "").upper(),
+            "collector_number": card.get("collector_number", ""),
+        }
 
 
 def load_card_database() -> dict[int, dict[str, Any]]:
@@ -138,10 +170,12 @@ def load_card_database() -> dict[int, dict[str, Any]]:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Cache
-    if LOOKUP_FILE.exists():
+    lookup_file = _lookup_file()
+
+    if lookup_file.exists():
         try:
             print("📦 Lade gecachte Karten-DB...")
-            with LOOKUP_FILE.open("r", encoding="utf-8") as f:
+            with lookup_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             return {int(k): v for k, v in data.items() if isinstance(v, dict)}
         except Exception:
@@ -158,7 +192,7 @@ def load_card_database() -> dict[int, dict[str, Any]]:
     # Cache schreiben
     if lookup:
         try:
-            with LOOKUP_FILE.open("w", encoding="utf-8") as f:
+            with lookup_file.open("w", encoding="utf-8") as f:
                 json.dump({str(k): v for k, v in lookup.items()}, f)
             print("💾 Karten-DB gecached")
         except Exception:

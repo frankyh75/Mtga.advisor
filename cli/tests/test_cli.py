@@ -89,3 +89,55 @@ def test_collection_command_discovers_logs(tmp_path: Path, monkeypatch: pytest.M
 
     assert exit_code == 0
     assert (tmp_path / "out" / "collection.json").exists()
+
+
+def test_scan_command_exports_memory_scan_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cli.main as cli_module
+    from scanner.memory_scanner import MemoryScanResult
+
+    monkeypatch.setattr(
+        cli_module,
+        "scan_memory_collection_detailed",
+        lambda debug=False: MemoryScanResult(
+            collection={100: 4, 200: 1},
+            anchors=[],
+            anchor_matches={},
+            validation={"valid": True, "errors": [], "warnings": [], "cardsCount": 2, "totalCards": 5},
+        ),
+    )
+
+    exit_code = main(["scan", "--output", str(tmp_path / "memory")])
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "memory" / "collection.json").read_text(encoding="utf-8"))
+    assert payload["source"] == "memory-scan"
+    assert payload["cards"] == {"100": 4, "200": 1}
+
+
+def test_run_command_uses_memory_scan_on_macos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cli.main as cli_module
+
+    called: list[str] = []
+    monkeypatch.setattr(cli_module, "detect_platform", lambda: "macos")
+    monkeypatch.setattr(cli_module, "_run_scan", lambda args: called.append("scan") or 0)
+
+    exit_code = main(["run", "--output", str(tmp_path / "out")])
+
+    assert exit_code == 0
+    assert called == ["scan"]
+
+
+def test_validate_command_checks_existing_collection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cli.main as cli_module
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "collection.json").write_text(
+        json.dumps({"cards": {"100": 4, "200": 1}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_module, "load_card_database", lambda: {100: {"name": "A"}, 200: {"name": "B"}})
+
+    exit_code = main(["validate", "--output", str(out)])
+
+    assert exit_code == 0
