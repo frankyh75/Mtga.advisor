@@ -30,14 +30,22 @@ Logs:  Wildcards/Inventory-Deltas/Metadaten, Fallbacks und Validierung
    - [x] Anchor-Mengen werden gegen den finalen Collection-Block validiert.
    - [x] Karten-IDs und Mengenbereiche werden geprüft.
    - [x] `mtga-export validate` validiert bestehende `collection.json`-Artefakte.
-   - [ ] Manueller MacBook-Test von `python -m cli.main validate --output out-memory`.
+   - [x] Manueller MacBook-Test von `python -m cli.main validate --output out`.
+   - [x] `validation-report.json` enthält vollständige Unknown-ID-Liste mit Mengen.
 
 5. **Hybrid-Ergänzung**
    - [ ] Wildcards/Gold/Gems aus Logs/Inventory anbinden.
    - [ ] `wildcards.completeness` nur auf `complete` setzen, wenn die Quelle belastbar ist.
    - [ ] DeckSummariesV2 nur als `partial` Fallback/Validierung verwenden.
 
-6. **Phase-1 Abschlusskriterium**
+6. **Card Metadata Coverage (Phase 1.1)**
+   - [ ] Unknown-ID-Report aus realem Export auswerten (`181` IDs / `345` Karten im aktuellen MacBook-Run).
+   - [ ] Lokale MTGA-Datenpfade gezielt erweitern, falls `.mtga`-Daten außerhalb der bekannten Pfade liegen.
+   - [ ] Karten-DB-Cache-Refresh dokumentieren und bei Bedarf automatisieren.
+   - [ ] Entscheiden, ob unbekannte IDs als Arena-only/Special/Token klassifiziert oder extern gemappt werden.
+   - [ ] Phase 2 erst starten, wenn Unknown-ID-Verhalten explizit ist.
+
+7. **Phase-1 Abschlusskriterium**
    - [ ] `run`, `scan`, `validate`, `serve` sind dokumentiert und getestet.
    - [ ] `pytest` grün.
    - [ ] README und Scanner-Testplan widersprechen nicht mehr dem Memory-Scan-Hauptpfad.

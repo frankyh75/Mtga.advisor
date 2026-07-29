@@ -127,7 +127,10 @@ def test_run_command_uses_memory_scan_on_macos(tmp_path: Path, monkeypatch: pyte
     assert called == ["scan"]
 
 
-def test_validate_command_checks_existing_collection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_validate_command_checks_existing_collection_and_writes_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import cli.main as cli_module
 
     out = tmp_path / "out"
@@ -136,8 +139,18 @@ def test_validate_command_checks_existing_collection(tmp_path: Path, monkeypatch
         json.dumps({"cards": {"100": 4, "200": 1}}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(cli_module, "load_card_database", lambda: {100: {"name": "A"}, 200: {"name": "B"}})
+    refresh_values: list[bool] = []
 
-    exit_code = main(["validate", "--output", str(out)])
+    def fake_load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, str]]:
+        refresh_values.append(refresh_cache)
+        return {100: {"name": "A"}, 200: {"name": "B"}}
+
+    monkeypatch.setattr(cli_module, "load_card_database", fake_load_card_database)
+
+    exit_code = main(["validate", "--output", str(out), "--refresh-card-db"])
 
     assert exit_code == 0
+    assert refresh_values == [True]
+    report = json.loads((out / "validation-report.json").read_text(encoding="utf-8"))
+    assert report["schema"] == "validation-report.v1"
+    assert report["validation"]["valid"] is True

@@ -158,7 +158,7 @@ def _add_scryfall_card(lookup: dict[int, dict[str, Any]], card: dict[str, Any]) 
         }
 
 
-def load_card_database() -> dict[int, dict[str, Any]]:
+def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, Any]]:
     """Orchestriert das Laden: Cache → Lokal → Scryfall.
 
     Reihenfolge:
@@ -172,7 +172,7 @@ def load_card_database() -> dict[int, dict[str, Any]]:
     # 1. Cache
     lookup_file = _lookup_file()
 
-    if lookup_file.exists():
+    if lookup_file.exists() and not refresh_cache:
         try:
             print("📦 Lade gecachte Karten-DB...")
             with lookup_file.open("r", encoding="utf-8") as f:
@@ -180,6 +180,8 @@ def load_card_database() -> dict[int, dict[str, Any]]:
             return {int(k): v for k, v in data.items() if isinstance(v, dict)}
         except Exception:
             print("⚠ Cache beschädigt, lade neu...")
+    elif refresh_cache:
+        print("🔄 Erneuere Karten-DB-Cache...")
 
     # 2. Lokale DB
     lookup = load_local_mtga_database()

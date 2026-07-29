@@ -6,9 +6,18 @@
 - Document deterministic rules-first approach and constraints.
 
 ## Phase 1: Collection Export
-- Support log-based MTG Arena collection export (local-only).
+- Support local MTG Arena collection export.
+- macOS primary path: Memory-scan the running MTGA process and write `collection.json`.
+- Log parser remains for wildcards, inventory deltas, metadata, and partial fallbacks.
 - Normalize card identifiers and quantities into `collection.json`.
 - Validate parsing assumptions and edge cases across platforms.
+- Emit `run-report.json` and `validation-report.json` for diagnosability.
+
+## Phase 1.1: Card Metadata Coverage
+- Resolve unknown Arena card IDs from scanner output.
+- Improve local MTGA data path discovery and cache refresh behavior.
+- Keep collection export valid even when metadata is incomplete.
+- Block Phase 2 card-name/deck-advice work until unknown-ID handling is explicit.
 
 ## Phase 2: Rule-Based Advisor
 - Implement deterministic heuristics for deck improvement suggestions.

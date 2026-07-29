@@ -55,6 +55,37 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
 }
 ```
 
+## validation-report.json
+```json
+{
+  "schema": "validation-report.v1",
+  "collection": "out/collection.json",
+  "validation": {
+    "valid": true,
+    "errors": [],
+    "warnings": ["unknown-card-ids"],
+    "cardsCount": 7871,
+    "totalCards": 16275,
+    "invalidQuantities": {},
+    "unknownCardIdsCount": 181,
+    "unknownCardIds": ["47035"],
+    "unknownCardIdsWithCounts": {
+      "47035": 1
+    },
+    "unknownCardIdsTruncated": true,
+    "anchors": [
+      {
+        "arenaId": 105645,
+        "name": "Quantum Reduction",
+        "expected": 1,
+        "actual": 1,
+        "ok": true
+      }
+    ]
+  }
+}
+```
+
 ## arena_deck.json (parsed deck)
 ```json
 {

@@ -221,6 +221,10 @@ def validate_collection(
         "invalidQuantities": invalid_quantities,
         "unknownCardIdsCount": len(unknown_ids),
         "unknownCardIds": [str(card_id) for card_id in unknown_ids[:50]],
+        "unknownCardIdsWithCounts": {
+            str(card_id): collection[card_id]
+            for card_id in unknown_ids
+        },
         "unknownCardIdsTruncated": len(unknown_ids) > 50,
         "anchors": anchor_results,
     }

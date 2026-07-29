@@ -141,7 +141,13 @@ sudo -E .venv/bin/python -m cli.main scan --output out-memory
 python3 -m cli.main validate --output out-memory
 ```
 
-**Erwartet:** `Valid: True`, Kartenanzahl und Gesamtmenge werden ausgegeben.
+**Erwartet:** `Valid: True`, Kartenanzahl und Gesamtmenge werden ausgegeben. Zusätzlich wird `out-memory/validation-report.json` geschrieben.
+
+Optional Cache neu aufbauen:
+
+```bash
+python3 -m cli.main validate --output out-memory --refresh-card-db
+```
 
 **Wenn fehlschlägt:**
 - `anchor-mismatch` → gespeicherte Anker oder Mengen stimmen nicht zum Export

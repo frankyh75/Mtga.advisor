@@ -223,6 +223,8 @@ def test_validate_collection_checks_anchors_and_ids() -> None:
     assert validation["warnings"] == ["unknown-card-ids"]
     assert validation["anchors"][0]["ok"] is True
     assert validation["anchors"][1]["ok"] is False
+    assert validation["unknownCardIdsCount"] == 1
+    assert validation["unknownCardIdsWithCounts"] == {"300": 401}
 
 
 def test_write_collection_artifacts_uses_collection_schema(tmp_path: Path) -> None:

@@ -27,13 +27,15 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - Explizite Log-Pfade angeben, falls Auto-Discovery scheitert: `python -m cli.main collection --log /pfad/zu/Player.log --log /pfad/zu/Player-prev.log --output out`
 - Artefakte im Browser anzeigen: `python -m cli.main serve --output out --port 8000` und dann `http://127.0.0.1:8000/` oeffnen.
 - macOS Memory-Scan: MTGA starten, in die Decks-Ansicht wechseln, dann `sudo -E .venv/bin/python -m cli.main scan --output out-memory`
-- Bestehenden Export validieren: `python -m cli.main validate --output out-memory`
+- Bestehenden Export validieren: `python -m cli.main validate --output out-memory` schreibt zusätzlich `validation-report.json`.
+- Karten-DB-Cache bei der Validierung neu aufbauen: `python -m cli.main validate --output out-memory --refresh-card-db`
 
 ## Phase-1 Abschlussstand
 - Der macOS-Memory-Scanner sucht mehrere Ankerkarten in einem Speicher-Durchlauf und reduziert damit die Scan-Zeit gegenüber einem separaten Vollscan pro Anker.
 - `collection.json` bleibt das kanonische Artefakt für spätere Advisor-Logik.
 - `run-report.json` enthält Scan-Statistiken, Anchor-Matches und Validierungsergebnis.
 - Wildcards bleiben beim reinen Memory-Scan bewusst `unknown`; harte Craft-Empfehlungen sind erst erlaubt, wenn Wildcards aus Logs/Inventory vollständig validiert sind.
+- Unbekannte Karten-IDs werden im `validation-report.json` vollständig mit Mengen ausgewiesen; diese blockieren nicht den Collection-Export, aber spätere Namen-/Metadaten-Funktionen.
 - `sudo` ist aktuell weiterhin erforderlich, weil `pymem-osx` über `task_for_pid()` auf den MTGA-Prozess zugreift.
 
 ## Architektur

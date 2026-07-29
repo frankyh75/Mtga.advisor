@@ -121,6 +121,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("out"),
         help="Verzeichnis mit collection.json (Standard: ./out).",
     )
+    validate.add_argument(
+        "--refresh-card-db",
+        action="store_true",
+        help="Ignoriert den Karten-DB-Cache und lädt lokale/Scryfall-Daten neu.",
+    )
+    validate.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Schreibt keinen validation-report.json.",
+    )
 
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
     serve.add_argument("--host", default=DEFAULT_HOST, help="Host (Standard: 127.0.0.1).")
@@ -211,7 +221,7 @@ def _run_validate(args: argparse.Namespace) -> int:
         _error(f"collection.json konnte nicht gelesen werden: {exc}")
         return 1
 
-    validation = validate_collection(cards, db=load_card_database())
+    validation = validate_collection(cards, db=load_card_database(refresh_cache=args.refresh_card_db))
     print(f"Valid: {validation['valid']}")
     print(f"Cards: {validation['cardsCount']} unique, {validation['totalCards']} total")
     if validation["errors"]:
@@ -221,6 +231,25 @@ def _run_validate(args: argparse.Namespace) -> int:
     if validation["unknownCardIdsCount"]:
         suffix = " (truncated)" if validation["unknownCardIdsTruncated"] else ""
         print(f"Unknown card IDs: {validation['unknownCardIdsCount']}{suffix}")
+    if not args.no_report:
+        import json
+
+        report_path = args.output / "validation-report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "schema": "validation-report.v1",
+                    "collection": collection_path.as_posix(),
+                    "validation": validation,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"Validation report: {report_path}")
     return 0 if validation["valid"] else 1
 
 
