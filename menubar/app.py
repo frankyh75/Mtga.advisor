@@ -85,6 +85,7 @@ class MtgaSyncApp(rumps.App):
             {"Quit": MENU_QUIT},
         ]
         self._status_timer.start()
+        self._log_info(f"Menubar app started. Output: {self.output_dir}")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -121,6 +122,7 @@ class MtgaSyncApp(rumps.App):
             return
 
         self._update_status("Syncing…")
+        self._log_info("Sync started.")
         self._sync_thread = threading.Thread(target=self._do_sync, daemon=True)
         self._sync_thread.start()
 
@@ -177,6 +179,11 @@ class MtgaSyncApp(rumps.App):
             self._last_sync_error = None
 
             self._update_status(self._status_text())
+            self._log_info(
+                "Sync complete: "
+                f"{card_count} unique / {total_cards} total cards. "
+                f"Artifacts: {collection_path}, {run_report_path}, {validation_report_path}"
+            )
             rumps.notification(
                 title="MTGA Sync",
                 subtitle="Sync complete",
@@ -186,6 +193,7 @@ class MtgaSyncApp(rumps.App):
         except Exception as exc:
             self._last_sync_error = str(exc)
             self._record_error("sync", exc)
+            self._log_info(f"Sync failed: {exc}")
             self._update_status(f"Error: {self._truncate(self._last_sync_error, 40)}")
             self._update_last_error(self._last_sync_error)
             rumps.notification(
@@ -213,6 +221,7 @@ class MtgaSyncApp(rumps.App):
             detail = "\n".join(output_lines[-5:]) or "Memory scan failed."
             self._last_sync_error = detail
             self._record_error("memory-scan", detail)
+            self._log_info(f"Memory scan failed: {detail}")
             self._update_last_error(detail)
             rumps.notification(
                 title="MTGA Sync",
@@ -392,6 +401,22 @@ class MtgaSyncApp(rumps.App):
                     log_path.read_text(encoding="utf-8") if log_path.exists() else ""
                 )
                 + f"[{_iso_now()}] {stage}: {error}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _log_info(self, message: str) -> None:
+        """Print and persist status lines for terminal-launched usage."""
+        line = f"[{_iso_now()}] {message}"
+        print(line, flush=True)
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self.output_dir / "menubar.log"
+            log_path.write_text(
+                (log_path.read_text(encoding="utf-8") if log_path.exists() else "")
+                + line
+                + "\n",
                 encoding="utf-8",
             )
         except Exception:
