@@ -7,6 +7,7 @@ from typing import Sequence
 
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_import import import_arena_deck, write_deck
+from advisor.llm_advisor import run_llm_advisor
 from parser.decks import export_decks
 from parser.export import export_collection
 from parser.log_paths import (
@@ -182,10 +183,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     advisor = subparsers.add_parser("advisor", help="Regelbasierte Advisor-Funktionen.")
     advisor_subparsers = advisor.add_subparsers(dest="advisor_command", required=True)
-    advisor_complete = advisor_subparsers.add_parser("complete", help="Berechnet Deck-Completion.")
+    advisor_complete = advisor_subparsers.add_parser("complete", help="Berechnet Deck-Completion (regelbasiert).")
     advisor_complete.add_argument("--collection", type=Path, required=True, help="Pfad zu collection.json.")
     advisor_complete.add_argument("--deck", type=Path, required=True, help="Pfad zu arena_deck.json.")
     advisor_complete.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis.")
+
+    advisor_llm = advisor_subparsers.add_parser("llm", help="LLM-gestützte Wildcard- und Deck-Optimierung.")
+    advisor_llm.add_argument("--collection", type=Path, default=Path("out/collection.json"), help="Pfad zu collection.json (Default: out/collection.json).")
+    advisor_llm.add_argument("--decks", type=Path, default=Path("out/decks.json"), help="Pfad zu decks.json (Default: out/decks.json).")
+    advisor_llm.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis (Default: out).")
+    advisor_llm.add_argument("--endpoint", help="LLM-Endpoint überschreiben (z.B. http://127.0.0.1:8081/v1/chat/completions).")
 
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
     serve.add_argument("--host", default=DEFAULT_HOST, help="Host (Standard: 127.0.0.1).")
@@ -379,6 +386,46 @@ def _run_advisor(args: argparse.Namespace) -> int:
         )
         if result["warnings"]:
             print(f"Warnings: {', '.join(result['warnings'])}")
+        return 0
+    if args.advisor_command == "llm":
+        if not args.collection.exists():
+            _error(f"collection.json nicht gefunden: {args.collection}")
+            return 1
+        print(f"LLM-Advisor wird ausgeführt (Collection: {args.collection})...")
+        if args.decks and args.decks.exists():
+            print(f"Decks: {args.decks}")
+        else:
+            print("Decks: keine gefunden (nur Collection-Analyse)")
+        result = run_llm_advisor(
+            collection_path=args.collection,
+            decks_path=args.decks if args.decks and args.decks.exists() else None,
+            output_dir=args.output,
+            model_endpoint=args.endpoint,
+        )
+        if result.warnings:
+            for w in result.warnings:
+                print(f"  WARN: {w}")
+        if result.summary:
+            s = result.summary
+            print(f"\nTop Priority: {s.get('topPriority', '?')}")
+            print(f"Analysed: {s.get('analysedDecks', 0)} Decks")
+        if result.craftingPriorities:
+            print(f"\nCrafting Priorities ({len(result.craftingPriorities)}):")
+            for p in result.craftingPriorities[:5]:
+                cards = p.get("cards", [])
+                card_names = ", ".join(c.get("name", "?") for c in cards[:3])
+                if len(cards) > 3:
+                    card_names += f" ... (+{len(cards)-3})"
+                print(f"  - {p.get('reason', '?')}: {card_names}")
+        if result.deckOptimizations:
+            print(f"\nDeck Optimizations ({len(result.deckOptimizations)}):")
+            for d in result.deckOptimizations[:3]:
+                print(f"  - {d.get('deckName', '?')}: {', '.join(d.get('issues', [])[:2])}")
+        if result.metaNotes:
+            print(f"\nMeta Notes ({len(result.metaNotes)}):")
+            for n in result.metaNotes[:3]:
+                print(f"  - {n}")
+        print(f"\nResult written to: {args.output / 'advisor-result.json'}")
         return 0
     return 1
 

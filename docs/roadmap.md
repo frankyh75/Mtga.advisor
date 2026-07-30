@@ -1,9 +1,7 @@
-# Roadmap (v2 — Stand 2026-07-30)
+# Roadmap (v3 — Stand 2026-07-31)
 
-**Neue Erkenntnisse aus mtgatool-Repos:**
-- `mtga-reader` (Rust) liest Mono/IL2CPP-Speicher direkt — Collection + Decks + Inventory + Ranks + Account in einem Rutsch
-- `StartHook` im Log enthält `DeckSummaries[]` — Decks ohne Memory-Scan
-- Navigationspfade für alle Datenstrukturen sind dokumentiert (`queries.rs`)
+**Wichtige Änderung:** Phase 2 wird hybrid — Collection-Export bleibt deterministisch,
+Advisor wird LLM-gestützt (lokal: ornith:35b / qwen3.5:9b).
 
 ---
 
@@ -15,25 +13,31 @@
 - 7.873 Karten, 16.277 total, valid ✅
 - Menubar-App (rumps) für manuellen Sync
 
-## 🟡 Phase 1.1: Card Metadata — Fast done
-- 181 unbekannte IDs → `Raw_CardDatabase_*.mtga` als Lösung eingebaut
-- Nächster Sync sollte sie auflösen
+## ✅ Phase 1.1: Card Metadata — Done
+- 181 unbekannte IDs via `Raw_CardDatabase_*.mtga` aufgelöst
 
-## 🟢 Phase 1.2: Deck Export — Neu
-- **StartHook aus Logs parsen** → `DeckSummaries[]` mit Namen, IDs, Formaten
-- Kein neuer Memory-Scan nötig
-- Output: `decks.json` (parallel zu `collection.json`)
-- Grundlage für Advisor (Phase 2)
+## ✅ Phase 1.2: Deck Export — Done
+- StartHook aus Logs parsen → `decks.json` mit Namen, IDs, Formaten
+- CLI: `mtga-export decks`
+- Menubar-App exportiert Decks mit
 
-## 🟡 Phase 2: Rule-Based Advisor — In Arbeit
-- CLI-MVP existiert
-- **Jetzt mit echten Deck-Daten** aus Phase 1.2
-- Wildcard-Optimierung: "Was craften für Deck X?"
-- Dashboard als GUI-Surface
+## 🟢 Phase 2: LLM Advisor — Neu (heute deployed)
+- **Hybrider Ansatz:**
+  - Collection + Decks: deterministisch (Phase 1/1.2)
+  - Advisor: LLM-gestützt (lokal, kein externer Service)
+- **LLM Advisor (`advisor llm`):**
+  - Wildcard-Crafting-Prioritäten: "Was zuerst craften?"
+  - Deck-Optimierung: Mana-Kurve, Synergien, Sideboard
+  - Meta-Relevanz: Welche Karten werden aktuell gespielt
+  - Nutzt ornith:35b (Port 8081) oder fallback qwen3.5:9b (Port 8080)
+- **Dashboard erweitert:**
+  - Decks-Tabelle (aus decks.json)
+  - LLM-Advisor-Ergebnisse (Crafting Priorities, Optimizations, Meta Notes)
+  - API-Endpoints: `/api/decks`, `/api/advisor-result`
+- **CLI:** `python -m cli.main advisor llm`
 
 ## ⏸️ Phase 3: Meta Signals — Pausiert
-- Kein externer Service nötig
-- Kann warten bis Advisor mit echten Daten läuft
+- Kann warten — LLM deckt Meta-Relevanz bereits ab
 
 ## 🔮 Strategische Gabelung (frühestens Phase 4)
 
@@ -51,7 +55,7 @@ Zwei Wege für die Zukunft:
 - Vorteil: Ein System, alles aus Memory, schneller
 - Nachteil: Rust-Build-Pipeline, sudo nötig
 
-**Entscheidung:** Weg A bleibt erstmal. Weg B ist eine Option, wenn wir an IL2CPP-Grenzen stossen oder Decks aus Memory brauchen (StartHook reicht fürs erste).
+**Entscheidung:** Weg A bleibt erstmal. Weg B ist eine Option, wenn wir an IL2CPP-Grenzen stossen.
 
 ## Phase 4: Service Layer + MCP
 - Remote-API für Multi-Client
@@ -59,5 +63,6 @@ Zwei Wege für die Zukunft:
 - Offline-Modus bleibt first-class
 
 ## Phase 5: LLM Enhancements
-- LLM-gestützte Erklärungen (opt-in)
-- Regel-basierte Outputs bleiben autoritativ
+- Prompt-Tuning für bessere Meta-Analyse
+- Optional: RAG über aktuelle Meta-Daten (MTGGoldfish, Untapped)
+- Collection-History: "Was hat sich seit letztem Sync geändert?"
