@@ -89,28 +89,32 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
 ## arena_deck.json (parsed deck)
 ```json
 {
-  "schema_version": "0.1",
-  "deck_id": "local-uuid-or-hash",
+  "schema": "arena-deck.v1",
+  "deckId": "local-hash",
   "name": "Mono-Red Aggro",
   "format": "standard",
-  "updated_at": "2025-01-01T12:00:00Z",
+  "importedAt": "2025-01-01T12:00:00Z",
   "mainboard": [
     {
-      "arena_id": 12345,
+      "arenaId": 12345,
       "name": "Lightning Strike",
-      "count": 4
+      "count": 4,
+      "rarity": "common",
+      "set": "DMU",
+      "collectorNumber": "137"
     }
   ],
   "sideboard": [
     {
-      "arena_id": 67890,
+      "arenaId": 67890,
       "name": "Abrade",
       "count": 2
     }
   ],
-  "metadata": {
-    "source": "mtga_export",
-    "notes": "optional user notes"
+  "diagnostics": {
+    "unresolved": [],
+    "ambiguous": [],
+    "warnings": []
   }
 }
 ```
@@ -118,33 +122,40 @@ These are illustrative JSON examples (not formal JSON Schema). They are intended
 ## advisor_result.json
 ```json
 {
-  "schema_version": "0.1",
-  "generated_at": "2025-01-01T12:00:00Z",
-  "deck_id": "local-uuid-or-hash",
+  "schema": "advisor-result.v1",
+  "generatedAt": "2025-01-01T12:00:00Z",
+  "deck": {
+    "deckId": "local-hash",
+    "name": "Mono-Red Aggro",
+    "format": "standard"
+  },
   "summary": {
-    "score": 0.72,
-    "confidence": "medium",
-    "notes": "Rule-based evaluation only."
+    "completionScore": 83.3,
+    "confidence": "high",
+    "missingCards": 12,
+    "missingUniqueCards": 4,
+    "hardCraftAdviceAllowed": false
   },
   "recommendations": [
     {
-      "type": "add",
-      "arena_id": 11111,
+      "type": "missing-card",
+      "arenaId": 11111,
       "name": "Play with Fire",
-      "count": 2,
-      "reason": "Improves early-game interaction",
-      "constraints": {
-        "requires_wildcards": false,
-        "max_copies": 4
-      }
+      "needed": 2,
+      "owned": 2,
+      "required": 4,
+      "rarity": "uncommon",
+      "zones": ["mainboard"],
+      "reasons": ["missing-copies", "mainboard"],
+      "craftAdvice": "what-if"
     }
   ],
-  "explanations": [
-    {
-      "rule_id": "curve.balance.v1",
-      "text": "Deck is light on one-drops; add early threats."
-    }
-  ]
+  "missingByRarity": {
+    "rare": 4,
+    "uncommon": 8
+  },
+  "warnings": ["wildcards-unknown"],
+  "evidence": ["collection.v1", "arena-deck.v1", "local-mtga-card-db"]
 }
 ```
 

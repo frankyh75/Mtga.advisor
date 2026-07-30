@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from advisor.completion import build_completion_advice, load_json, write_advisor_result
+from advisor.deck_import import import_arena_deck, write_deck
 from parser.export import export_collection
 from parser.log_paths import (
     MissingLogsError,
@@ -132,6 +134,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Schreibt keinen validation-report.json.",
     )
 
+    deck = subparsers.add_parser("deck", help="Decklisten importieren und normalisieren.")
+    deck_subparsers = deck.add_subparsers(dest="deck_command", required=True)
+    deck_import = deck_subparsers.add_parser("import", help="Importiert eine Arena-Textdeckliste.")
+    deck_import.add_argument("--file", type=Path, required=True, help="Pfad zur Arena-Textdeckliste.")
+    deck_import.add_argument("--format", required=True, help="Zielformat, z. B. standard oder brawl.")
+    deck_import.add_argument("--name", help="Deckname überschreiben.")
+    deck_import.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis.")
+
+    advisor = subparsers.add_parser("advisor", help="Regelbasierte Advisor-Funktionen.")
+    advisor_subparsers = advisor.add_subparsers(dest="advisor_command", required=True)
+    advisor_complete = advisor_subparsers.add_parser("complete", help="Berechnet Deck-Completion.")
+    advisor_complete.add_argument("--collection", type=Path, required=True, help="Pfad zu collection.json.")
+    advisor_complete.add_argument("--deck", type=Path, required=True, help="Pfad zu arena_deck.json.")
+    advisor_complete.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis.")
+
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
     serve.add_argument("--host", default=DEFAULT_HOST, help="Host (Standard: 127.0.0.1).")
     serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (Standard: 8000).")
@@ -256,6 +273,54 @@ def _run_validate(args: argparse.Namespace) -> int:
     return 0 if validation["valid"] else 1
 
 
+def _run_deck(args: argparse.Namespace) -> int:
+    if args.deck_command == "import":
+        if not args.file.exists():
+            _error(f"Deckdatei nicht gefunden: {args.file}")
+            return 1
+        deck = import_arena_deck(
+            args.file.read_text(encoding="utf-8"),
+            card_db=load_card_database(),
+            deck_format=args.format,
+            name=args.name,
+        )
+        path = write_deck(deck, args.output)
+        print(f"Deck importiert: {path}")
+        warnings = deck.get("diagnostics", {}).get("warnings", [])
+        if warnings:
+            print(f"Warnings: {', '.join(warnings)}")
+        return 0 if not warnings else 1
+    return 1
+
+
+def _run_advisor(args: argparse.Namespace) -> int:
+    if args.advisor_command == "complete":
+        if not args.collection.exists():
+            _error(f"collection.json nicht gefunden: {args.collection}")
+            return 1
+        if not args.deck.exists():
+            _error(f"arena_deck.json nicht gefunden: {args.deck}")
+            return 1
+        result = build_completion_advice(
+            collection=load_json(args.collection),
+            deck=load_json(args.deck),
+            card_db=load_card_database(),
+        )
+        path = write_advisor_result(result, args.output)
+        summary = result["summary"]
+        print(f"Advisor Result: {path}")
+        print(
+            "Completion: "
+            f"{summary['completionScore']}% "
+            f"({summary['missingCards']} missing cards, "
+            f"{summary['missingUniqueCards']} unique)"
+        )
+        if result["warnings"]:
+            print(f"Warnings: {', '.join(result['warnings'])}")
+        return 0
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -268,6 +333,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_run(args)
     if args.command == "validate":
         return _run_validate(args)
+    if args.command == "deck":
+        return _run_deck(args)
+    if args.command == "advisor":
+        return _run_advisor(args)
     if args.command == "serve":
         return _run_serve(args)
     parser.print_help()

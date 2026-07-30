@@ -1,6 +1,6 @@
 # Phase 2 Implementation Plan
 
-**Status:** planned
+**Status:** MVP implementation started
 **Prerequisite:** Phase 1/1.1 collection export and local card metadata validation are green.
 
 ## Goal
@@ -93,9 +93,9 @@ Tasks:
 - Support explicit format parameter.
 
 Acceptance:
-- `mtga-export deck import --file deck.txt --format standard --output out`
-- Writes `arena_deck.json`.
-- Fails conservatively when a card name maps ambiguously.
+- [x] `mtga-export deck import --file deck.txt --format standard --output out`
+- [x] Writes `arena_deck.json`.
+- [x] Fails conservatively when a card name maps ambiguously.
 
 ### 3. Completion Advisor
 
@@ -108,9 +108,9 @@ Tasks:
 - Generate missing-card list with names and rarity.
 
 Acceptance:
-- `mtga-export advisor complete --collection out/collection.json --deck out/arena_deck.json --output out`
-- Writes `advisor-result.json`.
-- Produces deterministic output with tests.
+- [x] `mtga-export advisor complete --collection out/collection.json --deck out/arena_deck.json --output out`
+- [x] Writes `advisor-result.json`.
+- [x] Produces deterministic output with tests.
 
 ### 4. Craft Guardrails
 
@@ -122,8 +122,8 @@ Tasks:
 - Include reasons, not rankings pretending to know meta strength.
 
 Acceptance:
-- Missing rares/mythics are visible.
-- Hard “craft this now” language is not emitted unless wildcards are complete.
+- [x] Missing cards are grouped by rarity.
+- [x] Hard “craft this now” language is not emitted unless wildcards are complete.
 
 ### 5. Format Checks
 
@@ -158,12 +158,12 @@ Acceptance:
 
 - `arena_deck.json` schema documented.
 - `advisor-result.json` schema documented.
-- CLI deck import works for a normal Arena-exported decklist.
-- Completion advisor works from local `collection.json`.
-- Missing cards are grouped by rarity.
-- Every recommendation has machine-readable reasons.
-- Wildcard-unknown state is respected.
-- Tests cover parser, resolver, completion score, and diagnostics.
+- [x] CLI deck import works for a normal Arena-exported decklist.
+- [x] Completion advisor works from local `collection.json`.
+- [x] Missing cards are grouped by rarity.
+- [x] Every recommendation has machine-readable reasons.
+- [x] Wildcard-unknown state is respected.
+- [x] Tests cover parser, resolver, completion score, and diagnostics.
 
 ## Deferred After MVP
 

@@ -19,6 +19,8 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - `mtga-export collection`: Exportiert die lokale MTGA-Sammlung aus Logs in die definierten Output-Artefakte.
 - `mtga-export scan`: Exportiert die macOS-Vollcollection per Memory-Scan aus dem laufenden MTGA-Prozess.
 - `mtga-export validate`: Validiert ein bestehendes `collection.json`-Artefakt.
+- `mtga-export deck import`: Importiert eine Arena-Textdeckliste als `arena_deck.json`.
+- `mtga-export advisor complete`: Berechnet Deck-Completion und fehlende Karten.
 - `mtga-export serve`: Startet einen lokalen Server fuer die Ausgabe-Artefakte.
 
 ## Nutzung (Lokal)
@@ -30,6 +32,8 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - Bestehenden Export validieren: `python -m cli.main validate --output out-memory` schreibt zusätzlich `validation-report.json`.
 - Karten-DB-Cache bei der Validierung neu aufbauen: `python -m cli.main validate --output out-memory --refresh-card-db`
 - Der Karten-DB-Cache nutzt `arena-id-lookup.v2`; alte/Scryfall-Caches werden ersetzt, sobald die lokale MTGA-DB verfügbar ist.
+- Deck importieren: `python -m cli.main deck import --file deck.txt --format standard --output out`
+- Completion berechnen: `python -m cli.main advisor complete --collection out/collection.json --deck out/arena_deck.json --output out`
 
 ## Phase-1 Abschlussstand
 - Der macOS-Memory-Scanner sucht mehrere Ankerkarten in einem Speicher-Durchlauf und reduziert damit die Scan-Zeit gegenüber einem separaten Vollscan pro Anker.

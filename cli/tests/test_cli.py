@@ -154,3 +154,93 @@ def test_validate_command_checks_existing_collection_and_writes_report(
     report = json.loads((out / "validation-report.json").read_text(encoding="utf-8"))
     assert report["schema"] == "validation-report.v1"
     assert report["validation"]["valid"] is True
+
+
+def test_deck_import_command_writes_arena_deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cli.main as cli_module
+
+    deck_file = tmp_path / "deck.txt"
+    deck_file.write_text("Deck\n4 Lightning Strike\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli_module,
+        "load_card_database",
+        lambda: {100: {"name": "Lightning Strike", "rarity": "common"}},
+    )
+
+    exit_code = main(
+        [
+            "deck",
+            "import",
+            "--file",
+            str(deck_file),
+            "--format",
+            "standard",
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads((tmp_path / "out" / "arena_deck.json").read_text(encoding="utf-8"))
+    assert payload["schema"] == "arena-deck.v1"
+    assert payload["mainboard"][0]["arenaId"] == 100
+
+
+def test_advisor_complete_command_writes_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cli.main as cli_module
+
+    collection = tmp_path / "collection.json"
+    deck = tmp_path / "arena_deck.json"
+    out = tmp_path / "out"
+    collection.write_text(
+        json.dumps(
+            {
+                "cards": {"100": 2},
+                "diagnostics": {
+                    "completeness": {
+                        "cards": "complete",
+                        "wildcards": "unknown",
+                        "source": "complete",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    deck.write_text(
+        json.dumps(
+            {
+                "schema": "arena-deck.v1",
+                "deckId": "abc",
+                "name": "Test Deck",
+                "format": "standard",
+                "mainboard": [{"arenaId": 100, "name": "Lightning Strike", "count": 4}],
+                "sideboard": [],
+                "diagnostics": {"warnings": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "load_card_database",
+        lambda: {100: {"name": "Lightning Strike", "rarity": "common"}},
+    )
+
+    exit_code = main(
+        [
+            "advisor",
+            "complete",
+            "--collection",
+            str(collection),
+            "--deck",
+            str(deck),
+            "--output",
+            str(out),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads((out / "advisor-result.json").read_text(encoding="utf-8"))
+    assert payload["schema"] == "advisor-result.v1"
+    assert payload["summary"]["missingCards"] == 2
