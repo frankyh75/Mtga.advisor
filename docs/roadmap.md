@@ -1,45 +1,63 @@
-# Roadmap
+# Roadmap (v2 — Stand 2026-07-30)
 
-## Phase 0: Foundations
-- Establish repository structure and documentation.
-- Define data shapes for collection, decks, advisor output, and meta signals.
-- Document deterministic rules-first approach and constraints.
+**Neue Erkenntnisse aus mtgatool-Repos:**
+- `mtga-reader` (Rust) liest Mono/IL2CPP-Speicher direkt — Collection + Decks + Inventory + Ranks + Account in einem Rutsch
+- `StartHook` im Log enthält `DeckSummaries[]` — Decks ohne Memory-Scan
+- Navigationspfade für alle Datenstrukturen sind dokumentiert (`queries.rs`)
 
-## Phase 1: Collection Export
-- Support local MTG Arena collection export.
-- macOS primary path: Memory-scan the running MTGA process and write `collection.json`.
-- Log parser remains for wildcards, inventory deltas, metadata, and partial fallbacks.
-- Normalize card identifiers and quantities into `collection.json`.
-- Validate parsing assumptions and edge cases across platforms.
-- Emit `run-report.json` and `validation-report.json` for diagnosability.
+---
 
-## Phase 1.1: Card Metadata Coverage
-- **Status:** implemented for the current macOS/Epic install path.
-- Resolve unknown Arena card IDs from scanner output.
-- Improve local MTGA data path discovery and cache refresh behavior.
-- Keep collection export valid even when metadata is incomplete.
-- Current validation result: local `Raw_CardDatabase_*.mtga` resolves the previous 181 unknown IDs.
+## ✅ Phase 0: Foundations — Done
+- Repo-Struktur, Docs, Data-Schemas
 
-## Phase 2: Rule-Based Advisor
-- **Status:** CLI MVP implemented; local dashboard MVP in progress.
-- Implement deterministic heuristics for deck improvement suggestions.
-- Use collection + decklist + meta signals to produce advisory output.
-- Ensure explainability for each recommendation.
-- Start with a CLI-first MVP before GUI/premium flows.
-- Add a local dashboard as the first GUI surface, backed by the same JSON artifacts.
-- Implementation plan: `docs/phase-2-implementation-plan.md`.
+## ✅ Phase 1: Collection Export — Done
+- Memory-Scan (LLDB) + Log-Parsing + Merge läuft auf MacBook
+- 7.873 Karten, 16.277 total, valid ✅
+- Menubar-App (rumps) für manuellen Sync
 
-## Phase 3: Meta Signals & Updates
-- Introduce optional ingestion of meta snapshots (no remote service required).
-- Support versioned meta data and update history.
-- Improve advisor weighting based on meta trends.
+## 🟡 Phase 1.1: Card Metadata — Fast done
+- 181 unbekannte IDs → `Raw_CardDatabase_*.mtga` als Lösung eingebaut
+- Nächster Sync sollte sie auflösen
+
+## 🟢 Phase 1.2: Deck Export — Neu
+- **StartHook aus Logs parsen** → `DeckSummaries[]` mit Namen, IDs, Formaten
+- Kein neuer Memory-Scan nötig
+- Output: `decks.json` (parallel zu `collection.json`)
+- Grundlage für Advisor (Phase 2)
+
+## 🟡 Phase 2: Rule-Based Advisor — In Arbeit
+- CLI-MVP existiert
+- **Jetzt mit echten Deck-Daten** aus Phase 1.2
+- Wildcard-Optimierung: "Was craften für Deck X?"
+- Dashboard als GUI-Surface
+
+## ⏸️ Phase 3: Meta Signals — Pausiert
+- Kein externer Service nötig
+- Kann warten bis Advisor mit echten Daten läuft
+
+## 🔮 Strategische Gabelung (frühestens Phase 4)
+
+Zwei Wege für die Zukunft:
+
+### Weg A: LLDB/Logs weiterentwickeln (aktuell)
+- Unser Python-Stack (LLDB + Log-Parsing + Merge)
+- Vorteil: Läuft jetzt, kein Rust nötig
+- Nachteil: Zwei getrennte Pfade (Memory + Logs), kein IL2CPP
+
+### Weg B: mtga-reader einbinden (optional)
+- Rust-Binary via Subprozess aus Python anrufen
+- Liefert Collection + Decks + Inventory + Ranks + Account aus einem Guss
+- macOS/IL2CPP-Reader müssten implementiert werden (Doku existiert)
+- Vorteil: Ein System, alles aus Memory, schneller
+- Nachteil: Rust-Build-Pipeline, sudo nötig
+
+**Entscheidung:** Weg A bleibt erstmal. Weg B ist eine Option, wenn wir an IL2CPP-Grenzen stossen oder Decks aus Memory brauchen (StartHook reicht fürs erste).
 
 ## Phase 4: Service Layer + MCP
-- Add a remote service interface for multi-client access.
-- Introduce MCP integration as an optional interface layer.
-- Keep offline/local mode as a first-class path.
+- Remote-API für Multi-Client
+- MCP als optionales Interface
+- Offline-Modus bleibt first-class
 
-## Phase 5: Optional LLM Enhancements
-- Add LLM-assisted explanations or summaries (opt-in).
-- Preserve rule-based outputs as the authoritative source.
-- Ensure no core functionality depends on LLM availability.
+## Phase 5: LLM Enhancements
+- LLM-gestützte Erklärungen (opt-in)
+- Regel-basierte Outputs bleiben autoritativ
