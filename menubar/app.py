@@ -2,12 +2,12 @@
 
 Built with rumps (Ridiculously Uncomplicated macOS Python Statusbar apps).
 Runs a menubar icon: click to open menu → "Sync Now" triggers a full
-collection sync (LLDB memory scan + log parsing + merge) in a background
+collection sync (pymem memory scan + log parsing + merge) in a background
 thread, then writes ``out/collection.json``.
 
 Usage::
 
-    python menubar/app.py
+    python -m menubar.app
 
 Requires: rumps, pillow (for icon generation).
 """
@@ -33,28 +33,18 @@ import rumps  # noqa: E402
 
 from parser.log_paths import detect_platform, discover_logs, MissingLogsError  # noqa: E402
 from parser.pipeline import parse_collection  # noqa: E402
-from scanner.lldb_probe import _run_lldb, _resolve_pid, _resolve_card_ids  # noqa: E402
-from scanner.macos_paths import get_macos_mtga_process_name  # noqa: E402
+from scanner.memory_scanner import scan_collection_detailed  # noqa: E402
 
-from .icon_generator import generate_icon  # noqa: E402
+try:
+    from .icon_generator import generate_icon  # noqa: E402
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from menubar.icon_generator import generate_icon  # type: ignore[no-redef]  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "out"
 
-# Anchor cards for the LLDB probe — a handful of commonly-owned cards that
-# serve as search needles. The probe finds these IDs in memory, then the
-# payload reports match counts.  A real collection scan requires the full
-# anchor set from the user; for the menubar app we use a "wide sweep" mode
-# that scans for all card IDs from the database.
-ANCHOR_CARD_NAMES = [
-    "Llanowar Elves",
-    "Opt",
-    "Shock",
-    "Giant Growth",
-    "Healing Salve",
-]
-
 # Menu item keys (used with rumps.MenuItem dict-style access).
 MENU_STATUS = "status"
+MENU_LAST_ERROR = "last_error"
 MENU_SYNC = "sync_now"
 MENU_OPEN_OUTPUT = "open_output"
 MENU_QUIT = "quit"
@@ -82,16 +72,19 @@ class MtgaSyncApp(rumps.App):
         self._last_sync_time: datetime | None = None
         self._last_sync_card_count: int = 0
         self._last_sync_error: str | None = None
+        self._status_timer = rumps.Timer(self._refresh_status, 60)
 
         self.menu = [
             {"Sync Now": MENU_SYNC},
             None,  # separator
             {MENU_STATUS: rumps.MenuItem("Status: Ready", callback=None)},
+            {MENU_LAST_ERROR: rumps.MenuItem("Last Error: None", callback=None)},
             None,
             {"Open Output Folder": MENU_OPEN_OUTPUT},
             None,
             {"Quit": MENU_QUIT},
         ]
+        self._status_timer.start()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -152,7 +145,7 @@ class MtgaSyncApp(rumps.App):
                 message="Waiting for sync to finish before quitting…",
             )
             self._sync_thread.join(timeout=10)
-        rumps.App.quit(self)
+        rumps.quit_application()
 
     # ------------------------------------------------------------------
     # Sync logic (runs in background thread)
@@ -162,7 +155,7 @@ class MtgaSyncApp(rumps.App):
         """Execute the full sync pipeline:
 
         1. Check if MTGA is running (pgrep).
-        2. LLDB memory scan (scanner/lldb_probe.py).
+        2. pymem memory scan (scanner/memory_scanner.py).
         3. Log parsing (parser/pipeline.py).
         4. Merge: memory baseline + log deltas.
         5. Write collection.json.
@@ -171,6 +164,8 @@ class MtgaSyncApp(rumps.App):
             memory_cards = self._run_memory_scan()
             log_cards, log_wildcards = self._run_log_parsing()
             merged_cards = self._merge(memory_cards, log_cards)
+            if not merged_cards:
+                raise RuntimeError("No collection data produced; existing collection.json was left unchanged.")
             card_count = self._write_collection(merged_cards, log_wildcards)
 
             self._last_sync_time = datetime.now(timezone.utc)
@@ -186,7 +181,9 @@ class MtgaSyncApp(rumps.App):
 
         except Exception as exc:
             self._last_sync_error = str(exc)
+            self._record_error("sync", exc)
             self._update_status(f"Error: {self._truncate(self._last_sync_error, 40)}")
+            self._update_last_error(self._last_sync_error)
             rumps.notification(
                 title="MTGA Sync",
                 subtitle="Sync failed",
@@ -194,72 +191,33 @@ class MtgaSyncApp(rumps.App):
             )
 
     def _run_memory_scan(self) -> dict[int, int]:
-        """Run the LLDB memory probe against the MTGA process.
+        """Run the pymem memory scanner against the MTGA process.
 
         Returns:
             Dictionary of ``{grpId: count}`` from memory scan.
-            Empty dict if MTGA is not running (with a notification).
+            Empty dict if MTGA is not running or permissions are missing.
 
         Raises:
-            RuntimeError: If LLDB fails unrecoverably.
+            RuntimeError: If the memory scanner fails unrecoverably.
         """
-        process_name = get_macos_mtga_process_name()
-
-        # Check if MTGA is running.
-        try:
-            pid = _resolve_pid(process_name)
-        except RuntimeError:
-            rumps.notification(
-                title="MTGA Sync",
-                subtitle="MTGA not running",
-                message="Memory scan skipped. Start MTGA for a full collection scan.",
-            )
-            return {}
-
-        # Resolve anchor card IDs from names.
-        try:
-            card_ids = _resolve_card_ids([], ANCHOR_CARD_NAMES)
-        except RuntimeError as exc:
-            rumps.notification(
-                title="MTGA Sync",
-                subtitle="Card DB issue",
-                message=self._truncate(str(exc), 200),
-            )
-            return {}
-
-        if not card_ids:
-            return {}
-
-        # Build a minimal args namespace for _run_lldb.
-        import argparse
-
-        args = argparse.Namespace(
-            max_regions=None,
-            max_region_mb=1024,
-            chunk_mb=4,
-            max_matches=256,
-            mode="native-find",
-            show_lldb_output=False,
+        output_lines: list[str] = []
+        result = scan_collection_detailed(
+            input_fn=lambda _prompt: "Y",
+            print_fn=lambda *args, **_kwargs: output_lines.append(" ".join(str(arg) for arg in args)),
+            debug=False,
         )
-
-        result = _run_lldb(pid, card_ids, args)
-
-        # The LLDB probe returns match *addresses*, not a parsed collection.
-        # It tells us which card IDs are present in memory and how many
-        # address matches were found.  We interpret this as: card ID is
-        # present with count ≥ 1 if any match was found.
-        #
-        # A full collection extraction (reading memory blocks around matches)
-        # is handled by the pymem scanner; here we use LLDB results as a
-        # "presence" signal for the anchor cards only.
-        memory_cards: dict[int, int] = {}
-        for card_id_str, match_info in result.get("matches", {}).items():
-            card_id = int(card_id_str)
-            count = match_info.get("count", 0)
-            if count > 0:
-                memory_cards[card_id] = 1  # presence = at least 1
-
-        return memory_cards
+        if result is None:
+            detail = "\n".join(output_lines[-5:]) or "Memory scan failed."
+            self._last_sync_error = detail
+            self._record_error("memory-scan", detail)
+            self._update_last_error(detail)
+            rumps.notification(
+                title="MTGA Sync",
+                subtitle="Memory scan failed",
+                message=self._truncate(detail, 200),
+            )
+            return {}
+        return result.collection
 
     def _run_log_parsing(self) -> tuple[dict[int, int], dict[str, int]]:
         """Parse MTGA Player.log files for collection snapshots and deltas.
@@ -380,6 +338,29 @@ class MtgaSyncApp(rumps.App):
         except Exception:
             pass  # Menu not yet built or key mismatch.
 
+    def _update_last_error(self, text: str | None) -> None:
+        """Keep the last failure visible after transient notifications disappear."""
+        label = "Last Error: None" if not text else f"Last Error: {self._truncate(text, 60)}"
+        try:
+            self.menu[MENU_LAST_ERROR].title = label
+        except Exception:
+            pass
+
+    def _record_error(self, stage: str, error: object) -> None:
+        """Append persistent diagnostics to out/menubar.log."""
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self.output_dir / "menubar.log"
+            log_path.write_text(
+                (
+                    log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+                )
+                + f"[{_iso_now()}] {stage}: {error}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     def _status_text(self) -> str:
         """Build the status label from last sync state."""
         if self._last_sync_error:
@@ -414,8 +395,7 @@ class MtgaSyncApp(rumps.App):
             return text
         return text[: max_len - 1] + "…"
 
-    @rumps.timer(60)
-    def _refresh_status(self, _sender: Any) -> None:
+    def _refresh_status(self, _sender: Any = None) -> None:
         """Periodically refresh the status label to update 'X ago' text."""
         if self._sync_thread is not None and self._sync_thread.is_alive():
             return  # Don't clobber "Syncing…" while a sync is running.

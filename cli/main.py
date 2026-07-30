@@ -235,21 +235,24 @@ def _run_validate(args: argparse.Namespace) -> int:
         import json
 
         report_path = args.output / "validation-report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "schema": "validation-report.v1",
-                    "collection": collection_path.as_posix(),
-                    "validation": validation,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
+        try:
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "validation-report.v1",
+                        "collection": collection_path.as_posix(),
+                        "validation": validation,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        print(f"Validation report: {report_path}")
+            print(f"Validation report: {report_path}")
+        except OSError as exc:
+            print(f"Validation report konnte nicht geschrieben werden: {exc}")
     return 0 if validation["valid"] else 1
 
 

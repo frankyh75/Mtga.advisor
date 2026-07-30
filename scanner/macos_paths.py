@@ -18,6 +18,12 @@ def get_macos_mtga_data_path() -> Path | None:
         Path.home()
         / "Library"
         / "Application Support"
+        / "com.wizards.mtga"
+        / "Downloads"
+        / "Raw",
+        Path.home()
+        / "Library"
+        / "Application Support"
         / "MTGA"
         / "MTGA_Data"
         / "Downloads"

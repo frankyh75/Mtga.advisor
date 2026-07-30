@@ -45,22 +45,13 @@ def load_local_mtga_database() -> dict[int, dict[str, Any]]:
 
             tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
-            if "Cards" not in tables or "Localizations" not in tables:
+            if "Cards" not in tables or not ({"Localizations", "Localizations_enUS"} & tables):
                 conn.close()
                 continue
 
-            # Lokalisierung laden (bevorzugt en-US)
-            loc_map: dict[int, str] = {}
-            try:
-                cursor.execute("SELECT Id, Text FROM Localizations WHERE Format LIKE '%en-US%' OR Format IS NULL")
-                for lid, text in cursor.fetchall():
-                    if text:
-                        loc_map[lid] = text
-            except sqlite3.Error:
-                cursor.execute("SELECT Id, Text FROM Localizations")
-                for lid, text in cursor.fetchall():
-                    if text:
-                        loc_map[lid] = text
+            # Lokalisierung laden (bevorzugt en-US). MTGA nutzt je nach Version
+            # entweder Localizations(Id, Text, Format) oder Localizations_enUS(LocId, Loc).
+            loc_map = _load_localizations(cursor, tables)
 
             # Spalten prüfen
             cols = [row[1] for row in cursor.execute("PRAGMA table_info(Cards)")]
@@ -100,6 +91,34 @@ def load_local_mtga_database() -> dict[int, dict[str, Any]]:
 
     print(f"📊 {len(lookup)} Karten lokal geladen")
     return lookup
+
+
+def _load_localizations(cursor: sqlite3.Cursor, tables: set[str]) -> dict[int, str]:
+    """Lädt englische Karten-Titel aus bekannten MTGA-Lokalisierungsschemas."""
+    loc_map: dict[int, str] = {}
+    if "Localizations_enUS" in tables:
+        cols = {row[1] for row in cursor.execute("PRAGMA table_info(Localizations_enUS)")}
+        if {"LocId", "Loc"}.issubset(cols):
+            cursor.execute("SELECT LocId, Loc FROM Localizations_enUS")
+            for lid, text in cursor.fetchall():
+                if text:
+                    loc_map[int(lid)] = str(text)
+            return loc_map
+
+    if "Localizations" in tables:
+        cols = {row[1] for row in cursor.execute("PRAGMA table_info(Localizations)")}
+        if {"Id", "Text", "Format"}.issubset(cols):
+            cursor.execute("SELECT Id, Text FROM Localizations WHERE Format LIKE '%en-US%' OR Format IS NULL")
+            for lid, text in cursor.fetchall():
+                if text:
+                    loc_map[int(lid)] = str(text)
+            return loc_map
+        if {"Id", "Text"}.issubset(cols):
+            cursor.execute("SELECT Id, Text FROM Localizations")
+            for lid, text in cursor.fetchall():
+                if text:
+                    loc_map[int(lid)] = str(text)
+    return loc_map
 
 
 def fetch_scryfall_database() -> dict[int, dict[str, Any]]:

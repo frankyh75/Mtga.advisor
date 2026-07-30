@@ -14,7 +14,7 @@ Logs:  Wildcards/Inventory-Deltas/Metadaten, Fallbacks und Validierung
 1. **Kanonischer Export**
    - [x] `mtga-export scan` erzeugt Memory-Scan-Artefakte.
    - [x] `mtga-export run` nutzt auf macOS den Memory-Scan als Hauptpfad.
-   - [ ] Manueller MacBook-Test von `sudo -E .venv/bin/python -m cli.main run --output out`.
+   - [x] Manueller MacBook-Test von `sudo -E .venv/bin/python -m cli.main run --output out`.
 
 2. **Scanner-Stabilität**
    - [x] `pymem-osx`-Attach mit `sudo` verifiziert.
@@ -39,15 +39,16 @@ Logs:  Wildcards/Inventory-Deltas/Metadaten, Fallbacks und Validierung
    - [ ] DeckSummariesV2 nur als `partial` Fallback/Validierung verwenden.
 
 6. **Card Metadata Coverage (Phase 1.1)**
-   - [ ] Unknown-ID-Report aus realem Export auswerten (`181` IDs / `345` Karten im aktuellen MacBook-Run).
-   - [ ] Lokale MTGA-Datenpfade gezielt erweitern, falls `.mtga`-Daten außerhalb der bekannten Pfade liegen.
-   - [ ] Karten-DB-Cache-Refresh dokumentieren und bei Bedarf automatisieren.
-   - [ ] Entscheiden, ob unbekannte IDs als Arena-only/Special/Token klassifiziert oder extern gemappt werden.
-   - [ ] Phase 2 erst starten, wenn Unknown-ID-Verhalten explizit ist.
+   - [x] Unknown-ID-Report aus realem Export auswerten (`181` IDs / `345` Karten im vorherigen MacBook-Run).
+   - [x] Lokale MTGA-Datenpfade gezielt erweitern: `~/Library/Application Support/com.wizards.mtga/Downloads/Raw`.
+   - [x] Aktuelles MTGA-DB-Schema mit `Localizations_enUS(LocId, Loc)` unterstützen.
+   - [x] Karten-DB-Cache-Refresh über `mtga-export validate --refresh-card-db` dokumentieren.
+   - [x] Aktueller Befund: lokaler `Raw_CardDatabase_*.mtga` löst die vorherigen 181 Unknown IDs vollständig auf.
+   - [x] Phase 2 darf für Karten-Namen/Metadaten auf der lokalen MTGA-DB aufsetzen.
 
 7. **Phase-1 Abschlusskriterium**
    - [ ] `run`, `scan`, `validate`, `serve` sind dokumentiert und getestet.
-   - [ ] `pytest` grün.
+   - [x] `pytest` grün.
    - [ ] README und Scanner-Testplan widersprechen nicht mehr dem Memory-Scan-Hauptpfad.
    - [ ] Keine Advisor-Logik in Phase 1.
 

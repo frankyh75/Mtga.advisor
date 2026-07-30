@@ -43,6 +43,7 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - `scanner/`: macOS Memory-Scanning mit `pymem-osx`, Pattern-Scan und Karten-Datenbank.
 - `docs/parser-wechsel-macos-scanner.md`: Begründung fuer den Wechsel zum Memory-Scanning.
 - `docs/macos-scanner-testplan.md`: Testplan fuer die Scanner-Validierung auf macOS.
+- `docs/phase-2-implementation-plan.md`: CLI-first Plan fuer den regelbasierten Advisor.
 
 ## Architecture Decision Records (ADRs)
 - [ADR 0001: Tech-Stack](docs/adr/0001-tech-stack.md)

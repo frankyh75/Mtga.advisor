@@ -6,13 +6,13 @@
 
 ```bash
 # 1. Ins Repo wechseln
-cd ~/workspace/Mtga.advisor
+cd /Users/frankhermann/Documents/mtga-advisor
 
 # 2. Abhängigkeiten installieren
-pip install rumps pillow
+.venv/bin/python -m pip install rumps pillow
 
 # 3. Starten
-python menubar/app.py
+.venv/bin/python menubar/app.py
 ```
 
 ## Bedienung
@@ -28,7 +28,7 @@ Nach dem Start siehst du ein **"M"-Icon** in der Menubar (oben rechts).
 
 ## Sync — Was passiert?
 
-1. **LLDB-Probe** — Scannt MTGA-Prozess-Speicher nach Karten-IDs (kein sudo nötig)
+1. **Memory-Scan** — nutzt den produktiven `pymem-osx` Scannerpfad
 2. **Log-Parsing** — Liest Deltas aus `Player.log`
 3. **Merge** — Memory als Baseline + Log-Deltas
 4. **Output** — `out/collection.json`
@@ -42,7 +42,7 @@ Nach erfolgreichem Sync erscheint eine macOS-Notification:
 |---------|----------|
 | MTGA läuft nicht | Memory-Scan übersprungen, nur Logs |
 | Keine Logs gefunden | Nur Memory-Scan |
-| LLDB nicht installiert | Fehlermeldung (Xcode CLI Tools nötig) |
+| Memory-Scan ohne Rechte | Fehlermeldung; final ist ein privileged helper geplant |
 | Sync läuft bereits | Notification "Already syncing" |
 
 ## Autostart (optional)
@@ -62,8 +62,8 @@ cat > ~/Library/LaunchAgents/com.mtga.sync.plist << EOF
     <string>com.mtga.sync</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>/Users/frankhermann/workspace/Mtga.advisor/menubar/app.py</string>
+        <string>/Users/frankhermann/Documents/mtga-advisor/.venv/bin/python</string>
+        <string>/Users/frankhermann/Documents/mtga-advisor/menubar/app.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -82,4 +82,4 @@ launchctl load ~/Library/LaunchAgents/com.mtga.sync.plist
 - macOS 12+
 - Python 3.8+
 - MTGA (für Memory-Scan)
-- Xcode CLI Tools (für LLDB-Probe): `xcode-select --install`
+- Für Vollscan aktuell `task_for_pid()`-Rechte; final ist ein privileged helper vorgesehen.

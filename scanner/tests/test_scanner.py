@@ -31,9 +31,32 @@ def _make_sqlite_card_db(path: Path) -> None:
             handle.write(b"\0" * (600 * 1024 - current_size))
 
 
+def _make_current_sqlite_card_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE Localizations_enUS (LocId INTEGER, Formatted INTEGER, Loc TEXT)")
+    cursor.execute(
+        "CREATE TABLE Cards (GrpId INTEGER, TitleId INTEGER, ExpansionCode TEXT, CollectorNumber TEXT)"
+    )
+    cursor.execute(
+        "INSERT INTO Localizations_enUS (LocId, Formatted, Loc) VALUES (?, ?, ?)",
+        (1, 1, "Current Test Card"),
+    )
+    cursor.execute(
+        "INSERT INTO Cards (GrpId, TitleId, ExpansionCode, CollectorNumber) VALUES (?, ?, ?, ?)",
+        (54321, 1, "cur", "9"),
+    )
+    conn.commit()
+    conn.close()
+    current_size = path.stat().st_size
+    if current_size < 600 * 1024:
+        with path.open("ab") as handle:
+            handle.write(b"\0" * (600 * 1024 - current_size))
+
+
 def test_macos_paths_pick_existing_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
-    data_path = home / "Library" / "Application Support" / "MTGA" / "MTGA_Data" / "Downloads" / "Raw"
+    data_path = home / "Library" / "Application Support" / "com.wizards.mtga" / "Downloads" / "Raw"
     log_path = home / "Library" / "Logs" / "Wizards Of The Coast" / "MTGA"
     data_path.mkdir(parents=True)
     log_path.mkdir(parents=True)
@@ -70,6 +93,26 @@ def test_load_card_database_uses_local_sqlite_and_cache(tmp_path: Path, monkeypa
     assert lookup[12345]["set"] == "abc"
     assert lookup[12345]["collector_number"] == "7"
     assert (cache_dir / "arena_id_lookup.json").exists()
+
+
+def test_load_card_database_supports_current_localization_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "Raw"
+    raw_path.mkdir()
+    db_file = raw_path / "Raw_CardDatabase_test.mtga"
+    _make_current_sqlite_card_db(db_file)
+
+    cache_dir = tmp_path / ".mtga_advisor"
+    monkeypatch.setattr(card_database, "get_default_cache_dir", lambda: cache_dir)
+    monkeypatch.setattr(card_database, "get_macos_mtga_data_path", lambda: raw_path)
+
+    lookup = card_database.load_card_database(refresh_cache=True)
+
+    assert lookup[54321]["name"] == "Current Test Card"
+    assert lookup[54321]["set"] == "cur"
+    assert lookup[54321]["collector_number"] == "9"
 
 
 def test_scan_process_memory_scans_full_regions(monkeypatch: pytest.MonkeyPatch) -> None:

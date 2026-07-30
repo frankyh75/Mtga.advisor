@@ -6,7 +6,7 @@
 
 ## Problem
 
-- Memory-Scanning (LLDB/pymem) erfordert, dass MTGA läuft und der User **nicht im Match** ist
+- Memory-Scanning erfordert, dass MTGA läuft und der User **nicht im Match** ist
 - Log-Parsing allein liefert keine Vollcollection (nur Deltas)
 - Automatischer Cron-Job scheitert, wenn MTGA nicht läuft oder der User mitten im Spiel ist
 
@@ -22,7 +22,7 @@ Der Helper macht dann in einem Durchgang:
 ```
 [User drückt Sync]
     │
-    ├── 1. LLDB-Probe → Memory-Scan (Vollcollection)
+    ├── 1. pymem/Helper → Memory-Scan (Vollcollection)
     │      └── Nur wenn MTGA läuft & attachbar
     │
     ├── 2. Log-Parsing → Deltas aus Inventory.Updated
@@ -56,8 +56,8 @@ sudo mtga-export sync
 
 Der Befehl:
 1. Prüft ob MTGA läuft (`pgrep MTGA`)
-2. Versucht LLDB-Probe (bevorzugt, kein sudo)
-3. Fallback: pymem-osx (sudo)
+2. Versucht produktiven pymem-osx Scanner
+3. Fallback: klare Fehlermeldung, wenn sudo/Helper-Rechte fehlen
 4. Parst aktuelle Logs
 5. Merged Ergebnisse
 6. Schreibt `collection.json`
@@ -67,7 +67,7 @@ Der Befehl:
 ```
 cli/main.py sync
     │
-    ├── scanner/lldb_probe.py    → Memory-Scan (Vollcollection)
+    ├── scanner/memory_scanner.py → Memory-Scan (Vollcollection)
     ├── parser/pipeline.py       → Log-Parsing (Deltas, Wildcards)
     ├── merge.py (NEU)           → Memory + Logs zusammenführen
     └── export.py                → collection.json schreiben
@@ -92,6 +92,7 @@ Memory-Scan (Vollcollection)     Log-Parsing (Deltas)
 
 ## Nächste Schritte
 
-1. `merge.py` schreiben (Memory + Logs)
-2. `cli/main.py` um `sync`-Befehl erweitern
-3. macOS Menubar-App als Nice-to-have
+1. Privileged-helper-Strategie festlegen
+2. `merge.py` schreiben (Memory + Logs)
+3. `cli/main.py` um `sync`-Befehl erweitern
+4. macOS Menubar-App an Helper anbinden

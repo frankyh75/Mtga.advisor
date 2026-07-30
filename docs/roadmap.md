@@ -14,15 +14,18 @@
 - Emit `run-report.json` and `validation-report.json` for diagnosability.
 
 ## Phase 1.1: Card Metadata Coverage
+- **Status:** implemented for the current macOS/Epic install path.
 - Resolve unknown Arena card IDs from scanner output.
 - Improve local MTGA data path discovery and cache refresh behavior.
 - Keep collection export valid even when metadata is incomplete.
-- Block Phase 2 card-name/deck-advice work until unknown-ID handling is explicit.
+- Current validation result: local `Raw_CardDatabase_*.mtga` resolves the previous 181 unknown IDs.
 
 ## Phase 2: Rule-Based Advisor
 - Implement deterministic heuristics for deck improvement suggestions.
 - Use collection + decklist + meta signals to produce advisory output.
 - Ensure explainability for each recommendation.
+- Start with a CLI-first MVP before GUI/premium flows.
+- Implementation plan: `docs/phase-2-implementation-plan.md`.
 
 ## Phase 3: Meta Signals & Updates
 - Introduce optional ingestion of meta snapshots (no remote service required).
