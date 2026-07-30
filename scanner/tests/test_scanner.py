@@ -115,6 +115,64 @@ def test_load_card_database_supports_current_localization_schema(
     assert lookup[54321]["collector_number"] == "9"
 
 
+def test_load_card_database_refreshes_legacy_cache_when_local_db_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "Raw"
+    raw_path.mkdir()
+    db_file = raw_path / "Raw_CardDatabase_test.mtga"
+    _make_current_sqlite_card_db(db_file)
+
+    cache_dir = tmp_path / ".mtga_advisor"
+    cache_dir.mkdir()
+    cache_file = cache_dir / "arena_id_lookup.json"
+    cache_file.write_text(
+        json.dumps({"999": {"name": "Legacy Cache Card"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(card_database, "get_default_cache_dir", lambda: cache_dir)
+    monkeypatch.setattr(card_database, "get_macos_mtga_data_path", lambda: raw_path)
+
+    lookup = card_database.load_card_database()
+    cached = json.loads(cache_file.read_text(encoding="utf-8"))
+
+    assert 54321 in lookup
+    assert 999 not in lookup
+    assert cached["schema"] == card_database.CACHE_SCHEMA
+    assert cached["source"] == card_database.CACHE_SOURCE_LOCAL
+    assert cached["cards"]["54321"]["name"] == "Current Test Card"
+
+
+def test_load_card_database_uses_v2_local_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "Raw"
+    raw_path.mkdir()
+    cache_dir = tmp_path / ".mtga_advisor"
+    cache_dir.mkdir()
+    cache_file = cache_dir / "arena_id_lookup.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "schema": card_database.CACHE_SCHEMA,
+                "source": card_database.CACHE_SOURCE_LOCAL,
+                "sourcePath": raw_path.as_posix(),
+                "cardCount": 1,
+                "cards": {"777": {"name": "Cached Local Card"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(card_database, "get_default_cache_dir", lambda: cache_dir)
+    monkeypatch.setattr(card_database, "get_macos_mtga_data_path", lambda: raw_path)
+
+    lookup = card_database.load_card_database()
+
+    assert lookup == {777: {"name": "Cached Local Card"}}
+
+
 def test_scan_process_memory_scans_full_regions(monkeypatch: pytest.MonkeyPatch) -> None:
     needle = b"MTGA"
     base_addr = 0x1000

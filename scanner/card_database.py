@@ -10,6 +10,10 @@ from typing import Any
 
 from .macos_paths import get_default_cache_dir, get_macos_mtga_data_path
 
+CACHE_SCHEMA = "arena-id-lookup.v2"
+CACHE_SOURCE_LOCAL = "local-mtga"
+CACHE_SOURCE_SCRYFALL = "scryfall"
+
 
 def _lookup_file() -> Path:
     return get_default_cache_dir() / "arena_id_lookup.json"
@@ -177,6 +181,51 @@ def _add_scryfall_card(lookup: dict[int, dict[str, Any]], card: dict[str, Any]) 
         }
 
 
+def _read_lookup_cache(path: Path) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    """Reads current and legacy cache formats."""
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict) and data.get("schema") == CACHE_SCHEMA:
+        cards = data.get("cards", {})
+        metadata = {
+            "schema": data.get("schema"),
+            "source": data.get("source"),
+            "sourcePath": data.get("sourcePath"),
+            "cardCount": data.get("cardCount"),
+        }
+        return {int(k): v for k, v in cards.items() if isinstance(v, dict)}, metadata
+
+    if isinstance(data, dict):
+        # Legacy flat cache: {"123": {...}}.
+        return {int(k): v for k, v in data.items() if isinstance(v, dict)}, {
+            "schema": "legacy-flat",
+            "source": "unknown",
+            "sourcePath": None,
+            "cardCount": len(data),
+        }
+
+    return {}, {"schema": "unknown", "source": "unknown", "sourcePath": None, "cardCount": 0}
+
+
+def _write_lookup_cache(
+    path: Path,
+    lookup: dict[int, dict[str, Any]],
+    *,
+    source: str,
+    source_path: Path | None,
+) -> None:
+    payload = {
+        "schema": CACHE_SCHEMA,
+        "source": source,
+        "sourcePath": source_path.as_posix() if source_path else None,
+        "cardCount": len(lookup),
+        "cards": {str(k): v for k, v in sorted(lookup.items())},
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, sort_keys=True)
+
+
 def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, Any]]:
     """Orchestriert das Laden: Cache → Lokal → Scryfall.
 
@@ -191,12 +240,18 @@ def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, An
     # 1. Cache
     lookup_file = _lookup_file()
 
+    local_path = get_macos_mtga_data_path()
+
     if lookup_file.exists() and not refresh_cache:
         try:
             print("📦 Lade gecachte Karten-DB...")
-            with lookup_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            return {int(k): v for k, v in data.items() if isinstance(v, dict)}
+            lookup, metadata = _read_lookup_cache(lookup_file)
+            cache_source = metadata.get("source")
+            # A local MTGA card DB has better Arena-ID coverage than Scryfall/legacy caches.
+            if local_path and cache_source != CACHE_SOURCE_LOCAL:
+                print("⚠ Cache ist nicht aus lokaler MTGA-DB; lade lokale Karten-DB neu...")
+            else:
+                return lookup
         except Exception:
             print("⚠ Cache beschädigt, lade neu...")
     elif refresh_cache:
@@ -204,19 +259,22 @@ def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, An
 
     # 2. Lokale DB
     lookup = load_local_mtga_database()
+    source = CACHE_SOURCE_LOCAL if lookup else CACHE_SOURCE_SCRYFALL
+    source_path = local_path if lookup else None
 
     # 3. Scryfall Fallback
     if not lookup:
         print("⚠ Keine lokale DB gefunden. Lade von Scryfall...")
         lookup = fetch_scryfall_database()
+        source = CACHE_SOURCE_SCRYFALL
+        source_path = None
 
     # Cache schreiben
     if lookup:
         try:
-            with lookup_file.open("w", encoding="utf-8") as f:
-                json.dump({str(k): v for k, v in lookup.items()}, f)
+            _write_lookup_cache(lookup_file, lookup, source=source, source_path=source_path)
             print("💾 Karten-DB gecached")
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"⚠ Karten-DB-Cache konnte nicht geschrieben werden: {exc}")
 
     return lookup

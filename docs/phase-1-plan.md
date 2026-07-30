@@ -43,6 +43,8 @@ Logs:  Wildcards/Inventory-Deltas/Metadaten, Fallbacks und Validierung
    - [x] Lokale MTGA-Datenpfade gezielt erweitern: `~/Library/Application Support/com.wizards.mtga/Downloads/Raw`.
    - [x] Aktuelles MTGA-DB-Schema mit `Localizations_enUS(LocId, Loc)` unterstützen.
    - [x] Karten-DB-Cache-Refresh über `mtga-export validate --refresh-card-db` dokumentieren.
+   - [x] Karten-DB-Cache auf `arena-id-lookup.v2` mit Quelle/Pfad/CardCount umgestellt.
+   - [x] Legacy-/Scryfall-Caches werden bei verfügbarer lokaler MTGA-DB automatisch ersetzt.
    - [x] Aktueller Befund: lokaler `Raw_CardDatabase_*.mtga` löst die vorherigen 181 Unknown IDs vollständig auf.
    - [x] Phase 2 darf für Karten-Namen/Metadaten auf der lokalen MTGA-DB aufsetzen.
 

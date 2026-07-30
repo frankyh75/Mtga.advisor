@@ -29,6 +29,7 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - macOS Memory-Scan: MTGA starten, in die Decks-Ansicht wechseln, dann `sudo -E .venv/bin/python -m cli.main scan --output out-memory`
 - Bestehenden Export validieren: `python -m cli.main validate --output out-memory` schreibt zusätzlich `validation-report.json`.
 - Karten-DB-Cache bei der Validierung neu aufbauen: `python -m cli.main validate --output out-memory --refresh-card-db`
+- Der Karten-DB-Cache nutzt `arena-id-lookup.v2`; alte/Scryfall-Caches werden ersetzt, sobald die lokale MTGA-DB verfügbar ist.
 
 ## Phase-1 Abschlussstand
 - Der macOS-Memory-Scanner sucht mehrere Ankerkarten in einem Speicher-Durchlauf und reduziert damit die Scan-Zeit gegenüber einem separaten Vollscan pro Anker.
