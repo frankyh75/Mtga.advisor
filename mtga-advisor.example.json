@@ -1,6 +1,6 @@
 {
-  "_comment": "MTGA Advisor LLM Config — Beispiel für Tailscale-Zugriff",
-  "endpoint": "http://100.XXX.XXX.XXX:8081/v1/chat/completions",
+  "_comment": "MTGA Advisor LLM Config — Tailscale (Mac Studio)",
+  "endpoint": "http://100.95.116.78:8081/v1/chat/completions",
   "model_name": "ornith:35b",
   "temperature": 0.3,
   "max_tokens": 4096,
