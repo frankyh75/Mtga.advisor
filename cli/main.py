@@ -8,6 +8,7 @@ from typing import Sequence
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_import import import_arena_deck, write_deck
 from advisor.llm_advisor import run_llm_advisor
+from advisor.llm_config import LLMConfig, load_config, write_default_config
 from parser.decks import export_decks
 from parser.export import export_collection
 from parser.log_paths import (
@@ -193,6 +194,13 @@ def _build_parser() -> argparse.ArgumentParser:
     advisor_llm.add_argument("--decks", type=Path, default=Path("out/decks.json"), help="Pfad zu decks.json (Default: out/decks.json).")
     advisor_llm.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis (Default: out).")
     advisor_llm.add_argument("--endpoint", help="LLM-Endpoint überschreiben (z.B. http://127.0.0.1:8081/v1/chat/completions).")
+    advisor_llm.add_argument("--model", help="Modellname (für Logging/Anzeige).")
+    advisor_llm.add_argument("--temperature", type=float, help="Sampling-Temperatur (0.0 - 1.0).")
+    advisor_llm.add_argument("--max-tokens", type=int, help="Maximale Token-Anzahl.")
+    advisor_llm.add_argument("--config", type=Path, help="Pfad zu einer Config-Datei (JSON/YAML).")
+
+    advisor_config = advisor_subparsers.add_parser("init-config", help="Erzeugt eine Default-Config-Datei.")
+    advisor_config.add_argument("--output", type=Path, default=None, help="Zielpfad (Default: ~/.config/mtga-advisor/config.json).")
 
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
     serve.add_argument("--host", default=DEFAULT_HOST, help="Host (Standard: 127.0.0.1).")
@@ -391,16 +399,37 @@ def _run_advisor(args: argparse.Namespace) -> int:
         if not args.collection.exists():
             _error(f"collection.json nicht gefunden: {args.collection}")
             return 1
-        print(f"LLM-Advisor wird ausgeführt (Collection: {args.collection})...")
+
+        # CLI-Overrides für LLM-Konfiguration sammeln
+        cli_overrides = {}
+        if args.endpoint:
+            cli_overrides["endpoint"] = args.endpoint
+        if args.model:
+            cli_overrides["model_name"] = args.model
+        if args.temperature is not None:
+            cli_overrides["temperature"] = args.temperature
+        if args.max_tokens is not None:
+            cli_overrides["max_tokens"] = args.max_tokens
+
+        # Config laden (Datei + Env + CLI)
+        llm_config = load_config(config_path=args.config, cli_overrides=cli_overrides)
+
+        print(f"LLM-Advisor wird ausgeführt...")
+        print(f"  Endpoint: {llm_config.endpoint}")
+        print(f"  Model: {llm_config.model_name}")
+        print(f"  Temperature: {llm_config.temperature}")
+        print(f"  Max Tokens: {llm_config.max_tokens}")
+        print(f"  Collection: {args.collection}")
         if args.decks and args.decks.exists():
-            print(f"Decks: {args.decks}")
+            print(f"  Decks: {args.decks}")
         else:
-            print("Decks: keine gefunden (nur Collection-Analyse)")
+            print("  Decks: keine gefunden (nur Collection-Analyse)")
+
         result = run_llm_advisor(
             collection_path=args.collection,
             decks_path=args.decks if args.decks and args.decks.exists() else None,
             output_dir=args.output,
-            model_endpoint=args.endpoint,
+            llm_config=llm_config,
         )
         if result.warnings:
             for w in result.warnings:
@@ -426,6 +455,14 @@ def _run_advisor(args: argparse.Namespace) -> int:
             for n in result.metaNotes[:3]:
                 print(f"  - {n}")
         print(f"\nResult written to: {args.output / 'advisor-result.json'}")
+        return 0
+
+    if args.advisor_command == "init-config":
+        path = write_default_config(args.output)
+        print(f"Default-Config geschrieben: {path}")
+        print(f"")
+        print(f"Bearbeite die Datei und passe endpoint, temperature etc. an.")
+        print(f"Danach: python -m cli.main advisor llm")
         return 0
     return 1
 

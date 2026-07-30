@@ -1,11 +1,14 @@
 """LLM-gestützter MTGA Advisor.
 
-Nimmt Collection + Decks und erzeugt per lokalem LLM:
+Nimmt Collection + Decks und erzeugt per LLM:
 - Wildcard-Crafting-Prioritäten (was zuerst craften)
 - Deck-Optimierungsvorschläge (Mana-Kurve, Synergien, Sideboard)
 - Meta-Relevanz-Bewertung
 
-Nutzt llama.cpp Server (Port 8081, ornith:35b) oder fallback auf Port 8080 (qwen3.5:9b).
+LLM-Konfiguration über LLMConfig (siehe llm_config.py):
+- Config-Datei: ~/.config/mtga-advisor/config.json oder mtga-advisor.json
+- Umgebungsvariablen: MTGA_LLM_ENDPOINT, MTGA_LLM_TEMPERATURE, etc.
+- CLI-Argumente
 """
 
 from __future__ import annotations
@@ -19,10 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-LLAMA_ENDPOINT = "http://127.0.0.1:8081/v1/chat/completions"
-QWEN_ENDPOINT = "http://127.0.0.1:8080/v1/chat/completions"
-REQUEST_TIMEOUT = 120
+from .llm_config import LLMConfig, load_config
 
 
 @dataclass
@@ -42,7 +42,8 @@ def run_llm_advisor(
     collection_path: Path,
     decks_path: Path | None = None,
     output_dir: Path | None = None,
-    model_endpoint: str | None = None,
+    llm_config: LLMConfig | None = None,
+    cli_overrides: dict[str, Any] | None = None,
 ) -> LLMAdvisorResult:
     """Führe den LLM-Advisor aus.
 
@@ -50,7 +51,10 @@ def run_llm_advisor(
         collection_path: Pfad zu collection.json.
         decks_path: Optional, Pfad zu decks.json.
         output_dir: Optional, schreibt advisor-result.json.
-        model_endpoint: Optional, überschreibt LLM-Endpoint.
+        llm_config: Optional, LLMConfig-Objekt. Wenn nicht gesetzt, wird
+                    automatisch geladen (Config-Datei → Env → Defaults).
+        cli_overrides: Optional, Dict mit CLI-Override-Werten
+                       (z.B. {"endpoint": "...", "temperature": 0.5}).
 
     Returns:
         LLMAdvisorResult mit Empfehlungen.
@@ -58,7 +62,11 @@ def run_llm_advisor(
     result = LLMAdvisorResult()
     result.generatedAt = _iso_now()
 
-    # 1. Daten laden
+    # 1. Config laden
+    config = llm_config or load_config(cli_overrides=cli_overrides)
+    result.model = config.model_name
+
+    # 2. Daten laden
     collection = _load_json(collection_path)
     if collection is None:
         result.warnings.append("collection.json nicht gefunden oder ungültig")
@@ -68,24 +76,21 @@ def run_llm_advisor(
     if decks_path and decks_path.exists():
         decks = _load_json(decks_path)
 
-    # 2. Prompt bauen
+    # 3. Prompt bauen
     prompt = _build_prompt(collection, decks)
 
-    # 3. LLM aufrufen
-    endpoint = model_endpoint or _detect_endpoint()
-    result.model = endpoint
-
+    # 4. LLM aufrufen
     try:
-        raw = _call_llm(endpoint, prompt)
+        raw = _call_llm(config, prompt)
         result.rawResponse = raw
     except Exception as exc:
         result.warnings.append(f"LLM-Aufruf fehlgeschlagen: {exc}")
         return result
 
-    # 4. Antwort parsen
+    # 5. Antwort parsen
     _parse_response(result, raw)
 
-    # 5. Optional schreiben
+    # 6. Optional schreiben
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
         path = output_dir / "advisor-result.json"
@@ -102,20 +107,6 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-
-
-def _detect_endpoint() -> str:
-    """Prüfe welcher LLM-Server läuft, bevorzuge ornith:35b."""
-    import socket
-
-    for endpoint in [LLAMA_ENDPOINT, QWEN_ENDPOINT]:
-        host, port_part = endpoint.split("://")[1].split("/")[0].split(":")
-        try:
-            with socket.create_connection((host, int(port_part)), timeout=1):
-                return endpoint
-        except (OSError, ValueError):
-            continue
-    return LLAMA_ENDPOINT  # Default
 
 
 def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> str:
@@ -216,37 +207,36 @@ def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> s
     return "\n".join(lines)
 
 
-def _call_llm(endpoint: str, prompt: str) -> str:
-    """Rufe den llama.cpp Chat-Completion-Endpoint auf."""
+def _call_llm(config: LLMConfig, prompt: str) -> str:
+    """Rufe den Chat-Completion-Endpoint auf (OpenAI-kompatibel)."""
     payload = {
         "messages": [
-            {
-                "role": "system",
-                "content": "Du bist ein MTGA Deck-Building Experte. Antworte ausschließlich mit validem JSON, keinem anderen Text.",
-            },
+            {"role": "system", "content": config.system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
-        "max_tokens": 4096,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
         "stop": [],
     }
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        endpoint,
+        config.endpoint,
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=config.timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {error_body}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"LLM nicht erreichbar ({endpoint}): {exc.reason}") from exc
+        raise RuntimeError(
+            f"LLM nicht erreichbar ({config.endpoint}): {exc.reason}"
+        ) from exc
 
     choices = body.get("choices", [])
     if not choices:
@@ -264,7 +254,6 @@ def _parse_response(result: LLMAdvisorResult, raw: str) -> None:
 
     Versucht JSON aus der Antwort zu extrahieren (auch wenn Markdown-Code-Blöcke drum sind).
     """
-    # JSON aus Markdown-Code-Block extrahieren
     json_str = raw.strip()
 
     # ```json ... ``` oder ``` ... ``` entfernen
