@@ -21,19 +21,26 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - `mtga-export validate`: Validiert ein bestehendes `collection.json`-Artefakt.
 - `mtga-export deck import`: Importiert eine Arena-Textdeckliste als `arena_deck.json`.
 - `mtga-export advisor complete`: Berechnet Deck-Completion und fehlende Karten.
-- `mtga-export serve`: Startet einen lokalen Server fuer die Ausgabe-Artefakte.
+- `mtga-export serve`: Startet das lokale Dashboard fuer die Ausgabe-Artefakte.
 
 ## Nutzung (Lokal)
 - Kanonischer Export: `sudo -E .venv/bin/python -m cli.main run --output out`
 - Log-basierter Export: `python -m cli.main collection --output out`
 - Explizite Log-Pfade angeben, falls Auto-Discovery scheitert: `python -m cli.main collection --log /pfad/zu/Player.log --log /pfad/zu/Player-prev.log --output out`
-- Artefakte im Browser anzeigen: `python -m cli.main serve --output out --port 8000` und dann `http://127.0.0.1:8000/` oeffnen.
+- Lokales Dashboard starten: `python -m cli.main serve --output out --port 8000` und dann `http://127.0.0.1:8000/` oeffnen.
 - macOS Memory-Scan: MTGA starten, in die Decks-Ansicht wechseln, dann `sudo -E .venv/bin/python -m cli.main scan --output out-memory`
 - Bestehenden Export validieren: `python -m cli.main validate --output out-memory` schreibt zusätzlich `validation-report.json`.
 - Karten-DB-Cache bei der Validierung neu aufbauen: `python -m cli.main validate --output out-memory --refresh-card-db`
 - Der Karten-DB-Cache nutzt `arena-id-lookup.v2`; alte/Scryfall-Caches werden ersetzt, sobald die lokale MTGA-DB verfügbar ist.
 - Deck importieren: `python -m cli.main deck import --file deck.txt --format standard --output out`
 - Completion berechnen: `python -m cli.main advisor complete --collection out/collection.json --deck out/arena_deck.json --output out`
+- Voller Phase-2-Flow: erst `run`, dann `deck import`, dann `advisor complete`, danach `serve`.
+
+## Lokales Dashboard
+- Das Dashboard ist bewusst ein lokaler Web-Viewer statt einer nativen App: weniger macOS-Signierungs-/TCC-Komplexitaet, leichter testbar, und vom Menubar-Helper spaeter direkt oeffenbar.
+- Es zeigt `collection.json`, `run-report.json`, `arena_deck.json` und `advisor-result.json` in einer zusammengefassten Ansicht.
+- API-Endpunkte: `/api/collection`, `/api/run-report`, `/api/deck`, `/api/advisor-result`.
+- Das Dashboard erzeugt keine Empfehlungen selbst; `advisor-result.json` bleibt das kanonische regelbasierte Ergebnis.
 
 ## Phase-1 Abschlussstand
 - Der macOS-Memory-Scanner sucht mehrere Ankerkarten in einem Speicher-Durchlauf und reduziert damit die Scan-Zeit gegenüber einem separaten Vollscan pro Anker.

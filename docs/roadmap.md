@@ -21,10 +21,12 @@
 - Current validation result: local `Raw_CardDatabase_*.mtga` resolves the previous 181 unknown IDs.
 
 ## Phase 2: Rule-Based Advisor
+- **Status:** CLI MVP implemented; local dashboard MVP in progress.
 - Implement deterministic heuristics for deck improvement suggestions.
 - Use collection + decklist + meta signals to produce advisory output.
 - Ensure explainability for each recommendation.
 - Start with a CLI-first MVP before GUI/premium flows.
+- Add a local dashboard as the first GUI surface, backed by the same JSON artifacts.
 - Implementation plan: `docs/phase-2-implementation-plan.md`.
 
 ## Phase 3: Meta Signals & Updates

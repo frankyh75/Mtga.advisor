@@ -1,13 +1,13 @@
 # Phase 2 Implementation Plan
 
-**Status:** MVP implementation started
+**Status:** CLI MVP implemented; local dashboard MVP started.
 **Prerequisite:** Phase 1/1.1 collection export and local card metadata validation are green.
 
 ## Goal
 
 Phase 2 delivers a deterministic, explainable advisor for a single imported deck and the local collection.
 
-The first MVP is CLI-first. GUI, premium flows, meta imports, and multi-deck comparison come later.
+The first MVP is CLI-first. The first GUI surface is a local dashboard that renders the same JSON artifacts without becoming the source of truth. Premium flows, meta imports, and multi-deck comparison come later.
 
 ## Non-Goals
 
@@ -154,6 +154,22 @@ Acceptance:
 - Errors are actionable.
 - Output files are stable and diff-friendly.
 
+### 7. Local Dashboard
+
+**Goal:** provide a low-friction GUI for the current local artifacts.
+
+Tasks:
+- Render collection, run report, imported deck, and advisor result in one local page.
+- Keep JSON artifacts as canonical data; the UI must not duplicate advisor logic.
+- Expose read-only API endpoints for all four artifacts.
+- Keep the server local by default on `127.0.0.1`.
+
+Acceptance:
+- [x] `mtga-export serve --output out --port 8000`
+- [x] `/` renders collection/deck/advisor summaries.
+- [x] `/api/collection`, `/api/run-report`, `/api/deck`, `/api/advisor-result` expose raw JSON.
+- [x] Tests cover the dashboard renderer.
+
 ## Phase 2 MVP Definition of Done
 
 - `arena_deck.json` schema documented.
@@ -164,6 +180,7 @@ Acceptance:
 - [x] Every recommendation has machine-readable reasons.
 - [x] Wildcard-unknown state is respected.
 - [x] Tests cover parser, resolver, completion score, and diagnostics.
+- [x] Local dashboard can inspect the Phase-2 artifacts.
 
 ## Deferred After MVP
 
@@ -171,5 +188,5 @@ Acceptance:
 - Upgrade path optimization.
 - Jump-In advisor.
 - Meta snapshots.
-- GUI cards/search views.
+- GUI cards/search views beyond the local dashboard.
 - Premium gating.
