@@ -31,6 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import rumps  # noqa: E402
 
+from parser.decks import export_decks
 from parser.log_paths import detect_platform, discover_logs, MissingLogsError  # noqa: E402
 from parser.pipeline import parse_collection  # noqa: E402
 from scanner.memory_scanner import MemoryScanResult, scan_collection_detailed, write_collection_artifacts  # noqa: E402
@@ -159,6 +160,7 @@ class MtgaSyncApp(rumps.App):
         1. Check if MTGA is running (pgrep).
         2. pymem memory scan (scanner/memory_scanner.py).
         3. Write collection.json, run-report.json, validation-report.json.
+        4. Parse StartHook from logs → decks.json.
         """
         try:
             scan_result = self._run_memory_scan()
@@ -171,23 +173,35 @@ class MtgaSyncApp(rumps.App):
             )
             validation_report_path = self._write_validation_report(scan_result)
             self._restore_user_ownership(collection_path, run_report_path, validation_report_path)
+
+            # Phase 1.2: Deck-Export aus Logs
+            decks_path = self._export_decks()
+
             card_count = len(scan_result.collection)
             total_cards = sum(scan_result.collection.values())
-
             self._last_sync_time = datetime.now(timezone.utc)
             self._last_sync_card_count = card_count
             self._last_sync_error = None
+
+            deck_count = 0
+            if decks_path:
+                try:
+                    decks_data = json.loads(decks_path.read_text(encoding="utf-8"))
+                    deck_count = len(decks_data.get("decks", []))
+                except (OSError, ValueError):
+                    pass
 
             self._update_status(self._status_text())
             self._log_info(
                 "Sync complete: "
                 f"{card_count} unique / {total_cards} total cards. "
+                f"{deck_count} decks exported. "
                 f"Artifacts: {collection_path}, {run_report_path}, {validation_report_path}"
             )
             rumps.notification(
                 title="MTGA Sync",
                 subtitle="Sync complete",
-                message=f"{card_count} unique / {total_cards} total cards synced",
+                message=f"{card_count} unique / {total_cards} total cards, {deck_count} decks",
             )
 
         except Exception as exc:
@@ -254,6 +268,28 @@ class MtgaSyncApp(rumps.App):
         cards = report.cards or {}
         wildcards = report.wildcards or {}
         return cards, wildcards
+
+    def _export_decks(self) -> Path | None:
+        """Parse StartHook from logs and write decks.json.
+
+        Returns:
+            Path to decks.json, or None if no logs found.
+        """
+        platform = detect_platform()
+        try:
+            discovery = discover_logs(platform)
+        except MissingLogsError:
+            self._log_info("Deck export skipped: no logs found.")
+            return None
+
+        log_paths = discovery.found
+        try:
+            export_paths = export_decks(log_paths, self.output_dir)
+            self._log_info(f"Deck export: {export_paths.decks} ({export_paths.run_report})")
+            return export_paths.decks
+        except Exception as exc:
+            self._log_info(f"Deck export failed: {exc}")
+            return None
 
     def _merge(
         self,

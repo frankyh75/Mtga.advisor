@@ -7,6 +7,7 @@ from typing import Sequence
 
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_import import import_arena_deck, write_deck
+from parser.decks import export_decks
 from parser.export import export_collection
 from parser.log_paths import (
     MissingLogsError,
@@ -68,6 +69,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override für macOS Steam userdata Pfad.",
     )
     collection.add_argument(
+        "--custom-log-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
+    )
+
+    decks = subparsers.add_parser("decks", help="Exportiert Decks aus MTGA-Logs (StartHook-Events).")
+    decks.add_argument(
+        "--log",
+        dest="logs",
+        action="append",
+        type=Path,
+        help="Pfad zu einer Logdatei (mehrfach angeben möglich). Wenn nicht gesetzt, werden Logs automatisch gesucht.",
+    )
+    decks.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Ausgabeverzeichnis (Standard: ./out).",
+    )
+    decks.add_argument(
+        "--platform",
+        choices=["windows", "macos", "unknown"],
+        help="Plattform überschreiben (Standard: automatische Erkennung).",
+    )
+    decks.add_argument(
+        "--macos-logs",
+        type=Path,
+        help="Override für macOS Log-Pfad.",
+    )
+    decks.add_argument(
+        "--macos-steam-userdata",
+        type=Path,
+        help="Override für macOS Steam userdata Pfad.",
+    )
+    decks.add_argument(
         "--custom-log-dir",
         action="append",
         type=Path,
@@ -206,6 +244,30 @@ def _run_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_decks(args: argparse.Namespace) -> int:
+    if args.logs:
+        log_paths = [Path(path) for path in args.logs]
+        missing = [path for path in log_paths if not path.exists()]
+        if missing:
+            missing_str = ", ".join(path.as_posix() for path in missing)
+            _error(f"Logdatei(en) nicht gefunden: {missing_str}")
+            return 1
+    else:
+        platform = args.platform or detect_platform()
+        config = _path_config_from_args(args)
+        try:
+            discovery = discover_logs(platform, config)
+        except MissingLogsError as exc:
+            _error(str(exc))
+            return 1
+        log_paths = discovery.found
+
+    export_paths = export_decks(log_paths, args.output)
+    print(f"Decks exportiert: {export_paths.decks}")
+    print(f"Run-Report: {export_paths.run_report}")
+    return 0
+
+
 def _run_scan(args: argparse.Namespace) -> int:
     result = scan_memory_collection_detailed(debug=args.debug)
     if result is None:
@@ -327,6 +389,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "collection":
         return _run_collection(args)
+    if args.command == "decks":
+        return _run_decks(args)
     if args.command == "scan":
         return _run_scan(args)
     if args.command == "run":
