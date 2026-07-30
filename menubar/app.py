@@ -2,8 +2,8 @@
 
 Built with rumps (Ridiculously Uncomplicated macOS Python Statusbar apps).
 Runs a menubar icon: click to open menu → "Sync Now" triggers a full
-collection sync (pymem memory scan + log parsing + merge) in a background
-thread, then writes ``out/collection.json``.
+collection sync (pymem memory scan) in a background thread, then writes
+``out/collection.json`` plus reports.
 
 Usage::
 
@@ -33,7 +33,7 @@ import rumps  # noqa: E402
 
 from parser.log_paths import detect_platform, discover_logs, MissingLogsError  # noqa: E402
 from parser.pipeline import parse_collection  # noqa: E402
-from scanner.memory_scanner import scan_collection_detailed  # noqa: E402
+from scanner.memory_scanner import MemoryScanResult, scan_collection_detailed, write_collection_artifacts  # noqa: E402
 
 try:
     from .icon_generator import generate_icon  # noqa: E402
@@ -54,7 +54,7 @@ class MtgaSyncApp(rumps.App):
     """Menubar application that syncs the MTGA collection on demand.
 
     The app displays a menubar icon. Clicking opens a menu with:
-      - **Sync Now** — starts a background sync (LLDB + logs + merge).
+      - **Sync Now** — starts a background sync.
       - **Status** — current state: Ready / Syncing / Last sync info.
       - **Open Output** — reveals ``out/collection.json`` in Finder.
       - **Quit** — terminates the app.
@@ -156,17 +156,21 @@ class MtgaSyncApp(rumps.App):
 
         1. Check if MTGA is running (pgrep).
         2. pymem memory scan (scanner/memory_scanner.py).
-        3. Log parsing (parser/pipeline.py).
-        4. Merge: memory baseline + log deltas.
-        5. Write collection.json.
+        3. Write collection.json, run-report.json, validation-report.json.
         """
         try:
-            memory_cards = self._run_memory_scan()
-            log_cards, log_wildcards = self._run_log_parsing()
-            merged_cards = self._merge(memory_cards, log_cards)
-            if not merged_cards:
+            scan_result = self._run_memory_scan()
+            if scan_result is None:
                 raise RuntimeError("No collection data produced; existing collection.json was left unchanged.")
-            card_count = self._write_collection(merged_cards, log_wildcards)
+            collection_path, run_report_path = write_collection_artifacts(
+                scan_result.collection,
+                self.output_dir,
+                scan_result=scan_result,
+            )
+            validation_report_path = self._write_validation_report(scan_result)
+            self._restore_user_ownership(collection_path, run_report_path, validation_report_path)
+            card_count = len(scan_result.collection)
+            total_cards = sum(scan_result.collection.values())
 
             self._last_sync_time = datetime.now(timezone.utc)
             self._last_sync_card_count = card_count
@@ -176,7 +180,7 @@ class MtgaSyncApp(rumps.App):
             rumps.notification(
                 title="MTGA Sync",
                 subtitle="Sync complete",
-                message=f"{card_count} cards synced to collection.json",
+                message=f"{card_count} unique / {total_cards} total cards synced",
             )
 
         except Exception as exc:
@@ -190,12 +194,11 @@ class MtgaSyncApp(rumps.App):
                 message=self._truncate(str(exc), 200),
             )
 
-    def _run_memory_scan(self) -> dict[int, int]:
+    def _run_memory_scan(self) -> MemoryScanResult | None:
         """Run the pymem memory scanner against the MTGA process.
 
         Returns:
-            Dictionary of ``{grpId: count}`` from memory scan.
-            Empty dict if MTGA is not running or permissions are missing.
+            Detailed memory scan result, or None if MTGA is not running or permissions are missing.
 
         Raises:
             RuntimeError: If the memory scanner fails unrecoverably.
@@ -216,8 +219,8 @@ class MtgaSyncApp(rumps.App):
                 subtitle="Memory scan failed",
                 message=self._truncate(detail, 200),
             )
-            return {}
-        return result.collection
+            return None
+        return result
 
     def _run_log_parsing(self) -> tuple[dict[int, int], dict[str, int]]:
         """Parse MTGA Player.log files for collection snapshots and deltas.
@@ -321,6 +324,39 @@ class MtgaSyncApp(rumps.App):
         )
 
         return len(cards)
+
+    def _write_validation_report(self, scan_result: MemoryScanResult) -> Path:
+        """Write validation-report.json next to collection artifacts."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        report_path = self.output_dir / "validation-report.json"
+        collection_path = self.output_dir / "collection.json"
+        payload = {
+            "schema": "validation-report.v1",
+            "collection": collection_path.as_posix(),
+            "validation": scan_result.validation,
+        }
+        report_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return report_path
+
+    def _restore_user_ownership(self, *paths: Path) -> None:
+        """If started via sudo, hand generated artifacts back to the invoking user."""
+        sudo_uid = os.environ.get("SUDO_UID")
+        sudo_gid = os.environ.get("SUDO_GID")
+        if not sudo_uid or not sudo_gid:
+            return
+        try:
+            uid = int(sudo_uid)
+            gid = int(sudo_gid)
+        except ValueError:
+            return
+        for path in paths:
+            try:
+                os.chown(path, uid, gid)
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     # UI helpers
