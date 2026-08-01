@@ -15,9 +15,18 @@ class TestParseStartHook:
 
     def test_empty_data(self):
         """Leeres oder fehlendes DeckSummaries-Array."""
-        assert parse_start_hook({}) is None
-        assert parse_start_hook({"DeckSummaries": []}) is None
-        assert parse_start_hook({"DeckSummaries": None}) is None
+        result, warnings = parse_start_hook({})
+        assert result is None
+        assert warnings == []
+
+        result, warnings = parse_start_hook({"DeckSummaries": []})
+        assert result is None
+        assert warnings == []
+
+        result, warnings = parse_start_hook({"DeckSummaries": None})
+        assert result is None
+        assert len(warnings) == 1
+        assert "kein Array" in warnings[0]
 
     def test_single_deck(self):
         """Ein einzelnes Deck mit allen Feldern."""
@@ -37,9 +46,10 @@ class TestParseStartHook:
             "InventoryInfo": {"Gems": 100, "Gold": 5000},
             "DeckLimit": 75,
         }
-        result = parse_start_hook(data)
+        result, warnings = parse_start_hook(data)
         assert result is not None
         assert len(result.deck_summaries) == 1
+        assert warnings == []
 
         deck = result.deck_summaries[0]
         assert deck.name == "My Deck"
@@ -65,7 +75,7 @@ class TestParseStartHook:
                 {"Name": "Deck C", "DeckId": "id-c"},
             ]
         }
-        result = parse_start_hook(data)
+        result, warnings = parse_start_hook(data)
         assert result is not None
         assert len(result.deck_summaries) == 3
         assert [d.name for d in result.deck_summaries] == ["Deck A", "Deck B", "Deck C"]
@@ -73,7 +83,7 @@ class TestParseStartHook:
     def test_deck_without_id(self):
         """Deck ohne DeckId (sollte trotzdem funktionieren)."""
         data = {"DeckSummaries": [{"Name": "No ID Deck"}]}
-        result = parse_start_hook(data)
+        result, warnings = parse_start_hook(data)
         assert result is not None
         assert len(result.deck_summaries) == 1
         assert result.deck_summaries[0].name == "No ID Deck"
@@ -92,7 +102,7 @@ class TestParseStartHook:
                 }
             ]
         }
-        result = parse_start_hook(data)
+        result, warnings = parse_start_hook(data)
         assert result is not None
         deck = result.deck_summaries[0]
         assert deck.attributes["Format"] == "Historic"
@@ -112,7 +122,7 @@ class TestParseStartHook:
                 "Gold": 5000,
             },
         }
-        result = parse_start_hook(data)
+        result, warnings = parse_start_hook(data)
         assert result is not None
         assert "SeqId" not in result.inventory
         assert "Changes" not in result.inventory
@@ -129,10 +139,61 @@ class TestParseStartHook:
                 "UnreleasedSets": ["EDG"],
             },
         }
-        result = parse_start_hook(data)
+        result, warnings = parse_start_hook(data)
         assert result is not None
         assert result.card_metadata is not None
         assert result.card_metadata["NonCraftableCardList"] == [123, 456]
+
+    def test_empty_name_skipped_with_warning(self):
+        """Leere Deck-Namen werden übersprungen und warnen."""
+        data = {
+            "DeckSummaries": [
+                {"Name": "Valid Deck"},
+                {"Name": ""},
+                {"Name": "   "},
+            ]
+        }
+        result, warnings = parse_start_hook(data)
+        assert result is not None
+        assert len(result.deck_summaries) == 1
+        assert result.deck_summaries[0].name == "Valid Deck"
+        assert len(warnings) == 2
+        assert "leeren oder whitespace-only Namen" in warnings[0]
+        assert "leeren oder whitespace-only Namen" in warnings[1]
+
+    def test_invalid_deck_id_warning(self):
+        """Unkonvertierbare DeckId erzeugt Warning."""
+        data = {
+            "DeckSummaries": [
+                {"Name": "Test", "DeckId": None},
+            ]
+        }
+        result, warnings = parse_start_hook(data)
+        assert result is not None
+        assert result.deck_summaries[0].deck_id is None
+
+    def test_non_dict_deck_summaries_warning(self):
+        """DeckSummaries als nicht-List führt zu Warning."""
+        data = {"DeckSummaries": "not a list"}
+        result, warnings = parse_start_hook(data)
+        assert result is None
+        assert len(warnings) == 1
+        assert "kein Array" in warnings[0]
+
+    def test_mixed_valid_invalid_decks(self):
+        """Gemischte gültige/ungültige Decks — gültige werden geparsed, ungültige warnen."""
+        data = {
+            "DeckSummaries": [
+                {"Name": "Good"},
+                "not_a_dict",
+                {"Name": ""},
+                {"Name": "Also Good"},
+            ]
+        }
+        result, warnings = parse_start_hook(data)
+        assert result is not None
+        assert len(result.deck_summaries) == 2
+        assert len(warnings) == 2  # nicht_dict + leerer Name
 
 
 class TestExportDecks:
@@ -238,3 +299,31 @@ class TestExportDecks:
             assert report["schema"] == "run-report-decks.v1"
             assert report["summary"]["deckCount"] == 1
             assert "start-hook-parser" in report["diagnostics"]["evidence"]
+
+    def test_missing_deck_id_warning(self):
+        """Decks ohne DeckId werden im Report markiert."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "Player.log"
+            self._write_log(log_path, [
+                {
+                    "event": "StartHook",
+                    "data": {
+                        "DeckSummaries": [
+                            {"Name": "Deck without ID"},
+                            {"Name": "Deck with ID", "DeckId": "id-1"},
+                        ]
+                    },
+                },
+            ])
+            output_dir = Path(tmp) / "out"
+            export_paths = export_decks([log_path], output_dir)
+
+            payload = json.loads(export_paths.decks.read_text(encoding="utf-8"))
+            assert payload["diagnostics"]["missingDeckIds"] == 1
+            assert payload["diagnostics"]["warnings"] is not None
+            assert len(payload["diagnostics"]["warnings"]) == 1
+            assert "keine DeckId" in payload["diagnostics"]["warnings"][0]
+
+            # Run-Report sollte auch die Warnung enthalten
+            report = json.loads(export_paths.run_report.read_text(encoding="utf-8"))
+            assert len(report["diagnostics"]["warnings"]) == 1

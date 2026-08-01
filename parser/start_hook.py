@@ -40,30 +40,61 @@ class StartHookData:
     deck_limit: int | None
 
 
-def parse_start_hook(data: dict[str, Any]) -> StartHookData | None:
+def parse_start_hook(data: dict[str, Any]) -> tuple[StartHookData | None, list[str]]:
     """Extrahiere DeckSummaries und andere Daten aus einem StartHook-Event.
 
     Args:
         data: Das JSON-Payload des StartHook-Events.
 
     Returns:
-        StartHookData mit geparsten Decks, oder None wenn keine Decks enthalten.
+        Tuple von (StartHookData, warnings) — StartHookData ist None wenn keine
+        Decks extrahiert werden konnten, warnings enthält Probleme die beim Parsing
+        aufgetreten sind.
     """
     raw_decks = data.get("DeckSummaries", [])
-    if not isinstance(raw_decks, list) or not raw_decks:
-        return None
+    warnings: list[str] = []
+
+    if not isinstance(raw_decks, list):
+        warnings.append(
+            f"DeckSummaries ist kein Array (typ={type(raw_decks).__name__})."
+        )
+        return None, warnings
+    if not raw_decks:
+        return None, warnings
 
     decks: list[DeckSummary] = []
-    for raw in raw_decks:
+    for idx, raw in enumerate(raw_decks):
         if not isinstance(raw, dict):
+            warnings.append(f"DeckSummaries[{idx}] ist kein Objekt, übersprungen.")
             continue
         name = raw.get("Name", "")
-        if not name:
+        if not isinstance(name, str):
+            name = str(name) if name is not None else ""
+        if not name.strip():
+            warnings.append(
+                f"DeckSummaries[{idx}] hat leeren oder whitespace-only Namen, übersprungen."
+            )
             continue
 
         deck_id = raw.get("DeckId")
         if deck_id is not None:
-            deck_id = str(deck_id)
+            try:
+                deck_id = str(deck_id)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"DeckSummaries[{idx}]: DeckId konnte nicht zu String konvertiert werden."
+                )
+                deck_id = None
+
+        deck_tile_id = raw.get("DeckTileId")
+        if deck_tile_id is not None:
+            try:
+                deck_tile_id = int(deck_tile_id)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"DeckSummaries[{idx}]: DeckTileId konnte nicht zu int konvertiert werden."
+                )
+                deck_tile_id = None
 
         attributes_raw = raw.get("Attributes", {})
         if isinstance(attributes_raw, list):
@@ -88,7 +119,7 @@ def parse_start_hook(data: dict[str, Any]) -> StartHookData | None:
             DeckSummary(
                 name=name,
                 deck_id=deck_id,
-                deck_tile_id=raw.get("DeckTileId"),
+                deck_tile_id=deck_tile_id,
                 description=raw.get("Description"),
                 attributes=attributes,
                 format_legalities=format_legalities,
@@ -98,7 +129,7 @@ def parse_start_hook(data: dict[str, Any]) -> StartHookData | None:
         )
 
     if not decks:
-        return None
+        return None, warnings
 
     inventory = data.get("InventoryInfo")
     if isinstance(inventory, dict):
@@ -126,10 +157,13 @@ def parse_start_hook(data: dict[str, Any]) -> StartHookData | None:
             )
         }
 
-    return StartHookData(
-        deck_summaries=decks,
-        inventory=inventory,
-        formats=formats,
-        card_metadata=card_metadata,
-        deck_limit=data.get("DeckLimit"),
+    return (
+        StartHookData(
+            deck_summaries=decks,
+            inventory=inventory,
+            formats=formats,
+            card_metadata=card_metadata,
+            deck_limit=data.get("DeckLimit"),
+        ),
+        warnings,
     )
