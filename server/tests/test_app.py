@@ -5,7 +5,7 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from server.app import _render_index, _render_missing_table  # noqa: E402
+from server.app import _render_index  # noqa: E402
 
 
 def test_render_index_includes_collection_deck_and_advisor_summary() -> None:
@@ -42,15 +42,31 @@ def test_render_index_includes_collection_deck_and_advisor_summary() -> None:
         "warnings": ["wildcards-unknown"],
     }
 
-    html = _render_index(collection, run_report, deck, advisor_result)
+    decks = {
+        "schema": "decks.v1",
+        "decks": [
+            {
+                "name": "Control",
+                "deckId": "1",
+                "format": "standard",
+                "colors": ["U"],
+                "cardCount": 60,
+            }
+        ],
+    }
+
+    html = _render_index(collection, run_report, deck, advisor_result, decks)
 
     assert "MTGA Advisor" in html
     assert "Unique IDs" in html
-    assert "Test Deck" in html
-    assert "Completion" in html
-    assert "Lightning Strike" in html
+    assert "Control" in html
     assert "wildcards-unknown" in html
+    assert "decks.json" in html
 
 
-def test_render_missing_table_handles_absent_result() -> None:
-    assert "Noch kein Advisor-Result" in _render_missing_table(None)
+def test_render_index_handles_missing_decks_and_advisor() -> None:
+    html = _render_index(None, None, None, None, None)
+
+    assert "Decks" in html
+    assert "decks.json nicht gefunden" in html
+    assert "advisor-result.json nicht gefunden" in html

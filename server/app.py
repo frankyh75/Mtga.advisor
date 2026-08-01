@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 import html
 import os
+from string import Template
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -222,7 +223,7 @@ def _render_index(
     report_diag = _extract_diagnostics(run_report)
     advisor_warnings = list(advisor_result.get("warnings", [])) if advisor_result else []
 
-    return """<!doctype html>
+    return Template("""<!doctype html>
 <html lang="de">
 <head>
   <meta charset="utf-8">
@@ -286,55 +287,55 @@ def _render_index(
   </div>
 
   <div class="grid">
-    {collection_summary}
-    {decks_summary}
-    {llm_advisor_summary}
+    $collection_summary
+    $decks_summary
+    $llm_advisor_summary
   </div>
 
   <div class="section">
     <h2>Decks <span class="badge">Phase 1.2</span></h2>
-    {decks_table}
+    $decks_table
   </div>
 
   <div class="section">
     <h2>LLM Advisor <span class="badge badge-green">Phase 2</span></h2>
     <div class="warning">
       <h3>Warnings</h3>
-      {advisor_warnings}
+      $advisor_warnings
     </div>
     <h3>Crafting Priorities</h3>
-    {crafting_priorities}
+    $crafting_priorities
     <h3>Deck Optimizations</h3>
-    {deck_optimizations}
+    $deck_optimizations
     <h3>Meta Notes</h3>
-    {meta_notes}
+    $meta_notes
   </div>
 
   <div class="section">
     <h2>Collection</h2>
-    <p>Completeness: <strong>{collection_completeness}</strong></p>
+    <p>Completeness: <strong>$collection_completeness</strong></p>
     <div class="warning">
       <h3>Warnings</h3>
-      {collection_warnings}
+      $collection_warnings
     </div>
     <h3>JSON</h3>
-    <pre>{collection_json}</pre>
+    <pre>$collection_json</pre>
   </div>
 
   <div class="section">
     <h2>Run-Report</h2>
-    <p>Completeness: <strong>{report_completeness}</strong></p>
+    <p>Completeness: <strong>$report_completeness</strong></p>
     <div class="warning">
       <h3>Warnings</h3>
-      {report_warnings}
+      $report_warnings
     </div>
     <h3>JSON</h3>
-    <pre>{report_json}</pre>
+    <pre>$report_json</pre>
   </div>
 </main>
 </body>
 </html>
-""".format(
+""").substitute(
         collection_summary=_collection_summary(collection),
         decks_summary=_decks_summary(decks),
         llm_advisor_summary=_llm_advisor_summary(advisor_result),
