@@ -56,7 +56,7 @@ def import_arena_deck(
                 {
                     "line": line,
                     "name": card_name,
-                    "candidates": [candidate["arenaId"] for candidate in candidates[:20]],
+                    "candidates": candidates[:20],
                     "truncated": len(candidates) > 20,
                 }
             )
