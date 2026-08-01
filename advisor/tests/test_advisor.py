@@ -40,7 +40,7 @@ Sideboard
 
 
 def test_import_arena_deck_reports_unknown_and_ambiguous() -> None:
-    """After dedup, same-name cards keep one entry (no ambiguity)."""
+    """Same-name cards from different sets must stay ambiguous."""
     card_db = {
         100: {"name": "Opt", "set": "XLN"},
         101: {"name": "Opt", "set": "STA"},
@@ -51,11 +51,13 @@ def test_import_arena_deck_reports_unknown_and_ambiguous() -> None:
         deck_format="historic",
     )
 
-    # After dedup, should have one mainboard entry (no ambiguity)
-    assert len(deck["mainboard"]) == 1
-    assert deck["mainboard"][0]["set"] in ("XLN", "STA")
-    assert len(deck["diagnostics"]["ambiguous"]) == 0
+    assert deck["mainboard"] == []
+    assert len(deck["diagnostics"]["ambiguous"]) == 1
+    assert deck["diagnostics"]["ambiguous"][0]["name"] == "Opt"
+    candidates = deck["diagnostics"]["ambiguous"][0]["candidates"]
+    assert sorted(candidate["arenaId"] for candidate in candidates) == [100, 101]
     assert len(deck["diagnostics"]["unresolved"]) == 2
+    assert deck["diagnostics"]["warnings"] == ["unresolved-deck-lines", "ambiguous-card-names"]
 
 
 def test_build_completion_advice_groups_missing_cards_and_guards_wildcards() -> None:

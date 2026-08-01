@@ -23,6 +23,7 @@ from advisor.llm_config import LLMConfig, load_config, write_default_config
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "out"
+DASHBOARD_JS_PATH = Path(__file__).with_name("dashboard.js")
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -51,11 +52,25 @@ def _html_response(handler: BaseHTTPRequestHandler, body: str, *, status: int) -
     handler.send_header("Cache-Control", "no-store")
     handler.send_header(
         "Content-Security-Policy",
-        "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'unsafe-inline'; connect-src 'self';",
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'self'; connect-src 'self';",
     )
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     handler.wfile.write(body.encode("utf-8"))
+
+
+def _js_response(handler: BaseHTTPRequestHandler, body: str, *, status: int) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/javascript; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body.encode("utf-8"))))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(body.encode("utf-8"))
+
+
+def _dashboard_js() -> str:
+    return DASHBOARD_JS_PATH.read_text(encoding="utf-8")
 
 
 def _format_json(payload: dict[str, Any] | None) -> str:
@@ -141,13 +156,15 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
         legalities = deck.get("formatLegalities", {})
         legal = ", ".join(f for f, v in legalities.items() if v)[:40] or "?"
         row = (
-            "<tr class='deck-row' data-deck-id='{}' data-deck-name='{}'>".format(
-                html.escape(str(deck_id)), html.escape(name)
-            )
+            "<tr class='deck-row'>"
             + f"<td>{html.escape(name)}</td>"
             + f"<td>{html.escape(fmt)}</td>"
             + f"<td>{html.escape(legal)}</td>"
-            + f"<td><button class='btn-select-deck' data-deck-idx='{i}'>Select</button></td>"
+            + (
+                "<td><button class='btn-select-deck' "
+                f"data-deck-id='{html.escape(str(deck_id))}' "
+                f"data-deck-name='{html.escape(name)}'>Select</button></td>"
+            )
             + "</tr>"
         )
         rows.append(row)
@@ -318,11 +335,6 @@ def _render_index(
     report_diag = _extract_diagnostics(run_report)
     advisor_warnings = list(advisor_result.get("warnings", [])) if advisor_result else []
 
-    # Decks als JSON für Frontend
-    decks_json = json.dumps(decks, ensure_ascii=False) if decks else "null"
-    collection_json = json.dumps(collection, ensure_ascii=False) if collection else "null"
-    config_json = json.dumps(llm_config.to_dict(), ensure_ascii=False)
-
     return Template("""<!doctype html>
 <html lang="de">
 <head>
@@ -480,7 +492,7 @@ def _render_index(
 </main>
 
 <!-- Chat Panel -->
-<div id="chat-panel">
+  <div id="chat-panel">
   <div id="chat-header">
     <h3 id="chat-deck-name">Deck</h3>
     <button id="chat-close">×</button>
@@ -492,114 +504,7 @@ def _render_index(
     <button id="chat-send">Senden</button>
   </div>
 </div>
-
-<script>
-const decksData = $decks_json;
-const collectionData = $collection_json;
-const configData = $config_json;
-let selectedDeck = null;
-
-// Config Panel toggle
-document.getElementById('config-toggle').addEventListener('click', () => {
-  document.getElementById('config-fields').classList.toggle('open');
-});
-
-document.getElementById('cfg-save').addEventListener('click', async () => {
-  const cfg = {
-    endpoint: document.getElementById('cfg-endpoint').value,
-    model_name: document.getElementById('cfg-model').value,
-    temperature: parseFloat(document.getElementById('cfg-temperature').value),
-    max_tokens: parseInt(document.getElementById('cfg-max-tokens').value),
-  };
-  const status = document.getElementById('cfg-status');
-  status.textContent = 'Speichere...';
-  try {
-    const resp = await fetch('/api/config', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(cfg),
-    });
-    if (resp.ok) {
-      status.textContent = '✓ Gespeichert';
-      status.style.color = 'var(--green)';
-    } else {
-      status.textContent = '✗ Fehler';
-      status.style.color = 'var(--danger)';
-    }
-  } catch(e) {
-    status.textContent = '✗ ' + e.message;
-    status.style.color = 'var(--danger)';
-  }
-  setTimeout(() => status.textContent = '', 3000);
-});
-
-// Deck selection
-document.querySelectorAll('.btn-select-deck').forEach(btn => {
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const idx = parseInt(btn.dataset.deckIdx);
-    if (decksData && decksData.decks && decksData.decks[idx]) {
-      selectedDeck = decksData.decks[idx];
-      document.getElementById('chat-deck-name').textContent = selectedDeck.name || 'Unnamed';
-      document.getElementById('chat-panel').classList.add('active');
-      document.getElementById('chat-messages').innerHTML = '';
-      addMessage('assistant', 'Deck "' + (selectedDeck.name || 'Unnamed') + '" geladen. Frag mich was!');
-    }
-  });
-});
-
-// Chat close
-document.getElementById('chat-close').addEventListener('click', () => {
-  document.getElementById('chat-panel').classList.remove('active');
-});
-
-// Chat send
-const sendBtn = document.getElementById('chat-send');
-const chatInput = document.getElementById('chat-input');
-const loadingEl = document.getElementById('chat-loading');
-
-sendBtn.addEventListener('click', sendChat);
-chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendChat(); });
-
-function addMessage(role, text) {
-  const div = document.createElement('div');
-  div.className = 'chat-msg ' + role;
-  div.textContent = text;
-  document.getElementById('chat-messages').appendChild(div);
-  document.getElementById('chat-messages').scrollTop = 999999;
-}
-
-async function sendChat() {
-  const question = chatInput.value.trim();
-  if (!question || !selectedDeck) return;
-  chatInput.value = '';
-  sendBtn.disabled = true;
-  loadingEl.style.display = 'block';
-  addMessage('user', question);
-
-  try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        deck_id: selectedDeck.deckId,
-        question: question,
-      }),
-    });
-    const data = await resp.json();
-    if (data.error) {
-      addMessage('error', data.error);
-    } else {
-      addMessage('assistant', data.response);
-    }
-  } catch(e) {
-    addMessage('error', e.message);
-  }
-
-  sendBtn.disabled = false;
-  loadingEl.style.display = 'none';
-}
-</script>
+<script src="/dashboard.js" defer></script>
 </body>
 </html>
 """).substitute(
@@ -617,9 +522,6 @@ async function sendChat() {
         report_completeness=html.escape(str(report_diag["completeness"])),
         report_warnings=_render_list(report_diag["warnings"]),
         report_json=html.escape(_format_json(run_report)),
-        decks_json=decks_json,
-        collection_json_raw=collection_json,
-        config_json=config_json,
         cfg_endpoint=html.escape(llm_config.endpoint),
         cfg_model=html.escape(llm_config.model_name),
         cfg_temp=llm_config.temperature,
@@ -632,6 +534,17 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         output_dir = self.server.output_dir
+
+        if self.path == "/dashboard.js":
+            try:
+                _js_response(self, _dashboard_js(), status=HTTPStatus.OK)
+            except OSError:
+                _json_response(
+                    self,
+                    {"error": "not_found", "message": "dashboard.js fehlt."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+            return
 
         if self.path == "/api/collection":
             payload = _read_json(output_dir / "collection.json")

@@ -130,6 +130,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ausgabeverzeichnis für den Container.",
     )
     container_export.add_argument(
+        "--log",
+        dest="logs",
+        action="append",
+        type=Path,
+        help="Optionale Logdateien, falls kein decks.json existiert.",
+    )
+    container_export.add_argument(
         "--refresh",
         action="store_true",
         help="Überschreibe existierende Deck-Dateien.",
@@ -344,23 +351,20 @@ def _run_decks(args: argparse.Namespace) -> int:
 def _run_deck_container(args: argparse.Namespace) -> int:
     """Container-Export: Schreibe Decks als Container-Verzeichnis."""
     deck_dir = args.output
-    # Suche decks.json im übergeordneten Verzeichnis oder im aktuellen Verzeichnis
-    decks_path = deck_dir.parent / "decks.json" if deck_dir.parent.exists() else Path("decks.json")
-    
+    decks_path = deck_dir.parent / "decks.json"
+
     if not decks_path.exists():
-        # Fallback: Versuche Logs zu finden und zu parsen
         log_paths = [Path(p) for p in (args.logs or [])]
         if log_paths:
-            export_paths = export_decks(log_paths, deck_dir)
+            export_paths = export_decks(log_paths, deck_dir.parent)
             print(f"Decks aus Logs exportiert: {export_paths.decks}")
-            with open(export_paths.decks) as f:
-                decks_data = json.load(f)
+            decks_path = export_paths.decks
+            decks_data = json.loads(decks_path.read_text(encoding="utf-8"))
         else:
             _error("Keine decks.json gefunden und keine Logs angegeben.")
             return 1
     else:
-        with open(decks_path) as f:
-            decks_data = json.load(f)
+        decks_data = json.loads(decks_path.read_text(encoding="utf-8"))
 
     # Extrahiere DeckSummaries
     decks_list = [

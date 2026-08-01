@@ -5,7 +5,8 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from server.app import _render_index  # noqa: E402
+from advisor.llm_config import LLMConfig  # noqa: E402
+from server.app import _dashboard_js, _render_index  # noqa: E402
 
 
 def test_render_index_includes_collection_deck_and_advisor_summary() -> None:
@@ -55,18 +56,30 @@ def test_render_index_includes_collection_deck_and_advisor_summary() -> None:
         ],
     }
 
-    html = _render_index(collection, run_report, deck, advisor_result, decks)
+    llm_config = LLMConfig()
+    html = _render_index(collection, run_report, deck, advisor_result, decks, llm_config)
 
     assert "MTGA Advisor" in html
     assert "Unique IDs" in html
     assert "Control" in html
     assert "wildcards-unknown" in html
     assert "decks.json" in html
+    assert '<script src="/dashboard.js" defer></script>' in html
+    assert "const decksData" not in html
+    assert "document.getElementById('config-toggle')" not in html
 
 
 def test_render_index_handles_missing_decks_and_advisor() -> None:
-    html = _render_index(None, None, None, None, None)
+    html = _render_index(None, None, None, None, None, LLMConfig())
 
     assert "Decks" in html
     assert "decks.json nicht gefunden" in html
     assert "advisor-result.json nicht gefunden" in html
+
+
+def test_dashboard_script_is_loaded_from_asset() -> None:
+    js = _dashboard_js()
+
+    assert "document.addEventListener(\"DOMContentLoaded\"" in js
+    assert "fetch(\"/api/chat\"" in js
+    assert "innerHTML" not in js

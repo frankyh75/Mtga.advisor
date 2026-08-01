@@ -244,3 +244,34 @@ def test_advisor_complete_command_writes_result(tmp_path: Path, monkeypatch: pyt
     payload = json.loads((out / "advisor-result.json").read_text(encoding="utf-8"))
     assert payload["schema"] == "advisor-result.v1"
     assert payload["summary"]["missingCards"] == 2
+
+
+def test_decks_container_command_reads_decks_json_and_writes_container(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "decks.json").write_text(
+        json.dumps(
+            {
+                "schema": "decks.v1",
+                "decks": [
+                    {
+                        "name": "Control",
+                        "deckId": "abc123",
+                        "deckTileId": 1,
+                        "description": None,
+                        "attributes": {"Format": "standard"},
+                        "formatLegalities": {"standard": True},
+                        "isCompanionValid": True,
+                        "mana": "U",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["decks", "container", "--output", str(out / "decks")])
+
+    assert exit_code == 0
+    assert (out / "decks" / "index.json").exists()
+    assert (out / "decks" / "abc123.json").exists()
