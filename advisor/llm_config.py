@@ -40,7 +40,9 @@ class LLMConfig:
     max_tokens: int = 4096
     system_prompt: str = (
         "Du bist ein MTGA Deck-Building Experte. "
-        "Antworte ausschließlich mit validem JSON, keinem anderen Text."
+        "Antworte auf Deutsch, präzise und mit konkreten Kartennamen. "
+        "Bei strukturierten Analysen (Crafting-Prioritäten, Deck-Optimierungen) "
+        "antworte mit validem JSON. Bei normalen Fragen antworte freitextlich."
     )
     timeout: int = 120
 

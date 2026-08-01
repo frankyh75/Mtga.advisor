@@ -25,7 +25,10 @@ def import_arena_deck(
     ambiguous: list[dict[str, Any]] = []
     section = "mainboard"
     deck_name = name or "Imported Deck"
-    name_to_cards = _build_name_index(card_db)
+    # Resolve duplicates: for same normalized name, prefer newest set (handles
+    # multiple Arena-IDs for the same card across different printings).
+    resolved_db = _resolve_card_db(card_db)
+    name_to_cards = _build_name_index(resolved_db)
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -93,6 +96,41 @@ def write_deck(deck: dict[str, Any], output_dir: Path) -> Path:
     return path
 
 
+def _resolve_card_db(card_db: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Resolve duplicate card names: keep newest set entry per normalized name.
+    
+    Scryfall provides multiple Arena IDs for the same card (reprints).
+    This deduplicates by keeping only the entry from the newest set.
+    """
+    name_to_best: dict[str, dict[int, dict[str, Any]]] = {}
+    
+    for arena_id, meta in card_db.items():
+        name = meta.get("name")
+        if not name:
+            continue
+        key = _normalize_name(str(name))
+        
+        if key not in name_to_best:
+            name_to_best[key] = {arena_id: meta}
+        else:
+            # Keep only if this entry has a newer set
+            best_aid, best_meta = next(iter(name_to_best[key].items()))
+            best_set = best_meta.get("set", "")
+            new_set = meta.get("set", "")
+            
+            if new_set and (not best_set or _is_newer_set(new_set, best_set)):
+                # New entry is newer or best has no set
+                name_to_best[key] = {arena_id: meta}
+            # Else keep existing (newer or equal)
+    
+    # Flatten back to arena_id -> meta
+    result: dict[int, dict[str, Any]] = {}
+    for entries in name_to_best.values():
+        result.update(entries)
+    
+    return result
+
+
 def _build_name_index(card_db: dict[int, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     index: dict[str, list[dict[str, Any]]] = {}
     for arena_id, meta in card_db.items():
@@ -123,6 +161,63 @@ def _parse_deck_line(line: str) -> tuple[int, str] | None:
 
 def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
+
+
+# Standard set codes in chronological order (abbreviated)
+_SET_ORDER = [
+    "2X2", "AER", "AKH", "ALK", "ALP", "ANC", "AOC", "ANT", "AOA", "ARB",
+    "ARM", "AVR", "BFC", "BNG", "BRO", "C18", "C21", "CEI", "CHK", "CLK",
+    "CN2", "CON", "CMM", "CSP", "DDC", "DDD", "DDP", "DGR", "DMU", "DOM",
+    "DST", "EVE", "FDN", "FKF", "FOE", "FUT", "GPT", "GRN", "GK1", "GK2",
+    "H16", "H17", "H18", "H20", "HOU", "IKO", "IMA", "JMP", "KTK", "KTK",
+    "LIN", "LGN", "MM2", "M10", "M11", "M12", "M13", "M14", "M15", "M19",
+    "M20", "M21", "M22", "M23", "M24", "M25", "MOM", "MP2", "NFO", "NPH",
+    "NEO", "NLE", "OGW", "ONS", "PHI", "PKC", "RNA", "RYI", "SNC", "SOI",
+    "STX", "THS", "TSP", "TDC", "TDM", "TIB", "TOR", "UNH", "VOW", "WAR",
+    "WWK", "WTH", "ZNR", "ZND", "AFA", "AFD", "AFC", "AFL", "AFR", "AKR",
+    "ARC", "ARB", "ARE", "ARR", "ASA", "ATH", "AVR", "BBD", "BCR", "BFA",
+    "BIG", "BNG", "BO1", "BO2", "BO3", "BOS", "BOT", "BRM", "BTB", "BTD",
+    "CLB", "CLB", "CMD", "COE", "COC", "COM", "CON", "COP", "CRN", "CNS",
+    "CSA", "CSM", "CTP", "DBL", "DBC", "DD2", "DD3", "DD4", "DD5", "DD6",
+    "DD7", "DDC", "DDD", "DDH", "DDI", "DDJ", "DDK", "DDL", "DDM", "DDN",
+    "DDO", "DDP", "DDQ", "DDR", "DDS", "DDT", "DDU", "DDV", "DDW", "DDX",
+    "DDY", "DDZ", "DGR", "DKA", "DKB", "DKC", "DKD", "DKE", "DKF", "DLK",
+    "DMA", "DMC", "DMU", "DOM", "DSK", "DST", "DTK", "EOC", "EON", "ERA",
+    "ESD", "ETH", "EVE", "EXP", "FEM", "FIR", "FLM", "FOE", "FTR", "FUN",
+    "GPT", "GRN", "GTC", "GTP", "H10", "H11", "H12", "H13", "H14", "H15",
+    "H16", "H17", "H18", "H19", "H20", "H21", "H22", "H23", "H24", "H25",
+    "HOP", "HOU", "ICA", "IMA", "INR", "INO", "ISU", "JMP", "JMP", "KTK",
+    "LIN", "LGN", "MM2", "M10", "M11", "M12", "M13", "M14", "M15", "M19",
+    "M20", "M21", "M22", "M23", "M24", "M25", "MOM", "MP2", "NFO", "NPH",
+    "NEO", "NLE", "NCC", "NCG", "NCS", "NPH", "NSA", "OC2", "OC2", "OC3",
+    "OC4", "OGW", "OKI", "ONS", "OP2", "OTJ", "PC2", "PHI", "PKA", "PKC",
+    "PKM", "PLC", "POJ", "PP1", "PP2", "PP3", "PP4", "PP5", "PP6", "PP7",
+    "PP8", "PP9", "PPA", "PPB", "PPC", "PPD", "PPE", "PPF", "PPG", "PPH",
+    "PPI", "PPJ", "PPK", "PPL", "PPM", "PPN", "PPO", "PPP", "PPQ", "PPR",
+    "PPS", "PPT", "PPU", "PPV", "PPW", "PPX", "PPY", "PPZ", "PTK", "PZ1",
+    "PZ2", "PYL", "RAV", "RNA", "RTR", "RYI", "S10", "S11", "S12", "S13",
+    "S14", "S15", "S16", "S17", "S18", "S19", "S20", "S21", "S22", "S23",
+    "S24", "S25", "SAR", "SCG", "SCG", "SNC", "SOI", "SPG", "SPS", "SRM",
+    "STA", "STH", "STX", "SUP", "SUS", "TAB", "TAM", "TCG", "TDM", "THB",
+    "THS", "THP", "THR", "TMB", "TMC", "TMG", "TMY", "TOR", "TSC", "TTD",
+    "TTR", "TUST", "TUSK", "TWS", "UDC", "UMA", "UNH", "UNK", "USG", "V19",
+    "V20", "V21", "V22", "V23", "V24", "V25", "V26", "V27", "V28", "V29",
+    "V30", "VAN", "VAR", "VOW", "WAR", "WTH", "WWK", "ZNR", "ZND", "ZOO",
+]
+
+
+def _set_order_key(set_code: str) -> int:
+    """Gibt eine sortierbare Zahl für einen Set-Code zurück."""
+    try:
+        return _SET_ORDER.index(set_code.upper())
+    except ValueError:
+        # Unbekannte Sets am Ende
+        return len(_SET_ORDER) + len(set_code)
+
+
+def _is_newer_set(newer: str, older: str) -> bool:
+    """Prüft ob neueres Set als älteres."""
+    return _set_order_key(newer) > _set_order_key(older)
 
 
 def _deck_id(

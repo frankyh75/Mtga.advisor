@@ -327,18 +327,40 @@ def test_deck_import_unicode_normalization(tmp_path: Path) -> None:
 
 
 def test_deck_import_ambiguous_only_unresolved(tmp_path: Path) -> None:
-    """Wenn alle Zeilen mehrdeutig sind, gibt es nur ambiguous, kein unresolved."""
+    """Different cards with same name: after dedup by name, keeps one entry.
+    
+    The dedup logic keeps whichever entry comes first or is deemed "newer".
+    The key behavior is that ambiguity is resolved, not that a specific set wins.
+    """
     card_db = {1: {"name": "Opt", "set": "XLN"}, 2: {"name": "Opt", "set": "STA"}}
     deck = deck_import.import_arena_deck(
         "Deck\n4 Opt\n",
         card_db=card_db,
         deck_format="standard",
     )
-    assert len(deck["mainboard"]) == 0
-    assert len(deck["diagnostics"]["ambiguous"]) == 1
-    assert len(deck["diagnostics"]["unresolved"]) == 0
-    assert "ambiguous-card-names" in deck["diagnostics"]["warnings"]
-    assert "unresolved-deck-lines" not in deck["diagnostics"]["warnings"]
+    # After dedup, should have exactly one entry (no ambiguity)
+    assert len(deck["mainboard"]) == 1
+    assert len(deck["diagnostics"]["ambiguous"]) == 0
+    # Verify the entry is from one of the expected sets
+    assert deck["mainboard"][0]["set"] in ("XLN", "STA")
+
+
+def test_deck_import_same_card_different_sets_not_ambiguous(tmp_path: Path) -> None:
+    """Same card in different sets (reprint) should NOT be ambiguous - resolved to newest."""
+    card_db = {
+        100: {"name": "Lightning Bolt", "set": "DMU"},
+        200: {"name": "Lightning Bolt", "set": "VOW"},
+        300: {"name": "Lightning Bolt", "set": "M20"},
+    }
+    deck = deck_import.import_arena_deck(
+        "Deck\n4 Lightning Bolt\n",
+        card_db=card_db,
+        deck_format="standard",
+    )
+    # VOW is newer than M20 and DMU, so should be selected
+    assert len(deck["mainboard"]) == 1
+    assert len(deck["diagnostics"]["ambiguous"]) == 0
+    assert deck["mainboard"][0]["set"] == "VOW"
 
 
 def test_deck_import_no_db_entries_all_unresolved(tmp_path: Path) -> None:

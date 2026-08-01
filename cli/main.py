@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -9,7 +10,8 @@ from advisor.completion import build_completion_advice, load_json, write_advisor
 from advisor.deck_import import import_arena_deck, write_deck
 from advisor.llm_advisor import run_llm_advisor
 from advisor.llm_config import LLMConfig, load_config, write_default_config
-from parser.decks import export_decks
+from parser.decks import export_decks, export_container, show_deck, list_decks
+from parser.start_hook import DeckSummary
 from parser.export import export_collection
 from parser.log_paths import (
     MissingLogsError,
@@ -113,6 +115,52 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=[],
         help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
+    )
+
+    # Container-Export für Decks
+    deck_container = decks.add_subparsers(dest="deck_command", required=True)
+    container_export = deck_container.add_parser(
+        "container",
+        help="Exportiere Decks als Container mit individuellem Format.",
+    )
+    container_export.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Ausgabeverzeichnis für den Container.",
+    )
+    container_export.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Überschreibe existierende Deck-Dateien.",
+    )
+
+    deck_list = deck_container.add_parser(
+        "list",
+        help="Liste alle Decks aus dem Container auf.",
+    )
+    deck_list.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Container-Verzeichnis.",
+    )
+
+    deck_show = deck_container.add_parser(
+        "show",
+        help="Zeige Details eines einzelnen Decks.",
+    )
+    deck_show.add_argument(
+        "--deck-id",
+        type=str,
+        required=True,
+        help="Die Deck-ID des anzuzeigenden Decks.",
+    )
+    deck_show.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Container-Verzeichnis.",
     )
 
     scan = subparsers.add_parser("scan", help="Scannt die macOS-Collection aus dem MTGA-Prozessspeicher.")
@@ -260,9 +308,19 @@ def _run_serve(args: argparse.Namespace) -> int:
 
 
 def _run_decks(args: argparse.Namespace) -> int:
+    # Container-Subcommands (list, show, container)
+    if hasattr(args, 'deck_command') and args.deck_command:
+        if args.deck_command == 'list':
+            return _run_deck_list(args)
+        elif args.deck_command == 'show':
+            return _run_deck_show(args)
+        elif args.deck_command == 'container':
+            return _run_deck_container(args)
+
+    # Standard deck export (existing behavior)
     if args.logs:
         log_paths = [Path(path) for path in args.logs]
-        missing = [path for path in log_paths if not path.exists()]
+        missing = [path for path in args.logs if not path.exists()]
         if missing:
             missing_str = ", ".join(path.as_posix() for path in missing)
             _error(f"Logdatei(en) nicht gefunden: {missing_str}")
@@ -280,6 +338,74 @@ def _run_decks(args: argparse.Namespace) -> int:
     export_paths = export_decks(log_paths, args.output)
     print(f"Decks exportiert: {export_paths.decks}")
     print(f"Run-Report: {export_paths.run_report}")
+    return 0
+
+
+def _run_deck_container(args: argparse.Namespace) -> int:
+    """Container-Export: Schreibe Decks als Container-Verzeichnis."""
+    deck_dir = args.output
+    # Suche decks.json im übergeordneten Verzeichnis oder im aktuellen Verzeichnis
+    decks_path = deck_dir.parent / "decks.json" if deck_dir.parent.exists() else Path("decks.json")
+    
+    if not decks_path.exists():
+        # Fallback: Versuche Logs zu finden und zu parsen
+        log_paths = [Path(p) for p in (args.logs or [])]
+        if log_paths:
+            export_paths = export_decks(log_paths, deck_dir)
+            print(f"Decks aus Logs exportiert: {export_paths.decks}")
+            with open(export_paths.decks) as f:
+                decks_data = json.load(f)
+        else:
+            _error("Keine decks.json gefunden und keine Logs angegeben.")
+            return 1
+    else:
+        with open(decks_path) as f:
+            decks_data = json.load(f)
+
+    # Extrahiere DeckSummaries
+    decks_list = [
+        DeckSummary(
+            name=d["name"],
+            deck_id=d.get("deckId"),
+            deck_tile_id=d.get("deckTileId"),
+            description=d.get("description"),
+            attributes=d.get("attributes", {}),
+            format_legalities=d.get("formatLegalities", {}),
+            is_companion_valid=d.get("isCompanionValid"),
+            mana=d.get("mana"),
+        )
+        for d in decks_data.get("decks", [])
+    ]
+
+    paths = export_container(deck_dir, decks_list, refresh=args.refresh)
+    print(f"Container exportiert: {paths.index}")
+    print(f"Deck-Verzeichnis: {paths.deck_dir}")
+    return 0
+
+
+def _run_deck_list(args: argparse.Namespace) -> int:
+    """Liste alle Decks aus dem Container auf."""
+    index_data = list_decks(args.output)
+    if "schema" not in index_data:
+        print("Kein Container gefunden.")
+        return 1
+    print(f"Container: {args.output}/index.json")
+    print(f"Decks: {index_data.get('deckCount', 0)}")
+    for deck in index_data.get("decks", []):
+        name = deck.get("name", "?")
+        deck_id = deck.get("deckId", "?")
+        has_full = "✓" if deck.get("hasFullList") else " "
+        print(f"  [{has_full}] {name} ({deck_id})")
+    return 0
+
+
+def _run_deck_show(args: argparse.Namespace) -> int:
+    """Zeige Details eines einzelnen Decks."""
+    deck_data = show_deck(args.deck_id, args.output)
+    if deck_data is None:
+        print(f"Deck '{args.deck_id}' nicht gefunden.")
+        return 1
+    print(json.dumps(deck_data, indent=2, ensure_ascii=False))
     return 0
 
 

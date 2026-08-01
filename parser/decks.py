@@ -3,6 +3,9 @@
 Extrahiert DeckSummaries aus StartHook-Events in Player.log-Dateien
 und schreibt sie als decks.json parallel zu collection.json.
 
+Zusätzlich: Container-Export für strukturierte Deck-Verwaltung
+mit Verlinkung zu manuellen Decklisten.
+
 Referenz: mtgatool-desktop InStartHook.ts
 """
 
@@ -13,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import re
-from typing import Iterable
+from typing import Iterable, Optional, Any
 
 from .pipeline import ParsedEvent, chunk, extract_json, ingest
 from .start_hook import DeckSummary, parse_start_hook
@@ -25,6 +28,14 @@ class DeckExportPaths:
 
     decks: Path
     run_report: Path
+
+
+@dataclass(frozen=True)
+class ContainerPaths:
+    """Pfade des Deck-Container-Exports."""
+
+    index: Path
+    deck_dir: Path
 
 
 def export_decks(paths: Iterable[Path], output_dir: Path) -> DeckExportPaths:
@@ -56,6 +67,90 @@ def export_decks(paths: Iterable[Path], output_dir: Path) -> DeckExportPaths:
     )
 
     return DeckExportPaths(decks=decks_path, run_report=run_report_path)
+
+
+def export_container(deck_dir: Path, decks: list[DeckSummary], refresh: bool = False) -> ContainerPaths:
+    """Exportiere Decks als Container mit individuellem Format für jedes Deck.
+
+    Args:
+        deck_dir: Ausgabeverzeichnis für den Container.
+        decks: Liste der zu exportierenden Decks.
+        refresh: Ob vorhandene Deck-Dateien überschrieben werden sollen.
+
+    Returns:
+        ContainerPaths mit Pfaden zu index.json und dem Verzeichnis.
+    """
+    deck_dir.mkdir(parents=True, exist_ok=True)
+
+    decks_by_id: dict[str, DeckSummary] = {
+        (d.deck_id or d.name): d for d in decks
+    }
+
+    index_entries: list[dict[str, any]] = []
+    for key in [d.deck_id or d.name for d in decks]:
+        deck = decks_by_id.get(key)
+        if not deck:
+            continue
+        deck_id = deck.deck_id or key
+        entry = {
+            "deckId": deck_id,
+            "name": deck.name,
+            "hasFullList": False,
+            "fullListPath": f"{_slug(deck_id)}.arena.json",
+            "summaryPath": f"{_slug(deck_id)}.json",
+            "textListPath": f"{_slug(deck_id)}.txt",
+        }
+        index_entries.append(entry)
+
+        summary_path = deck_dir / f"{_slug(deck_id)}.json"
+        if not summary_path.exists() or refresh:
+            _write_json(summary_path, _build_deck_summary_payload(deck))
+
+        index_entries[-1]["hasFullList"] = False
+
+    index_payload = {
+        "schema": "decks-container.v1",
+        "generatedAt": _iso_now(),
+        "deckCount": len(index_entries),
+        "decks": index_entries,
+    }
+
+    index_path = deck_dir / "index.json"
+    _write_json(index_path, index_payload)
+
+    return ContainerPaths(index=index_path, deck_dir=deck_dir)
+
+
+def show_deck(deck_id: str, deck_dir: Path) -> dict[str, any]:
+    """Zeige Details eines einzelnen Decks aus dem Container.
+
+    Args:
+        deck_id: Die Deck-ID des anzuzeigenden Decks.
+        deck_dir: Container-Verzeichnis.
+
+    Returns:
+        Deck-Detail-Payload oder None wenn nicht gefunden.
+    """
+    slug = _slug(deck_id)
+    summary_path = deck_dir / f"{slug}.json"
+    if not summary_path.exists():
+        return None
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def list_decks(deck_dir: Path) -> dict[str, any]:
+    """Liste alle Decks aus dem Container.
+
+    Args:
+        deck_dir: Container-Verzeichnis.
+
+    Returns:
+        Index-Payload des Containers.
+    """
+    index_path = deck_dir / "index.json"
+    if not index_path.exists():
+        return {"schema": "error", "message": "Kein Container gefunden"}
+    return json.loads(index_path.read_text(encoding="utf-8"))
 
 
 def _extract_decks(events: list[ParsedEvent]) -> tuple[list[DeckSummary], list[str]]:
@@ -112,6 +207,22 @@ def _extract_decks(events: list[ParsedEvent]) -> tuple[list[DeckSummary], list[s
             )
 
     return [seen[key] for key in order], warnings
+
+
+def _build_deck_summary_payload(deck: DeckSummary) -> dict:
+    """Baue das Payload für ein einzelnes Deck."""
+    return {
+        "schema": "deck-summary.v1",
+        "name": deck.name,
+        "deckId": deck.deck_id,
+        "deckTileId": deck.deck_tile_id,
+        "description": deck.description,
+        "attributes": deck.attributes,
+        "formatLegalities": deck.format_legalities,
+        "isCompanionValid": deck.is_companion_valid,
+        "mana": deck.mana,
+        "hasDeckId": deck.deck_id is not None,
+    }
 
 
 def _build_decks_payload(
@@ -182,6 +293,12 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _slug(value: str) -> str:
+    """Konvertiere einen Wert in einen safe Dateinamen."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower() or "deck"
+    return slug[:50]  # Begrenze Länge für Dateisystem-Kompatibilität
 
 
 def _iso_now() -> str:

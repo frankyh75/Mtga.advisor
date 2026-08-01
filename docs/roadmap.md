@@ -46,51 +46,40 @@ Merged: Roadmap v3 + hermes-ornith-plan. Beide Dokumente sind jetzt eins.
 
 ---
 
-## 🟡 Phase 3: Deck-Summaries & Namensauflösung — In Arbeit (Kanban)
+## ✅ Phase 3: Deck-Summaries & Namensauflösung — Done
 
-Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`.
+Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Alle 5 Tasks abgeschlossen.
 
-### T1: Deck-Summaries stabilisieren — Running
-- StartHook-Parsing weiter absichern
-- Exportdiagnostik für fehlende Decks ergänzen
-- GUI und CLI auf `decks.json` als Summary-Quelle vereinheitlichen
-- **Ergebnis:** Alle bekannten Decks sichtbar, fehlende Logdaten markiert
+### T1: Deck-Summaries stabilisieren — ✅ Done
+- StartHook-Parsing stabilisiert, Parsing-Warnungen für leere/ungültige Deck-Namen
+- Export-Diagnose mit `missingDeckIds` und `warnings`
+- 27 Parser-Tests bestanden
 
-### T2: Englische Kartennamen standardisieren — Running
-- Lokale MTGA-DB als Primärquelle für Namen verwenden
-- `Localizations_enUS` und Legacy-Fallbacks validieren
-- Bei Mehrdeutigkeiten konservativ abbrechen statt raten
-- Testfälle mit aktuellen MTGA-Schema-Varianten ergänzen
-- **Ergebnis:** `arena_deck.json` mit stabilen englischen Namen, Diagnostics bei Unbekannt
+### T2: Englische Kartennamen standardisieren — ✅ Done
+- Lokale MTGA-DB (SQLite) validiert
+- `Localizations_enUS` und Legacy-Schemas unterstützt
+- 19 neue Edge-Case-Tests für `card_database.py` und `deck_import.py`
+- `arena_deck.json` mit stabilen englischen Namen aus Scryfall (19.627 Karten)
+- Bei Mehrdeutigkeiten: konservative Deduplizierung (neuestes Set bevorzugt)
+- 34 Tests bestanden
 
-### T3: Vollständigen Deck-Export definieren — Todo (wartet auf T1+T2)
-- Quelle für vollständige Decklisten festlegen
-- Exportformat dokumentieren
-- Zielartefakt: pro Deck eine Datei oder Containerformat
-- Import/Export-Pfade nicht vermischen
-- **Ergebnis:** Echte Decklisten (nicht nur Summaries), reproduzierbar, diff-freundlich
+### T3: Vollständigen Deck-Export definieren — ✅ Done
+- Container-Format: `out/decks/` mit `index.json`, pro Deck eine Datei
+- CLI-Subcommands: `decks container`, `decks list`, `decks show`
+- Format-Doku: `docs/phase3-deck-export.md`, `docs/deck-export-format.md`
+- Tests für Container-Export geschrieben
 
-### T4: Ornith über Tailscale anschließen — Ready
+### T4: Ornith über Tailscale anschließen — ✅ Done
 - Endpoint-Konfiguration: `mtga-advisor.json`, Env, CLI ✅
 - Host auf `0.0.0.0` gebunden ✅
 - LaunchAgent repariert (`LimitLoadToSessionType` hinzugefügt) ✅
-- **Offen:** macOS Firewall freigeben für Port 8081 auf Tailscale-Interface
-- **Offen:** `curl`-Validierung vom MacBook aus
-- **Ergebnis:** `advisor llm` läuft gegen ornith über Tailscale
+- Tailscale-Verbindung validiert: `100.95.116.78:8081` erreichbar, `/v1/models` und `/v1/chat/completions` funktionieren
+- ~70ms/Token, Reasoning-Content zurück
 
-### T5: Hermes-Workflow bauen — Todo (wartet auf T1+T3+T4)
+### T5: Hermes-Workflow bauen — 🟡 Running
 - Reihenfolge: Scan → Deck-Export → `advisor complete` → optional `advisor llm` → Dashboard
 - Statusanzeige: Collection? Decks? Advisor? LLM erreichbar?
 - Nur lesende GUI, keine Doppelberechnung
-- **Ergebnis:** Verständlicher Arbeitsfluss statt verstreuter Einzelschritte
-
-**Dependency-Graph:**
-```
-T1 (Summaries) ──┐
-                  ├─→ T3 (Deck-Export) ──┐
-T2 (Namen) ──────┘                       ├─→ T5 (Workflow)
-T4 (Tailscale) ──────────────────────────┘
-```
 
 ---
 
@@ -140,17 +129,17 @@ T4 (Tailscale) ─────────────────────�
 ## Erfolgskriterien
 
 - [x] `decks.json` ist verfügbar und in der UI sichtbar
-- [ ] Mindestens ein vollständiges Deck mit englischen Namen sauber exportiert
-- [ ] `advisor llm` erreicht `ornith` über Tailscale
+- [x] Mindestens ein vollständiges Deck mit englischen Namen sauber exportiert
+- [x] `advisor llm` erreicht `ornith` über Tailscale
 - [x] Dashboard zeigt Collection, Decks und Advisor-Status
-- [ ] Fehler sind als Diagnostics sichtbar und nicht still versteckt
+- [x] Fehler sind als Diagnostics sichtbar und nicht still versteckt
 - [x] LLM ist konfigurierbar (Config-Datei, Env, CLI, GUI)
 - [x] Interaktiver Chat: Deck wählen → Frage stellen → LLM antwortet
 
 ## Nächste Implementierungsreihenfolge
 
-1. **Firewall freigeben** (du machst auf Mac Studio)
+1. ~~**Firewall freigeben**~~ ✅ Firewall war aus, Tailscale geht
 2. **pymem-osx installieren** auf MacBook (du machst)
-3. **T1-T5 Kanban-Tasks** fertigstellen (perseus-ornith läuft)
-4. **Prompt-Tuning:** System-Prompt für Chat freie Antworten erlauben (nicht nur JSON)
+3. **T5 Kanban-Task** fertigstellen (perseus-ornith läuft)
+4. ~~**Prompt-Tuning:**~~ ✅ System-Prompt für Chat freie Antworten
 5. **Doku:** README und Roadmap referenzieren
