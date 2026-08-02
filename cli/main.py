@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
+from advisor.deck_export import export_deck_to_arena_text, load_deck_by_id, DeckNotFoundError, DeckExportError
 from advisor.deck_import import import_arena_deck, write_deck
 from advisor.llm_advisor import run_llm_advisor
 from advisor.llm_config import LLMConfig, load_config, write_default_config
@@ -284,6 +285,22 @@ def _build_parser() -> argparse.ArgumentParser:
     deck_import.add_argument("--format", required=True, help="Zielformat, z. B. standard oder brawl.")
     deck_import.add_argument("--name", help="Deckname überschreiben.")
     deck_import.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis.")
+
+    deck_export = deck_subparsers.add_parser("export", help="Exportiert ein Deck als Arena-kompatiblen Text.")
+    deck_export.add_argument("deck_id", type=str, help="Die Deck-ID des zu exportierenden Decks.")
+    deck_export.add_argument(
+        "--search-dir",
+        dest="search_dirs",
+        action="append",
+        type=Path,
+        help="Verzeichnis, in dem nach Decks gesucht wird (mehrfach möglich). Default: out, out-decks.",
+    )
+    deck_export.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Ausgabedatei (Default: stdout).",
+    )
 
     advisor = subparsers.add_parser("advisor", help="Regelbasierte Advisor-Funktionen.")
     advisor_subparsers = advisor.add_subparsers(dest="advisor_command", required=True)
@@ -810,7 +827,31 @@ def _run_deck(args: argparse.Namespace) -> int:
         if warnings:
             print(f"Warnings: {', '.join(warnings)}")
         return 0 if not warnings else 1
+    if args.deck_command == "export":
+        return _run_deck_export(args)
     return 1
+
+
+def _run_deck_export(args: argparse.Namespace) -> int:
+    """Exportiere ein Deck als Arena-kompatiblen Text."""
+    search_dirs = args.search_dirs if args.search_dirs else None
+    try:
+        deck = load_deck_by_id(args.deck_id, search_dirs=search_dirs)
+    except DeckNotFoundError as exc:
+        _error(str(exc))
+        return 1
+    try:
+        arena_text = export_deck_to_arena_text(deck)
+    except DeckExportError as exc:
+        _error(str(exc))
+        return 1
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(arena_text, encoding="utf-8")
+        print(f"Arena-Export: {args.output}")
+    else:
+        sys.stdout.write(arena_text)
+    return 0
 
 
 def _run_advisor(args: argparse.Namespace) -> int:
