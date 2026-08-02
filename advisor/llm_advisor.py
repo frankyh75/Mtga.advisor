@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .llm_config import LLMConfig, load_config
+from .meta import MetaData, fetch_meta, format_meta_for_prompt
 
 
 @dataclass
@@ -44,6 +45,8 @@ def run_llm_advisor(
     output_dir: Path | None = None,
     llm_config: LLMConfig | None = None,
     cli_overrides: dict[str, Any] | None = None,
+    meta_format: str = "standard",
+    meta_data: MetaData | None = None,
 ) -> LLMAdvisorResult:
     """Führe den LLM-Advisor aus.
 
@@ -55,6 +58,10 @@ def run_llm_advisor(
                     automatisch geladen (Config-Datei → Env → Defaults).
         cli_overrides: Optional, Dict mit CLI-Override-Werten
                        (z.B. {"endpoint": "...", "temperature": 0.5}).
+        meta_format: Format für Meta-Daten (standard, modern, etc.).
+                     Set to "" to disable meta context.
+        meta_data: Optional, pre-fetched MetaData. Wenn nicht gesetzt, wird
+                   automatisch von MTGGoldfish geholt (falls meta_format gesetzt).
 
     Returns:
         LLMAdvisorResult mit Empfehlungen.
@@ -76,8 +83,17 @@ def run_llm_advisor(
     if decks_path and decks_path.exists():
         decks = _load_json(decks_path)
 
-    # 3. Prompt bauen
-    prompt = _build_prompt(collection, decks)
+    # 2b. Meta-Daten laden (optional)
+    meta: MetaData | None = meta_data
+    if meta_format and meta is None:
+        try:
+            meta = fetch_meta(meta_format)
+        except Exception as exc:
+            result.warnings.append(f"Meta-Daten konnten nicht geladen werden: {exc}")
+            meta = None
+
+    # 3. Prompt bauen (mit Meta-Kontext)
+    prompt = _build_prompt(collection, decks, meta)
 
     # 4. LLM aufrufen
     try:
@@ -109,10 +125,14 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> str:
+def _build_prompt(
+    collection: dict[str, Any],
+    decks: dict[str, Any] | None,
+    meta: MetaData | None = None,
+) -> str:
     """Baue den Prompt für den LLM-Advisor.
 
-    Enthält: Wildcard-Bestand, Decks mit fehlenden Karten, Anweisungen.
+    Enthält: Wildcard-Bestand, Decks mit fehlenden Karten, Meta-Kontext, Anweisungen.
     """
     cards = collection.get("cards", {})
     wildcards = collection.get("wildcards", {})
@@ -165,6 +185,14 @@ def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> s
             lines.append(f"\n... und {len(deck_list) - 15} weitere Decks")
     else:
         lines.append("\n## Decks: keine gefunden")
+
+    # Meta-Kontext (falls vorhanden)
+    if meta and meta.top_decks:
+        meta_text = format_meta_for_prompt(meta)
+        if meta_text:
+            lines.append("")
+            lines.append("## Aktuelles Meta")
+            lines.append(meta_text)
 
     lines.extend([
         "",

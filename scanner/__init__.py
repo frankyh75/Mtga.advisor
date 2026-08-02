@@ -36,6 +36,23 @@ from .il2cpp_nav import (
     scan_decks_il2cpp,
 )
 
+from .rank_scanner import (
+    AccountInfo,
+    FullRankScanResult,
+    RankInfo,
+    RankScanResult,
+    RANK_CLASS_NAMES,
+    format_account_summary,
+    format_account_table,
+    format_rank_summary,
+    format_rank_table,
+    rank_class_name,
+    scan_account_from_instance,
+    scan_ranks,
+    scan_ranks_and_account,
+    scan_ranks_from_instance,
+)
+
 __all__ = [
     # Pattern-based deck scanner
     "DeckMemoryResult",
@@ -69,4 +86,19 @@ __all__ = [
     "read_il2cpp_string",
     "read_list_of_structs",
     "scan_decks_il2cpp",
+    # Rank & account scanner
+    "AccountInfo",
+    "FullRankScanResult",
+    "RankInfo",
+    "RankScanResult",
+    "RANK_CLASS_NAMES",
+    "format_account_summary",
+    "format_account_table",
+    "format_rank_summary",
+    "format_rank_table",
+    "rank_class_name",
+    "scan_account_from_instance",
+    "scan_ranks",
+    "scan_ranks_and_account",
+    "scan_ranks_from_instance",
 ]
