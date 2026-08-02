@@ -940,3 +940,48 @@ def _read_string_ascii(mem: MemoryReader, addr: int) -> str:
     if end == -1:
         end = len(raw)
     return raw[:end].decode("ascii", errors="replace")
+
+
+# ---------------------------------------------------------------------------
+# Pymem adapter — wraps a live Pymem process for IL2CPP navigation
+# ---------------------------------------------------------------------------
+
+class PymemMemoryAdapter:
+    """Adapter that wraps a Pymem instance to implement the MemoryReader protocol.
+
+    Uses pattern_scanner._read_bytes_silent (mach_vm_read_overwrite) for reads,
+    returning empty bytes on failure instead of raising.
+    """
+
+    def __init__(self, pm: Any) -> None:
+        self.pm = pm
+
+    def read_bytes(self, addr: int, size: int) -> bytes:
+        from . import pattern_scanner as _ps
+        raw = _ps._read_bytes_silent(self.pm, addr, size)
+        if raw is None:
+            return b"\x00" * size
+        if len(raw) < size:
+            raw = raw + b"\x00" * (size - len(raw))
+        return raw
+
+    def read_ptr(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 8)
+        return struct.unpack_from("<Q", raw)[0]
+
+    def read_u32(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 4)
+        return struct.unpack_from("<I", raw)[0]
+
+    def read_i32(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 4)
+        return struct.unpack_from("<i", raw)[0]
+
+    def read_string(self, addr: int) -> str:
+        if addr == 0:
+            return ""
+        raw = self.read_bytes(addr, 256)
+        end = raw.find(b"\x00")
+        if end == -1:
+            end = len(raw)
+        return raw[:end].decode("ascii", errors="replace")

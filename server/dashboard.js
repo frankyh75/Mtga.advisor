@@ -10,6 +10,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const chatInput = document.getElementById("chat-input");
   const chatSend = document.getElementById("chat-send");
   const chatLoading = document.getElementById("chat-loading");
+  const chatDeckCards = document.getElementById("chat-deck-cards");
+
+  // Deck detail panel elements
+  const deckDetail = document.getElementById("deck-detail");
+  const deckDetailName = document.getElementById("deck-detail-name");
+  const deckDetailMeta = document.getElementById("deck-detail-meta");
+  const deckCardsGrid = document.getElementById("deck-cards-grid");
+  const deckDetailClose = document.getElementById("deck-detail-close");
 
   let selectedDeck = null;
 
@@ -22,6 +30,100 @@ document.addEventListener("DOMContentLoaded", () => {
     message.textContent = text;
     chatMessages.appendChild(message);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+  };
+
+  const PILE_LABELS = [
+    ["mainboard", "Mainboard"],
+    ["sideboard", "Sideboard"],
+    ["commandZone", "Command Zone"],
+    ["companions", "Companions"],
+  ];
+
+  const renderDeckCards = (deckData) => {
+    if (!deckCardsGrid) return;
+    deckCardsGrid.replaceChildren();
+
+    const cards = deckData.cards || {};
+    let totalCards = 0;
+
+    for (const [key, label] of PILE_LABELS) {
+      const pile = cards[key];
+      if (!pile || !Array.isArray(pile) || pile.length === 0) continue;
+
+      const pileDiv = document.createElement("div");
+      pileDiv.className = "deck-pile";
+
+      const h3 = document.createElement("h3");
+      h3.textContent = `${label} (${pile.length})`;
+      pileDiv.appendChild(h3);
+
+      const ul = document.createElement("ul");
+      for (const card of pile) {
+        const li = document.createElement("li");
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "card-name";
+        nameSpan.textContent = card.name || `ID:${card.cardId || "?"}`;
+        const qtySpan = document.createElement("span");
+        qtySpan.className = "qty";
+        qtySpan.textContent = `${card.count || 1}x`;
+        li.appendChild(nameSpan);
+        li.appendChild(qtySpan);
+        ul.appendChild(li);
+        totalCards += (card.count || 1);
+      }
+      pileDiv.appendChild(ul);
+      deckCardsGrid.appendChild(pileDiv);
+    }
+
+    if (deckCardsGrid.children.length === 0) {
+      const p = document.createElement("p");
+      p.className = "meta";
+      p.textContent = "Keine Karten in diesem Deck.";
+      deckCardsGrid.appendChild(p);
+    }
+
+    if (deckDetailMeta) {
+      const source = deckData.source || "unknown";
+      const deckId = deckData.deckId || "?";
+      deckDetailMeta.textContent = `Quelle: ${source} · Deck-ID: ${deckId} · ${totalCards} Karten`;
+    }
+  };
+
+  const loadDeckDetail = async (deckId, deckName) => {
+    if (deckDetail) deckDetail.classList.add("active");
+    if (deckDetailName) deckDetailName.textContent = deckName || "Unnamed";
+    if (deckCardsGrid) {
+      deckCardsGrid.replaceChildren();
+      const loadingP = document.createElement("p");
+      loadingP.className = "meta";
+      loadingP.textContent = "Lade Karten...";
+      deckCardsGrid.appendChild(loadingP);
+    }
+
+    try {
+      const resp = await fetch(`/api/deck/${encodeURIComponent(deckId)}`);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        if (deckCardsGrid) {
+          deckCardsGrid.replaceChildren();
+          const p = document.createElement("p");
+          p.className = "meta";
+          p.textContent = `Keine Karten verfügbar (${err.message || resp.status})`;
+          deckCardsGrid.appendChild(p);
+        }
+        return;
+      }
+      const data = await resp.json();
+      renderDeckCards(data);
+    } catch (err) {
+      if (deckCardsGrid) {
+        deckCardsGrid.replaceChildren();
+        const p = document.createElement("p");
+        p.className = "meta";
+        p.textContent = `Karten konnten nicht geladen werden: ${err.message}`;
+        deckCardsGrid.appendChild(p);
+      }
+    }
   };
 
   const openChatForDeck = (deckId, deckName) => {
@@ -38,6 +140,50 @@ document.addEventListener("DOMContentLoaded", () => {
     if (chatPanel) {
       chatPanel.classList.add("active");
     }
+
+    // Load deck cards into chat panel header
+    if (chatDeckCards) {
+      chatDeckCards.replaceChildren();
+      const loadingSpan = document.createElement("span");
+      loadingSpan.className = "meta";
+      loadingSpan.textContent = "Lade Karten...";
+      chatDeckCards.appendChild(loadingSpan);
+
+      fetch(`/api/deck/${encodeURIComponent(deckId)}`)
+        .then((r) => r.json())
+        .then((data) => {
+          chatDeckCards.replaceChildren();
+          const cards = data.cards || {};
+          for (const [key, label] of PILE_LABELS) {
+            const pile = cards[key];
+            if (!pile || !Array.isArray(pile) || pile.length === 0) continue;
+            const pileSpan = document.createElement("div");
+            pileSpan.className = "chat-deck-pile";
+            const entries = pile.slice(0, 30).map(
+              (c) => `${c.count || 1}x ${c.name || "ID:" + (c.cardId || "?")}`
+            );
+            pileSpan.textContent = `${label}: ${entries.join(", ")}`;
+            if (pile.length > 30) {
+              pileSpan.textContent += ` (+${pile.length - 30})`;
+            }
+            chatDeckCards.appendChild(pileSpan);
+          }
+          if (chatDeckCards.children.length === 0) {
+            const p = document.createElement("span");
+            p.className = "meta";
+            p.textContent = "Keine Karten verfügbar.";
+            chatDeckCards.appendChild(p);
+          }
+        })
+        .catch(() => {
+          chatDeckCards.replaceChildren();
+          const p = document.createElement("span");
+          p.className = "meta";
+          p.textContent = "Karten konnten nicht geladen werden.";
+          chatDeckCards.appendChild(p);
+        });
+    }
+
     addMessage("assistant", `Deck "${deckName || "Unnamed"}" geladen. Frag mich was!`);
   };
 
@@ -86,9 +232,32 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".btn-select-deck").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      openChatForDeck(button.dataset.deckId || "", button.dataset.deckName || "Unnamed");
+      const deckId = button.dataset.deckId || "";
+      const deckName = button.dataset.deckName || "Unnamed";
+      loadDeckDetail(deckId, deckName);
+      openChatForDeck(deckId, deckName);
     });
   });
+
+  // Also handle deck-row clicks (the table rows)
+  document.querySelectorAll(".deck-row").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest(".btn-select-deck")) return;
+      const btn = row.querySelector(".btn-select-deck");
+      if (btn) {
+        const deckId = btn.dataset.deckId || "";
+        const deckName = btn.dataset.deckName || "Unnamed";
+        loadDeckDetail(deckId, deckName);
+        openChatForDeck(deckId, deckName);
+      }
+    });
+  });
+
+  if (deckDetailClose) {
+    deckDetailClose.addEventListener("click", () => {
+      if (deckDetail) deckDetail.classList.remove("active");
+    });
+  }
 
   if (chatClose && chatPanel) {
     chatClose.addEventListener("click", () => {

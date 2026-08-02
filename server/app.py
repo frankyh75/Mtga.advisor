@@ -16,6 +16,7 @@ from typing import Any
 import html
 import os
 from string import Template
+from urllib.parse import urlparse, parse_qs
 
 from advisor.llm_config import LLMConfig, load_config, write_default_config
 
@@ -226,6 +227,122 @@ def _render_deck_optimizations(advisor: dict[str, Any] | None) -> str:
     return "".join(sections)
 
 
+def _extract_deck_cards(deck: dict[str, Any]) -> dict[str, Any]:
+    """Extract card lists from a deck dict (supports both deck-scan and log-export formats).
+
+    Deck-scan format (from deck-scan CLI):
+      deck["cards"] = {"mainboard": [{cardId, name, count}, ...], "sideboard": [...]}
+      deck["cardsById"] = {"mainboard": {"grpId": qty, ...}}
+
+    Log-export format (from StartHook):
+      deck["mainDeck"] = [{grpId, quantity, ...}, ...]  (or similar)
+
+    Returns a normalized dict:
+      {"deckId": ..., "name": ..., "mainboard": [...], "sideboard": [...],
+       "commandZone": [...], "companions": [...], "totalCards": N}
+    """
+    deck_id = deck.get("deckId", "")
+    name = deck.get("name", "Unnamed")
+    result: dict[str, Any] = {
+        "deckId": deck_id,
+        "name": name,
+        "mainboard": [],
+        "sideboard": [],
+        "commandZone": [],
+        "companions": [],
+        "totalCards": 0,
+    }
+
+    cards_field = deck.get("cards")
+    if isinstance(cards_field, dict):
+        # Deck-scan format: cards = {pileKey: [{cardId, name, count}, ...]}
+        for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+            pile = cards_field.get(pile_key, [])
+            if isinstance(pile, list):
+                result[pile_key] = pile
+            elif isinstance(pile, dict):
+                # cardsById format: {grpId_str: qty}
+                result[pile_key] = [
+                    {"cardId": int(gid) if str(gid).isdigit() else gid, "name": f"ID:{gid}", "count": qty}
+                    for gid, qty in sorted(pile.items())
+                ]
+    elif isinstance(cards_field, list):
+        # Flat card list — treat as mainboard
+        result["mainboard"] = cards_field
+
+    # Also check cardsById
+    cards_by_id = deck.get("cardsById")
+    if isinstance(cards_by_id, dict):
+        for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+            if not result.get(pile_key) and pile_key in cards_by_id:
+                pile = cards_by_id[pile_key]
+                if isinstance(pile, dict):
+                    result[pile_key] = [
+                        {"cardId": int(gid) if str(gid).isdigit() else gid, "name": f"ID:{gid}", "count": qty}
+                        for gid, qty in sorted(pile.items())
+                    ]
+
+    # Log-export format fallback: mainDeck / sideboard
+    if not result["mainboard"]:
+        main_deck = deck.get("mainDeck", [])
+        if isinstance(main_deck, list):
+            result["mainboard"] = [
+                {"cardId": c.get("grpId", c.get("cardId", 0)), "name": c.get("name", f"ID:{c.get('grpId', '?')}"), "count": c.get("quantity", c.get("count", 1))}
+                for c in main_deck
+            ]
+    if not result["sideboard"]:
+        sb = deck.get("sideboard", [])
+        if isinstance(sb, list):
+            result["sideboard"] = [
+                {"cardId": c.get("grpId", c.get("cardId", 0)), "name": c.get("name", f"ID:{c.get('grpId', '?')}"), "count": c.get("quantity", c.get("count", 1))}
+                for c in sb
+            ]
+
+    # Total card count
+    total = 0
+    for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+        for card in result.get(pile_key, []):
+            total += int(card.get("count", card.get("quantity", 1)))
+    result["totalCards"] = total
+
+    return result
+
+
+def _render_deck_cards_section(deck: dict[str, Any] | None) -> str:
+    """Render a deck's card list as HTML for the dashboard.
+
+    Shows mainboard and sideboard in a compact table. Called when a deck is selected.
+    Returns empty string if no cards available.
+    """
+    if not deck:
+        return ""
+    cards_data = _extract_deck_cards(deck)
+    if not any(cards_data.get(k) for k in ("mainboard", "sideboard", "commandZone", "companions")):
+        return ""
+
+    sections = []
+    for pile_key, label in [("mainboard", "Mainboard"), ("sideboard", "Sideboard"), ("commandZone", "Command Zone"), ("companions", "Companions")]:
+        pile = cards_data.get(pile_key, [])
+        if not pile:
+            continue
+        rows = ""
+        for card in pile[:80]:
+            name = html.escape(str(card.get("name", "?")))
+            count = card.get("count", card.get("quantity", 1))
+            rows += f"<tr><td>{count}x</td><td>{name}</td></tr>"
+        suffix = ""
+        if len(pile) > 80:
+            suffix = f'<p class="meta">+{len(pile) - 80} weitere</p>'
+        sections.append(
+            f'<div class="deck-cards-pile">'
+            f'<h4>{label} ({len(pile)} Karten)</h4>'
+            f'<table><thead><tr><th>Anz</th><th>Name</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>{suffix}</div>'
+        )
+
+    return f'<div class="deck-cards-section">{"=".join(sections)}</div>' if sections else ""
+
+
 def _render_meta_notes(advisor: dict[str, Any] | None) -> str:
     if not advisor:
         return ""
@@ -249,19 +366,33 @@ def _build_chat_prompt(deck: dict[str, Any], collection: dict[str, Any] | None, 
     lines.append(f"Name: {name}")
     lines.append(f"Format: {fmt}")
 
-    # Deck cards if available
+    # Deck cards if available — supports deck-scan format (cards as dict of piles)
+    # and log-export format (mainDeck as flat list)
     deck_cards = deck.get("cards", deck.get("mainDeck", []))
     if deck_cards:
         lines.append("\nKarten:")
-        if isinstance(deck_cards, list):
+        if isinstance(deck_cards, dict):
+            # Deck-scan format: {"mainboard": [{cardId, name, count}, ...], "sideboard": [...]}
+            for pile_key, label in [("mainboard", "Mainboard"), ("sideboard", "Sideboard"), ("commandZone", "Command Zone"), ("companions", "Companions")]:
+                pile = deck_cards.get(pile_key, [])
+                if not pile:
+                    continue
+                lines.append(f"  {label}:")
+                if isinstance(pile, list):
+                    for card in pile[:60]:
+                        if isinstance(card, dict):
+                            lines.append(f"    {card.get('name', '?')} x{card.get('count', card.get('quantity', 1))}")
+                        elif isinstance(card, str):
+                            lines.append(f"    {card}")
+                elif isinstance(pile, dict):
+                    for card_id, count in list(pile.items())[:60]:
+                        lines.append(f"    ID:{card_id} x{count}")
+        elif isinstance(deck_cards, list):
             for card in deck_cards[:60]:
                 if isinstance(card, dict):
                     lines.append(f"  {card.get('name', '?')} x{card.get('count', card.get('quantity', 1))}")
                 elif isinstance(card, str):
                     lines.append(f"  {card}")
-        elif isinstance(deck_cards, dict):
-            for card_id, count in list(deck_cards.items())[:60]:
-                lines.append(f"  {card_id} x{count}")
 
     # Collection context
     if collection:
@@ -387,6 +518,20 @@ def _render_index(
     .btn-select-deck:hover { opacity: .85; }
     .deck-row:hover { background: rgba(180,83,9,.06); cursor: pointer; }
 
+    /* Deck Detail Panel */
+    #deck-detail { display: none; }
+    #deck-detail.active { display: block; }
+    .deck-detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
+    .deck-detail-header h2 { margin: 0; }
+    .deck-detail-close { background: none; border: 1px solid var(--line); border-radius: 8px; padding: .3rem .8rem; cursor: pointer; font-size: .85rem; color: var(--muted); }
+    .deck-cards-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .5rem; }
+    @media (max-width: 700px) { .deck-cards-grid { grid-template-columns: 1fr; } }
+    .deck-pile h3 { margin: .2rem 0 .4rem; font-size: 1rem; }
+    .deck-pile ul { list-style: none; padding: 0; margin: 0; }
+    .deck-pile li { padding: .2rem .4rem; border-bottom: 1px solid var(--line); font-size: .9rem; display: flex; justify-content: space-between; }
+    .deck-pile li .qty { color: var(--accent); font-weight: bold; }
+    .deck-pile li .card-name { flex: 1; }
+
     /* Chat Panel */
     #chat-panel { display: none; position: fixed; bottom: 0; right: 0; width: 480px; max-width: 100vw; height: 600px; max-height: 80vh; background: var(--panel); border: 2px solid var(--accent); border-radius: 16px 0 0 0; box-shadow: -8px -8px 32px rgba(0,0,0,.15); flex-direction: column; z-index: 100; }
     #chat-panel.active { display: flex; }
@@ -403,6 +548,18 @@ def _render_index(
     #chat-send { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: .5rem 1rem; cursor: pointer; }
     #chat-send:disabled { opacity: .5; cursor: default; }
     #chat-loading { font-size: .85rem; color: var(--muted); padding: .4rem; display: none; }
+
+    /* Deck cards in chat panel */
+    #chat-deck-cards { max-height: 200px; overflow-y: auto; padding: .5rem 1rem; border-bottom: 1px solid var(--line); font-size: .82rem; }
+    #chat-deck-cards:empty { display: none; }
+    .chat-deck-pile { margin: .2rem 0; }
+    .chat-deck-pile.meta { color: var(--muted); }
+    .deck-cards-info { color: var(--muted); margin-bottom: .3rem; }
+    .deck-cards-pile { margin-bottom: .4rem; }
+    .deck-cards-pile h4 { margin: .2rem 0; font-size: .82rem; color: var(--accent); }
+    .deck-cards-pile table { width: 100%; }
+    .deck-cards-pile td { padding: .15rem .3rem; border-bottom: 1px solid rgba(216,207,192,.5); }
+    .deck-cards-pile td.meta { color: var(--muted); font-size: .8rem; }
 
     /* Config Panel */
     #config-panel { margin-top: .5rem; padding: .5rem; background: #f0e8d8; border-radius: 8px; }
@@ -450,8 +607,17 @@ def _render_index(
 
   <div class="section">
     <h2>Decks <span class="badge">Phase 1.2</span></h2>
-    <p class="meta">Klick auf ein Deck, um mit dem LLM zu chatten.</p>
+    <p class="meta">Klick auf ein Deck, um Karten zu sehen und mit dem LLM zu chatten.</p>
     $decks_table
+  </div>
+
+  <div class="section" id="deck-detail">
+    <div class="deck-detail-header">
+      <h2 id="deck-detail-name">—</h2>
+      <button class="deck-detail-close" id="deck-detail-close">Schließen</button>
+    </div>
+    <p class="meta" id="deck-detail-meta"></p>
+    <div class="deck-cards-grid" id="deck-cards-grid"></div>
   </div>
 
   <div class="section">
@@ -497,6 +663,7 @@ def _render_index(
     <h3 id="chat-deck-name">Deck</h3>
     <button id="chat-close">×</button>
   </div>
+  <div id="chat-deck-cards"></div>
   <div id="chat-messages"></div>
   <div id="chat-loading">LLM denkt...</div>
   <div id="chat-input-area">
@@ -562,6 +729,26 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             _json_response(self, payload, status=HTTPStatus.OK)
             return
 
+        if self.path == "/api/decks-container":
+            payload = _read_json(output_dir / "decks-container.json")
+            if payload is None:
+                _json_response(self, {"error": "not_found", "message": "decks-container.json fehlt."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _json_response(self, payload, status=HTTPStatus.OK)
+            return
+
+        # /api/deck/<deckId> — individual deck file
+        if self.path.startswith("/api/deck/"):
+            deck_id = self.path[len("/api/deck/"):]
+            # Try decks/deck-<deckId>.json first
+            deck_path = output_dir / "decks" / f"deck-{deck_id}.json"
+            payload = _read_json(deck_path)
+            if payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {deck_id} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _json_response(self, payload, status=HTTPStatus.OK)
+            return
+
         if self.path == "/api/run-report":
             payload = _read_json(output_dir / "run-report.json")
             if payload is None:
@@ -581,6 +768,33 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
         if self.path == "/api/config":
             config = load_config()
             _json_response(self, config.to_dict(), status=HTTPStatus.OK)
+            return
+
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/deck-cards":
+            qs = parse_qs(parsed.query)
+            deck_id = qs.get("deck_id", [None])[0]
+            if not deck_id:
+                _json_response(self, {"error": "deck_id parameter required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            decks = _read_json(output_dir / "decks.json")
+            if not decks:
+                _json_response(self, {"error": "decks.json fehlt"}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            deck = None
+            for d in decks.get("decks", []):
+                if str(d.get("deckId")) == str(deck_id):
+                    deck = d
+                    break
+
+            if not deck:
+                _json_response(self, {"error": f"Deck {deck_id} nicht gefunden"}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            cards_data = _extract_deck_cards(deck)
+            _json_response(self, cards_data, status=HTTPStatus.OK)
             return
 
         if self.path == "/":

@@ -155,6 +155,12 @@ def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> s
             if legal_formats:
                 lines.append(f"  - Legal in: {', '.join(legal_formats[:5])}")
 
+            # Deck cards (from decks-container or deck-scan format)
+            cards = deck.get("cards", {})
+            if cards:
+                deck_lines = _format_deck_cards_for_prompt(cards)
+                lines.extend(deck_lines)
+
         if len(deck_list) > 15:
             lines.append(f"\n... und {len(deck_list) - 15} weitere Decks")
     else:
@@ -205,6 +211,41 @@ def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> s
     ])
 
     return "\n".join(lines)
+
+
+def _format_deck_cards_for_prompt(cards: dict[str, Any]) -> list[str]:
+    """Format deck cards for the LLM prompt.
+
+    Supports two formats:
+    - Named card lists: {"mainboard": [{"cardId": 123, "name": "Lightning Bolt", "count": 4}, ...]}
+    - grpId→qty dicts:  {"mainboard": {"123": 4, "456": 2}, ...}
+    """
+    pile_labels = [
+        ("mainboard", "Mainboard"),
+        ("sideboard", "Sideboard"),
+        ("commandZone", "Command Zone"),
+        ("companions", "Companions"),
+    ]
+    result: list[str] = []
+    for key, label in pile_labels:
+        pile = cards.get(key)
+        if not pile:
+            continue
+        if isinstance(pile, list):
+            # Named card list format
+            entries = []
+            for card in pile:
+                name = card.get("name") or f"ID:{card.get('cardId', '?')}"
+                count = card.get("count", 1)
+                entries.append(f"{count}x {name}")
+            if entries:
+                result.append(f"  - {label} ({len(entries)} unique): {', '.join(entries)}")
+        elif isinstance(pile, dict):
+            # grpId→qty format (no names available)
+            entries = [f"{qty}x ID:{grp_id}" for grp_id, qty in sorted(pile.items())]
+            if entries:
+                result.append(f"  - {label} ({len(entries)} unique): {', '.join(entries)}")
+    return result
 
 
 def _call_llm(config: LLMConfig, prompt: str) -> str:

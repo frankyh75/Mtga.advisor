@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_import import import_arena_deck, write_deck
@@ -23,6 +23,14 @@ from scanner.card_database import load_card_database
 from scanner.memory_scanner import scan_collection_detailed as scan_memory_collection_detailed
 from scanner.memory_scanner import validate_collection
 from scanner.memory_scanner import write_collection_artifacts
+from scanner.deck_scanner import scan_decks, write_deck_artifacts, DeckScanResult
+from scanner.il2cpp_nav import (
+    PymemMemoryAdapter,
+    Il2CppScanResult,
+    scan_decks_il2cpp,
+)
+from scanner.macos_paths import get_macos_mtga_process_names
+from scanner.pattern_scanner import scan_process_memory_many_with_stats
 from server.app import DEFAULT_HOST, DEFAULT_PORT, run_server
 
 
@@ -178,6 +186,35 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ausgabeverzeichnis (Standard: ./out-memory).",
     )
     scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken pro Anker aus.")
+
+    deck_scan = subparsers.add_parser(
+        "deck-scan",
+        help="Scannt Decks aus dem MTGA-Prozessspeicher (Pattern + IL2CPP).",
+    )
+    deck_scan.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out-decks"),
+        help="Ausgabeverzeichnis für Deck-Artefakte (Standard: ./out-decks).",
+    )
+    deck_scan.add_argument(
+        "--method",
+        choices=["pattern", "il2cpp", "auto"],
+        default="auto",
+        help="Scan-Methode: pattern (Anker-basiert), il2cpp (Navigation), auto (beide, IL2CPP bevorzugt).",
+    )
+    deck_scan.add_argument(
+        "--anchors",
+        nargs="*",
+        type=int,
+        help="Anker-GrpIDs für Pattern-Scan (mind. 1). Bei il2cpp nicht nötig.",
+    )
+    deck_scan.add_argument(
+        "--card-db",
+        action="store_true",
+        help="Lade Karten-DB für Namensauflösung (grpId → Kartenname).",
+    )
+    deck_scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken aus.")
 
     run = subparsers.add_parser("run", help="Kanonischer Phase-1-Export: macOS Memory-Scan, sonst Log-Export.")
     run.add_argument(
@@ -423,6 +460,245 @@ def _run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _attach_mtga():
+    """Attach to the running MTGA process. Returns Pymem instance or None."""
+    from scanner.memory_scanner import _attach_process
+    return _attach_process(get_macos_mtga_process_names())
+
+
+def _run_deck_scan(args: argparse.Namespace) -> int:
+    """Scannt Decks aus dem MTGA-Prozessspeicher.
+
+    Unterstützt zwei Methoden:
+    - il2cpp: Navigation über PAPA → DecksManager → _allDecks (keine Anker nötig)
+    - pattern: Anker-basierter Scan für bekannte grpIds (wie Collection-Scanner)
+    - auto: Versucht IL2CPP zuerst, fällt auf Pattern zurück
+    """
+    from scanner.memory_scanner import _attach_process
+
+    method = args.method
+    print(f"🔍 Deck-Scan (Methode: {method})")
+
+    # An MTGA-Prozess attachen
+    candidate_names = get_macos_mtga_process_names()
+    pm = _attach_process(candidate_names)
+    if pm is None:
+        return 1
+
+    # Karten-DB optional laden
+    card_db = None
+    if args.card_db:
+        print("📖 Lade Karten-DB...")
+        card_db = load_card_database()
+
+    # --- IL2CPP Navigation Scan ---
+    il2cpp_result: Il2CppScanResult | None = None
+    if method in ("il2cpp", "auto"):
+        print("🧭 IL2CPP-Navigation: Suche PAPA → DecksManager → _allDecks...")
+        adapter = PymemMemoryAdapter(pm)
+        il2cpp_result = scan_decks_il2cpp(adapter)
+        if il2cpp_result and il2cpp_result.decks:
+            print(f"✅ IL2CPP: {len(il2cpp_result.decks)} Decks gefunden")
+        elif il2cpp_result:
+            print(f"⚠ IL2CPP: keine Decks — {', '.join(il2cpp_result.warnings) or 'unbekannt'}")
+        else:
+            print("⚠ IL2CPP: Scan fehlgeschlagen")
+
+    # --- Pattern-based Scan ---
+    pattern_result: DeckScanResult | None = None
+    if method in ("pattern", "auto"):
+        anchor_ids = args.anchors or []
+        if not anchor_ids and method == "pattern":
+            _error("--anchors erforderlich für Pattern-Scan (oder --method auto verwenden)")
+            return 1
+        if not anchor_ids and method == "auto":
+            # Versuche Anker aus Collection-Scan zu holen
+            if il2cpp_result and il2cpp_result.decks:
+                # Nutze grpIds aus IL2CPP-Decks als Anker
+                anchor_ids = list({
+                    grp_id
+                    for deck in il2cpp_result.decks
+                    for pile in deck.piles.values()
+                    for grp_id in pile
+                })[:20]
+            if not anchor_ids:
+                # Versuche gespeciherte Anker oder Collection
+                from scanner.memory_scanner import _anchor_file
+                anchor_file = _anchor_file()
+                if anchor_file.exists():
+                    import json as _json
+                    try:
+                        saved = _json.loads(anchor_file.read_text(encoding="utf-8"))
+                        anchor_ids = [a[0] for a in saved if isinstance(a, (list, tuple)) and len(a) >= 1]
+                    except (OSError, ValueError):
+                        pass
+            if not anchor_ids:
+                if il2cpp_result and il2cpp_result.decks:
+                    # IL2CPP already succeeded, no need for pattern fallback
+                    pass
+                else:
+                    _error("Keine Anker für Pattern-Scan verfügbar. Verwende --anchors oder führe vorher 'scan' aus.")
+                    return 1
+
+        if anchor_ids:
+            print(f"🔎 Pattern-Scan mit {len(anchor_ids)} Anker-GrpIDs...")
+            pattern_result = scan_decks(pm, anchor_ids)
+            if pattern_result.decks:
+                print(f"✅ Pattern: {len(pattern_result.decks)} Decks gefunden")
+            else:
+                print(f"⚠ Pattern: keine Decks — {', '.join(pattern_result.warnings) or 'unbekannt'}")
+
+    # --- Merge results ---
+    all_decks: list[dict[str, Any]] = []
+    deck_piles_by_id: dict[str, dict[int, dict[int, int]]] = {}
+    warnings_all: list[str] = []
+
+    if il2cpp_result and il2cpp_result.decks:
+        warnings_all.extend(il2cpp_result.warnings)
+        for deck in il2cpp_result.decks:
+            deck_id = str(deck.deck_id) if deck.deck_id else f"il2cpp-{deck.raw_address:#x}"
+            all_decks.append({
+                "deckId": deck_id,
+                "name": deck.name or "Unknown Deck",
+                "source": "il2cpp",
+                "cards": _piles_to_card_dict(deck.piles),
+                "cardsById": _piles_to_cards_by_id(deck.piles),
+            })
+            deck_piles_by_id[deck_id] = deck.piles
+
+    if pattern_result and pattern_result.decks:
+        warnings_all.extend(pattern_result.warnings)
+        for deck in pattern_result.decks:
+            deck_id = deck.deck_id or f"pattern-{deck.raw_address:#x}"
+            # Skip if already found by IL2CPP (dedup by deck_id)
+            if any(d["deckId"] == deck_id for d in all_decks):
+                continue
+            all_decks.append({
+                "deckId": deck_id,
+                "name": deck.name or "Unknown Deck",
+                "source": "pattern",
+                "cards": _piles_to_card_dict(deck.piles, card_db),
+                "cardsById": _piles_to_cards_by_id(deck.piles),
+            })
+            deck_piles_by_id[deck_id] = deck.piles
+
+    if not all_decks:
+        _error("Keine Decks gefunden.")
+        if warnings_all:
+            print(f"  Warnungen: {'; '.join(warnings_all)}", file=sys.stderr)
+        return 1
+
+    # --- Write artifacts ---
+    output_dir = args.output
+    output_dir.mkdir(parents=True, exist_ok=True)
+    decks_dir = output_dir / "decks"
+    decks_dir.mkdir(exist_ok=True)
+
+    # Individual deck files (deck.v1 schema)
+    for deck_entry in all_decks:
+        deck_id = deck_entry["deckId"]
+        deck_path = decks_dir / f"deck-{deck_id}.json"
+        payload = {
+            "schema": "deck.v1",
+            "deckId": deck_id,
+            "name": deck_entry["name"],
+            "source": deck_entry["source"],
+            "cards": deck_entry["cards"],
+            "cardsById": deck_entry["cardsById"],
+        }
+        deck_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    # Container file (decks-container.v1)
+    container_path = output_dir / "decks-container.json"
+    container_payload = {
+        "schema": "decks-container.v1",
+        "exportedAt": _iso_now_cli(),
+        "decks": [
+            {
+                "deckId": d["deckId"],
+                "name": d["name"],
+                "source": d["source"],
+                "cards": d["cards"],
+            }
+            for d in all_decks
+        ],
+        "warnings": warnings_all,
+    }
+    container_path.write_text(
+        json.dumps(container_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    # Also write decks.json (compatible with dashboard/advisor which expect this format)
+    decks_json_path = output_dir / "decks.json"
+    decks_json_payload = {
+        "schema": "decks.v1",
+        "exportedAt": _iso_now_cli(),
+        "decks": [
+            {
+                "deckId": d["deckId"],
+                "name": d["name"],
+                "source": d["source"],
+                "cards": d["cards"],
+                "cardsById": d["cardsById"],
+            }
+            for d in all_decks
+        ],
+        "warnings": warnings_all,
+    }
+    decks_json_path.write_text(
+        json.dumps(decks_json_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    print(f"\n📊 {len(all_decks)} Decks gescannt")
+    print(f"Container: {container_path}")
+    print(f"decks.json: {decks_json_path}")
+    print(f"Deck-Verzeichnis: {decks_dir}")
+    return 0
+
+
+def _iso_now_cli() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _piles_to_card_dict(
+    piles: dict[int, dict[int, int]],
+    card_db: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Convert piles (pile_type → {grpId: qty}) to named card lists by pile key."""
+    from scanner.deck_scanner import PILE_KEYS
+    result: dict[str, list[dict[str, Any]]] = {}
+    for pile_type, key in PILE_KEYS.items():
+        pile = piles.get(pile_type, {})
+        if not pile:
+            continue
+        cards = []
+        for grp_id, qty in sorted(pile.items()):
+            name = f"ID:{grp_id}"
+            if card_db and grp_id in card_db:
+                name = card_db[grp_id].get("name", name)
+            cards.append({"cardId": grp_id, "name": name, "count": qty})
+        result[key] = cards
+    return result
+
+
+def _piles_to_cards_by_id(piles: dict[int, dict[int, int]]) -> dict[str, dict[str, int]]:
+    """Convert piles to {pileKey: {grpId_str: qty}} format."""
+    from scanner.deck_scanner import PILE_KEYS
+    result: dict[str, dict[str, int]] = {}
+    for pile_type, key in PILE_KEYS.items():
+        pile = piles.get(pile_type, {})
+        if not pile:
+            continue
+        result[key] = {str(grp_id): qty for grp_id, qty in sorted(pile.items())}
+    return result
+
+
 def _run_run(args: argparse.Namespace) -> int:
     platform = args.platform or detect_platform()
     if platform == "macos" and not args.logs:
@@ -607,6 +883,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_decks(args)
     if args.command == "scan":
         return _run_scan(args)
+    if args.command == "deck-scan":
+        return _run_deck_scan(args)
     if args.command == "run":
         return _run_run(args)
     if args.command == "validate":

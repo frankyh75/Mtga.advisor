@@ -15,7 +15,13 @@ def build_completion_advice(
     deck: dict[str, Any],
     card_db: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build deterministic completion advice for one deck."""
+    """Build deterministic completion advice for one deck.
+
+    Supports two deck formats:
+    - arena-deck.v1: deck["mainboard"] = [{"arenaId": 123, "count": 4, ...}, ...]
+    - deck.v1 / decks-container.v1: deck["cards"]["mainboard"] = [{"cardId": 123, "count": 4, ...}, ...]
+      or deck["cards"]["mainboard"] = {"123": 4, ...}
+    """
     collection_cards = {int(card_id): int(count) for card_id, count in collection.get("cards", {}).items()}
     completeness = collection.get("diagnostics", {}).get("completeness", {})
     wildcards_complete = completeness.get("wildcards") == "complete"
@@ -23,8 +29,7 @@ def build_completion_advice(
     if not wildcards_complete:
         warnings.append("wildcards-unknown")
 
-    mainboard = list(deck.get("mainboard", []))
-    sideboard = list(deck.get("sideboard", []))
+    mainboard, sideboard = _normalize_deck_cards(deck)
     requirements = _aggregate_requirements(mainboard, sideboard)
     recommendations: list[dict[str, Any]] = []
     owned_weight = 0
@@ -92,6 +97,56 @@ def write_advisor_result(result: dict[str, Any], output_dir: Path) -> Path:
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _normalize_deck_cards(deck: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Normalize deck card data from different formats.
+
+    Returns (mainboard, sideboard) as lists of dicts with keys:
+    arenaId, count, name, rarity.
+    """
+    # Format 1: arena-deck.v1 (deck["mainboard"] = [...])
+    if "mainboard" in deck or "sideboard" in deck:
+        mainboard = list(deck.get("mainboard", []))
+        sideboard = list(deck.get("sideboard", []))
+        return mainboard, sideboard
+
+    # Format 2: deck.v1 / decks-container.v1 (deck["cards"]["mainboard"] = ...)
+    cards = deck.get("cards", {})
+    if not cards:
+        return [], []
+
+    mainboard: list[dict[str, Any]] = []
+    sideboard: list[dict[str, Any]] = []
+
+    for pile_key, target in (("mainboard", mainboard), ("sideboard", sideboard)):
+        pile = cards.get(pile_key)
+        if not pile:
+            continue
+        if isinstance(pile, list):
+            # Named card list format
+            for card in pile:
+                arena_id = int(card.get("cardId") or card.get("arenaId") or 0)
+                if arena_id <= 0:
+                    continue
+                target.append({
+                    "arenaId": arena_id,
+                    "count": int(card.get("count", 1)),
+                    "name": card.get("name", f"#{arena_id}"),
+                    "rarity": card.get("rarity", "unknown"),
+                })
+        elif isinstance(pile, dict):
+            # grpId→qty format (no names, no rarity)
+            for grp_id_str, qty in pile.items():
+                arena_id = int(grp_id_str)
+                target.append({
+                    "arenaId": arena_id,
+                    "count": int(qty),
+                    "name": f"#{arena_id}",
+                    "rarity": "unknown",
+                })
+
+    return mainboard, sideboard
 
 
 def _aggregate_requirements(
