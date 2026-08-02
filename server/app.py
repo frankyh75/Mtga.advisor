@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -80,6 +81,11 @@ def _format_json(payload: dict[str, Any] | None) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
 
 
+def _json_for_script(payload: Any) -> str:
+    """Serialisiere JSON so, dass es sicher in einem script[type=json] liegt."""
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True).replace("</", "<\\/")
+
+
 def _extract_diagnostics(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {"completeness": None, "warnings": ["Artefakt fehlt."], "evidence": []}
@@ -96,6 +102,135 @@ def _render_list(items: list[str]) -> str:
         return "<p>Keine.</p>"
     rows = "".join(f"<li>{html.escape(item)}</li>" for item in items)
     return f"<ul>{rows}</ul>"
+
+
+def _slug(value: str) -> str:
+    value = value.lower().strip()
+    slug = []
+    for ch in value:
+        if ch.isalnum():
+            slug.append(ch)
+        else:
+            slug.append("-")
+    return "".join(slug).strip("-") or "deck"
+
+
+def _deck_keys_for_payload(deck: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    deck_key = deck.get("deckKey")
+    if deck_key:
+        keys.add(str(deck_key))
+    deck_id = deck.get("deckId")
+    if deck_id:
+        keys.add(str(deck_id))
+    deck_tile_id = deck.get("deckTileId")
+    if deck_tile_id is not None:
+        keys.add(f"tile-{deck_tile_id}")
+    name = deck.get("name")
+    if isinstance(name, str) and name:
+        keys.add(name)
+        keys.add(_slug(name))
+    return keys
+
+
+def _find_deck_payload(output_dir: Path, deck_key: str) -> dict[str, Any] | None:
+    normalized = urllib.parse.unquote(deck_key).strip()
+    if not normalized:
+        return None
+
+    deck_dir = output_dir / "decks"
+    container_candidates = [
+        deck_dir / f"deck-{_slug(normalized)}.arena.json",
+        deck_dir / f"deck-{_slug(normalized)}.json",
+        deck_dir / f"deck-{normalized}.arena.json",
+        deck_dir / f"deck-{normalized}.json",
+        deck_dir / f"{_slug(normalized)}.arena.json",
+        deck_dir / f"{_slug(normalized)}.json",
+        deck_dir / f"{normalized}.arena.json",
+        deck_dir / f"{normalized}.json",
+    ]
+    for candidate in container_candidates:
+        if candidate.exists():
+            payload = _read_json(candidate)
+            if payload is not None:
+                return payload
+
+    decks = _read_json(output_dir / "decks.json")
+    if not decks:
+        return None
+
+    for deck in decks.get("decks", []):
+        if normalized in _deck_keys_for_payload(deck):
+            return deck
+    return None
+
+
+def _extract_deck_cards(deck: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "deckId": deck.get("deckId", ""),
+        "name": deck.get("name", "Unnamed"),
+        "mainboard": [],
+        "sideboard": [],
+        "commandZone": [],
+        "companions": [],
+        "totalCards": 0,
+    }
+
+    cards_field = deck.get("cards")
+    if isinstance(cards_field, dict):
+        for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+            pile = cards_field.get(pile_key, [])
+            if isinstance(pile, list):
+                result[pile_key] = pile
+            elif isinstance(pile, dict):
+                result[pile_key] = [
+                    {"cardId": int(gid) if str(gid).isdigit() else gid, "name": f"ID:{gid}", "count": qty}
+                    for gid, qty in sorted(pile.items())
+                ]
+    elif isinstance(cards_field, list):
+        result["mainboard"] = cards_field
+
+    cards_by_id = deck.get("cardsById")
+    if isinstance(cards_by_id, dict):
+        for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+            if not result.get(pile_key) and pile_key in cards_by_id:
+                pile = cards_by_id[pile_key]
+                if isinstance(pile, dict):
+                    result[pile_key] = [
+                        {"cardId": int(gid) if str(gid).isdigit() else gid, "name": f"ID:{gid}", "count": qty}
+                        for gid, qty in sorted(pile.items())
+                    ]
+
+    if not result["mainboard"]:
+        main_deck = deck.get("mainDeck", [])
+        if isinstance(main_deck, list):
+            result["mainboard"] = [
+                {
+                    "cardId": c.get("grpId", c.get("cardId", 0)),
+                    "name": c.get("name", f"ID:{c.get('grpId', '?')}"),
+                    "count": c.get("quantity", c.get("count", 1)),
+                }
+                for c in main_deck
+            ]
+
+    if not result["sideboard"]:
+        sideboard = deck.get("sideboard", [])
+        if isinstance(sideboard, list):
+            result["sideboard"] = [
+                {
+                    "cardId": c.get("grpId", c.get("cardId", 0)),
+                    "name": c.get("name", f"ID:{c.get('grpId', '?')}"),
+                    "count": c.get("quantity", c.get("count", 1)),
+                }
+                for c in sideboard
+            ]
+
+    total = 0
+    for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+        for card in result.get(pile_key, []):
+            total += int(card.get("count", card.get("quantity", 1)))
+    result["totalCards"] = total
+    return result
 
 
 def _summary_card(label: str, value: Any, detail: str = "") -> str:
@@ -153,17 +288,23 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
     for i, deck in enumerate(deck_list[:50]):
         name = deck.get("name", "Unnamed")
         fmt = deck.get("attributes", {}).get("Format", "?")
-        deck_id = deck.get("deckId", i)
+        deck_id = deck.get("deckKey") or deck.get("deckId") or deck.get("deckTileId") or i
         legalities = deck.get("formatLegalities", {})
         legal = ", ".join(f for f, v in legalities.items() if v)[:40] or "?"
+        is_precon = bool(deck.get("isPrecon"))
+        type_label = "Precon" if is_precon else "Deck"
         row = (
-            "<tr class='deck-row'>"
+            "<tr class='deck-row' "
+            f"data-deck-key='{html.escape(str(deck_id))}' "
+            f"data-deck-name='{html.escape(name)}' "
+            f"data-is-precon='{str(is_precon).lower()}'>"
             + f"<td>{html.escape(name)}</td>"
             + f"<td>{html.escape(fmt)}</td>"
+            + f"<td><span class='deck-type {'precon' if is_precon else 'normal'}'>{html.escape(type_label)}</span></td>"
             + f"<td>{html.escape(legal)}</td>"
             + (
                 "<td><button class='btn-select-deck' "
-                f"data-deck-id='{html.escape(str(deck_id))}' "
+                f"data-deck-key='{html.escape(str(deck_id))}' "
                 f"data-deck-name='{html.escape(name)}'>Select</button></td>"
             )
             + "</tr>"
@@ -173,7 +314,7 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
     if len(deck_list) > 50:
         suffix = f'<p class="meta">Weitere {len(deck_list) - 50} Decks im JSON.</p>'
     return (
-        "<table><thead><tr><th>Name</th><th>Format</th><th>Legal in</th><th></th></tr></thead>"
+        "<table><thead><tr><th>Name</th><th>Format</th><th>Typ</th><th>Legal in</th><th></th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>{suffix}"
     )
 
@@ -517,6 +658,21 @@ def _render_index(
     .btn-select-deck { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: .3rem .8rem; cursor: pointer; font-size: .85rem; }
     .btn-select-deck:hover { opacity: .85; }
     .deck-row:hover { background: rgba(180,83,9,.06); cursor: pointer; }
+    .deck-row.is-selected { background: rgba(180,83,9,.14); }
+    .deck-row.hidden-by-filter { display: none; }
+    .deck-type { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .75rem; }
+    .deck-type.precon { background: #fee8d1; color: #8a4b08; }
+    .deck-type.normal { background: #e7efe9; color: #26513a; }
+    .deck-toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: .5rem; flex-wrap: wrap; }
+    .deck-toolbar label { display: inline-flex; gap: .45rem; align-items: center; cursor: pointer; }
+    .deck-details { margin-top: 1rem; border: 1px solid var(--line); border-radius: 16px; background: rgba(247,241,231,.9); padding: 1rem; }
+    .deck-details code, .deck-details pre { background: #231f1a; color: #f8ead1; }
+    .deck-details pre { max-height: 20rem; }
+    .deck-details-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 1rem; }
+    .deck-detail-empty { color: var(--muted); padding: .5rem 0; }
+    .deck-detail-section { background: rgba(255,250,240,.7); border: 1px solid var(--line); border-radius: 12px; padding: .8rem; }
+    .deck-list { margin: 0; padding-left: 1.1rem; }
+    .deck-list li { margin: .15rem 0; }
 
     /* Deck Detail Panel */
     #deck-detail { display: none; }
@@ -607,17 +763,29 @@ def _render_index(
 
   <div class="section">
     <h2>Decks <span class="badge">Phase 1.2</span></h2>
-    <p class="meta">Klick auf ein Deck, um Karten zu sehen und mit dem LLM zu chatten.</p>
-    $decks_table
-  </div>
-
-  <div class="section" id="deck-detail">
-    <div class="deck-detail-header">
-      <h2 id="deck-detail-name">—</h2>
-      <button class="deck-detail-close" id="deck-detail-close">Schließen</button>
+    <div class="deck-toolbar">
+      <label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>
+      <span id="deck-visibility" class="meta">Klick auf eine Zeile für Details, Chat-Button für Advisor.</span>
     </div>
-    <p class="meta" id="deck-detail-meta"></p>
-    <div class="deck-cards-grid" id="deck-cards-grid"></div>
+    $decks_table
+    <div id="deck-details" class="deck-details">
+      <div class="deck-detail-empty" id="deck-detail-empty">Klicke auf ein Deck, um die Detailansicht zu laden.</div>
+      <div id="deck-detail-content" style="display:none;">
+        <div class="deck-details-grid">
+          <div class="deck-detail-section">
+            <h3 id="deck-detail-name">Deck</h3>
+            <p class="meta" id="deck-detail-meta"></p>
+            <div id="deck-detail-badges"></div>
+            <h4>Summary</h4>
+            <pre id="deck-detail-json"></pre>
+          </div>
+          <div class="deck-detail-section">
+            <h4>Deckliste</h4>
+            <div id="deck-detail-cards" class="deck-detail-empty">Noch keine Deckliste geladen.</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="section">
@@ -671,6 +839,7 @@ def _render_index(
     <button id="chat-send">Senden</button>
   </div>
 </div>
+<script type="application/json" id="decks-json">$decks_json</script>
 <script src="/dashboard.js" defer></script>
 </body>
 </html>
@@ -679,6 +848,7 @@ def _render_index(
         decks_summary=_decks_summary(decks),
         llm_advisor_summary=_llm_advisor_summary(advisor_result),
         decks_table=_render_decks_table(decks),
+        decks_json=_json_for_script(decks or {}),
         advisor_warnings=_render_list(advisor_warnings),
         crafting_priorities=_render_crafting_priorities(advisor_result),
         deck_optimizations=_render_deck_optimizations(advisor_result),
@@ -737,27 +907,17 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             _json_response(self, payload, status=HTTPStatus.OK)
             return
 
-        # /api/deck/<deckId> — individual deck file
-        if self.path.startswith("/api/deck/"):
-            deck_id = self.path[len("/api/deck/"):]
-            # Sanitize deck_id: only alphanumeric, dash, underscore
-            if not deck_id or not all(c.isalnum() or c in "-_" for c in deck_id):
-                _json_response(self, {"error": "bad_request", "message": "Invalid deck ID."}, status=HTTPStatus.BAD_REQUEST)
+        if self.path.startswith("/api/decks/") or self.path.startswith("/api/deck/"):
+            deck_key = self.path.split("/", 3)[-1]
+            deck = _find_deck_payload(output_dir, deck_key)
+            if deck is None:
+                _json_response(
+                    self,
+                    {"error": "not_found", "message": f"Deck {deck_key} nicht gefunden."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
                 return
-            # Try decks/deck-<deckId>.json first
-            deck_path = output_dir / "decks" / f"deck-{deck_id}.json"
-            # Resolve and verify it's still under decks_dir
-            decks_dir = output_dir / "decks"
-            try:
-                deck_path.resolve().relative_to(decks_dir.resolve())
-            except ValueError:
-                _json_response(self, {"error": "bad_request", "message": "Invalid deck ID."}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload = _read_json(deck_path)
-            if payload is None:
-                _json_response(self, {"error": "not_found", "message": f"Deck {deck_id} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
-                return
-            _json_response(self, payload, status=HTTPStatus.OK)
+            _json_response(self, deck, status=HTTPStatus.OK)
             return
 
         if self.path == "/api/run-report":
@@ -847,7 +1007,7 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
 
             deck = None
             for d in decks.get("decks", []):
-                if str(d.get("deckId")) == str(deck_id):
+                if str(deck_id) in _deck_keys_for_payload(d):
                     deck = d
                     break
 

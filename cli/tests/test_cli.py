@@ -91,6 +91,35 @@ def test_collection_command_discovers_logs(tmp_path: Path, monkeypatch: pytest.M
     assert (tmp_path / "out" / "collection.json").exists()
 
 
+def test_decks_command_exports_decks_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    times = iter(["2025-01-02T00:00:00Z", "2025-01-02T00:00:05Z"])
+    import parser.decks as decks_module
+
+    monkeypatch.setattr(decks_module, "_iso_now", lambda: next(times))
+
+    log_dir = tmp_path / "Library" / "Logs" / "Wizards Of The Coast" / "MTGA"
+    log_dir.mkdir(parents=True)
+    for name in ("Player.log", "Player-prev.log"):
+        source = _fixture_path(name)
+        log_dir.joinpath(name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "decks",
+            "--platform",
+            "macos",
+            "--macos-logs",
+            str(log_dir),
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "out" / "decks.json").exists()
+    assert (tmp_path / "out" / "run-report-decks.json").exists()
+
+
 def test_scan_command_exports_memory_scan_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cli.main as cli_module
     from scanner.memory_scanner import MemoryScanResult

@@ -15,8 +15,9 @@ Merged: Roadmap v3 + hermes-ornith-plan. Beide Dokumente sind jetzt eins.
 ## ✅ Phase 1.1: Card Metadata — Done
 - 181 unbekannte IDs via `Raw_CardDatabase_*.mtga` aufgelöst
 
-## ✅ Phase 1.2: Deck Export — Done
+## ✅ Phase 1.2: Deck Summary Export — Done
 - StartHook aus Logs parsen → `decks.json` mit Namen, IDs, Formaten
+- Wichtiger Zusatz: Das ist nur ein Summary-Export, keine vollständige Deckliste mit Karten.
 - CLI: `python3 -m cli.main run`
 - Menubar-App exportiert Decks mit
 
@@ -46,9 +47,9 @@ Merged: Roadmap v3 + hermes-ornith-plan. Beide Dokumente sind jetzt eins.
 
 ---
 
-## ✅ Phase 3: Deck-Summaries & Namensauflösung — Done
+## 🟡 Phase 3: Deck-Summaries & Namensauflösung — Partial
 
-Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Alle 5 Tasks abgeschlossen.
+Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Die Summary- und Namensauflösungs-Tasks sind abgeschlossen; die belastbare Full-Deck-Quelle bleibt offen.
 
 ### T1: Deck-Summaries stabilisieren — ✅ Done
 - StartHook-Parsing stabilisiert, Parsing-Warnungen für leere/ungültige Deck-Namen
@@ -63,11 +64,12 @@ Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Alle 5 Tasks 
 - Bei Mehrdeutigkeiten: konservative Deduplizierung (neuestes Set bevorzugt)
 - 34 Tests bestanden
 
-### T3: Vollständigen Deck-Export definieren — ✅ Done
+### T3: Vollständigen Deck-Export definieren — 🟡 Partial
 - Container-Format: `out/decks/` mit `index.json`, pro Deck eine Datei
 - CLI-Subcommands: `decks container`, `decks list`, `decks show`
 - Format-Doku: `docs/phase3-deck-export.md`, `docs/deck-export-format.md`
 - Tests für Container-Export geschrieben
+- Aktualisierung 2026-08-02: Der Export ist funktional, aber die Datenquelle liefert bislang nur StartHook-Summaries. Eine belastbare Quelle für echte Kartenlisten pro Deck ist noch offen.
 
 ### T4: Ornith über Tailscale anschließen — ✅ Done
 - Endpoint-Konfiguration: `mtga-advisor.json`, Env, CLI ✅
@@ -80,6 +82,7 @@ Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Alle 5 Tasks 
 - Reihenfolge: Scan → Deck-Export → `advisor complete` → optional `advisor llm` → Dashboard
 - Statusanzeige: Collection? Decks? Advisor? LLM erreichbar?
 - Nur lesende GUI, keine Doppelberechnung
+- Deck-Anzeige muss klar zwischen Summary-Liste und vollständiger Deckliste unterscheiden.
 
 ---
 
@@ -122,6 +125,7 @@ Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Alle 5 Tasks 
 
 - [ ] **Hermes-Integration klären:** Dashboard ist eigenständig (http.server). MCP-Interface für Hermes-native Steuerung?
 - [ ] **Decklisten-Quelle:** Logs, Export aus MTGA, manueller Import, oder kombiniert?
+- [ ] **Decklisten-Quelle:** Logs, Export aus MTGA, manueller Import, oder kombiniert? Aktueller Befund: StartHook liefert nur Metadaten, keine vollständigen Kartenlisten.
 - [ ] **ornith Rolle:** Nur Advisor-Text oder auch Decklisten-Zusammenfassung?
 - [ ] **pymem-osx:** Auf MacBook installieren (statt Windows-pymem)
 - [ ] **Firewall:** macOS Firewall Port 8081 für Tailscale freigeben
@@ -129,7 +133,7 @@ Kanban-Tasks auf Board `mtga-advisor`, assignee: `perseus-ornith`. Alle 5 Tasks 
 ## Erfolgskriterien
 
 - [x] `decks.json` ist verfügbar und in der UI sichtbar
-- [x] Mindestens ein vollständiges Deck mit englischen Namen sauber exportiert
+- [ ] Mindestens ein vollständiges Deck mit englischen Namen sauber exportiert
 - [x] `advisor llm` erreicht `ornith` über Tailscale
 - [x] Dashboard zeigt Collection, Decks und Advisor-Status
 - [x] Fehler sind als Diagnostics sichtbar und nicht still versteckt

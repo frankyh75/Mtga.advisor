@@ -7,6 +7,7 @@
 - `collection.json` kommt bereits aus dem deterministischen Scanpfad.
 - `decks.json` existiert bereits als Deck-Summary-Export aus `StartHook`.
 - `arena_deck.json` existiert bereits als normalisierte Einzel-Deckliste.
+- Eine belastbare Quelle für vollständige Decklisten pro Arena-Deck ist noch nicht bestätigt.
 - `advisor llm` ist implementiert und kann gegen einen OpenAI-kompatiblen Endpoint laufen.
 - Der Tailscale-Endpunkt `http://100.95.116.78:8081/v1/chat/completions` war von hier aus nicht erreichbar; die Integration ist also technisch vorbereitet, aber netzwerkseitig noch nicht bestätigt.
 
@@ -20,7 +21,7 @@
 ## Konkrete Ziele
 
 1. Deck-Summaries aus Logs sauber exportieren.
-2. Echte Decklisten mit englischen Kartennamen reproduzierbar erzeugen.
+2. Echte Decklisten mit englischen Kartennamen reproduzierbar erzeugen, sobald die Quelle gefunden ist.
 3. `ornith` über Tailscale zuverlässig ansprechen.
 4. `Hermes` auf die lokalen Artefakte und den LLM-Output aufsetzen.
 5. Die UI so halten, dass sie nur anzeigt, nicht berechnet.
@@ -65,9 +66,10 @@ Tasks:
   - entweder pro Deck eine Datei
   - oder ein Containerformat mit mehreren Decks
 - Import/Export-Pfade nicht vermischen.
+- Bis dahin Summaries und manuell importierte Decklisten strikt getrennt halten.
 
 Ergebnis:
-- `Hermes` kann Decks anzeigen und gezielt einzelne Decklisten laden.
+- `Hermes` kann Decks anzeigen und gezielt einzelne Decklisten laden, sobald echte Decklisten verfügbar sind.
 - Der Export bleibt reproduzierbar und diff-freundlich.
 
 ### Phase 4: Ornith über Tailscale anschließen

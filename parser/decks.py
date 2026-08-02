@@ -22,6 +22,22 @@ from .pipeline import ParsedEvent, chunk, extract_json, ingest
 from .start_hook import DeckSummary, parse_start_hook
 
 
+PRECON_MARKERS = (
+    "loc/decks/precon",
+    "precon",
+    "starter deck",
+    "starterdeck",
+    "beginner deck",
+    "beginner",
+    "intro deck",
+    "introductory",
+    "npe",
+    "spotlight",
+    "storydeck",
+    "story deck",
+)
+
+
 @dataclass(frozen=True)
 class DeckExportPaths:
     """Pfade der Deck-Export-Artefakte."""
@@ -54,6 +70,12 @@ def export_decks(paths: Iterable[Path], output_dir: Path) -> DeckExportPaths:
     started_at = _iso_now()
     events = list(extract_json(chunk(ingest(sorted_paths))))
     decks, warnings = _extract_decks(events)
+    raw_decks, raw_warnings = _extract_decks_from_raw_json_lines(sorted_paths)
+    if raw_decks:
+        decks.extend(raw_decks)
+    if raw_warnings:
+        warnings.extend(raw_warnings)
+    decks = _dedupe_decks(decks)
 
     decks_path = output_dir / "decks.json"
     run_report_path = output_dir / "run-report-decks.json"
@@ -154,9 +176,9 @@ def list_decks(deck_dir: Path) -> dict[str, any]:
 
 
 def _extract_decks(events: list[ParsedEvent]) -> tuple[list[DeckSummary], list[str]]:
-    """Extrahiere DeckSummaries aus allen StartHook-Events.
+    """Extrahiere DeckSummaries aus den Deck-Events in den Logs.
 
-    Sammelt Decks aus allen StartHook-Events in den Logs.
+    Sammelt Decks aus StartHook-Events und aus CourseDeckSummary-Strukturen.
     Neuere Events überschreiben ältere (letzter Login gewinnt).
 
     Returns:
@@ -167,25 +189,29 @@ def _extract_decks(events: list[ParsedEvent]) -> tuple[list[DeckSummary], list[s
     warnings: list[str] = []
 
     for event in events:
-        if event.event != "StartHook":
-            continue
         if not isinstance(event.data, dict):
             continue
 
-        parsed, hook_warnings = parse_start_hook(event.data)
-        if parsed is None:
+        if event.event == "StartHook" or "DeckSummaries" in event.data:
+            parsed, hook_warnings = parse_start_hook(event.data)
+            if parsed is not None:
+                for deck in parsed.deck_summaries:
+                    key = deck.deck_id or deck.name
+                    if key not in seen:
+                        order.append(key)
+                    seen[key] = deck
             if hook_warnings:
                 warnings.extend(hook_warnings)
-            continue
 
-        for deck in parsed.deck_summaries:
-            key = deck.deck_id or deck.name
-            if key not in seen:
-                order.append(key)
-            seen[key] = deck
-
-        if hook_warnings:
-            warnings.extend(hook_warnings)
+        course_decks, course_warnings = _parse_course_deck_summaries(event.data)
+        if course_decks:
+            for deck in course_decks:
+                key = deck.deck_id or deck.name
+                if key not in seen:
+                    order.append(key)
+                seen[key] = deck
+        if course_warnings:
+            warnings.extend(course_warnings)
 
     # Flagge Decks die keine DeckId haben (werden als Key genutzt)
     for deck in seen.values():
@@ -209,11 +235,159 @@ def _extract_decks(events: list[ParsedEvent]) -> tuple[list[DeckSummary], list[s
     return [seen[key] for key in order], warnings
 
 
+def _extract_decks_from_raw_json_lines(paths: list[Path]) -> tuple[list[DeckSummary], list[str]]:
+    """Fallback für JSON-Zeilen, die nicht über das Timestamp-Chunking laufen."""
+    decks: list[DeckSummary] = []
+    warnings: list[str] = []
+
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, raw_line in enumerate(handle, start=1):
+                    text = raw_line.strip()
+                    if not text.startswith("{"):
+                        continue
+                    if "\"CourseDeckSummary\"" not in text and "\"DeckSummaries\"" not in text:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    found, payload_warnings = _extract_decks_from_payload(payload)
+                    if found:
+                        decks.extend(found)
+                    if payload_warnings:
+                        warnings.extend(
+                            f"{path.name}:{line_number}: {warning}" for warning in payload_warnings
+                        )
+        except OSError as exc:
+            warnings.append(f"{path.name}: konnte nicht gelesen werden ({exc})")
+
+    return decks, warnings
+
+
+def _extract_decks_from_payload(data: dict[str, Any]) -> tuple[list[DeckSummary], list[str]]:
+    """Extrahiere DeckSummaries aus einem einzelnen JSON-Payload."""
+    if not isinstance(data, dict):
+        return [], []
+
+    decks: list[DeckSummary] = []
+    warnings: list[str] = []
+
+    parsed, hook_warnings = parse_start_hook(data)
+    if parsed is not None:
+        decks.extend(parsed.deck_summaries)
+    if hook_warnings:
+        warnings.extend(hook_warnings)
+
+    course_decks, course_warnings = _parse_course_deck_summaries(data)
+    if course_decks:
+        decks.extend(course_decks)
+    if course_warnings:
+        warnings.extend(course_warnings)
+
+    return decks, warnings
+
+
+def _parse_course_deck_summaries(data: dict[str, Any]) -> tuple[list[DeckSummary], list[str]]:
+    """Extrahiere DeckSummaries aus CourseDeckSummary-Strukturen."""
+    raw_courses = data.get("Courses")
+    if not isinstance(raw_courses, list):
+        return [], []
+
+    decks: list[DeckSummary] = []
+    warnings: list[str] = []
+
+    for idx, raw_course in enumerate(raw_courses):
+        if not isinstance(raw_course, dict):
+            warnings.append(f"Courses[{idx}] ist kein Objekt, übersprungen.")
+            continue
+
+        summary = raw_course.get("CourseDeckSummary")
+        if not isinstance(summary, dict):
+            continue
+
+        name = summary.get("Name", "")
+        if not isinstance(name, str):
+            name = str(name) if name is not None else ""
+        if not name.strip():
+            warnings.append(f"Courses[{idx}].CourseDeckSummary hat keinen Namen, übersprungen.")
+            continue
+
+        deck_id = summary.get("DeckId")
+        if deck_id is not None:
+            try:
+                deck_id = str(deck_id)
+            except (TypeError, ValueError):
+                warnings.append(f"Courses[{idx}].CourseDeckSummary: DeckId konnte nicht konvertiert werden.")
+                deck_id = None
+
+        deck_tile_id = summary.get("DeckTileId")
+        if deck_tile_id is not None:
+            try:
+                deck_tile_id = int(deck_tile_id)
+            except (TypeError, ValueError):
+                warnings.append(f"Courses[{idx}].CourseDeckSummary: DeckTileId konnte nicht konvertiert werden.")
+                deck_tile_id = None
+
+        attributes_raw = summary.get("Attributes", {})
+        attributes: dict[str, str]
+        if isinstance(attributes_raw, list):
+            attributes = {}
+            for attr in attributes_raw:
+                if isinstance(attr, dict):
+                    key = attr.get("name", attr.get("key"))
+                    value = attr.get("value")
+                    if key is not None and value is not None:
+                        attributes[str(key)] = str(value)
+        elif isinstance(attributes_raw, dict):
+            attributes = {str(k): str(v) for k, v in attributes_raw.items()}
+        else:
+            attributes = {}
+
+        format_legalities: dict[str, bool] = {}
+        format_name = attributes.get("Format")
+        if isinstance(format_name, str) and format_name:
+            format_legalities[format_name] = True
+
+        description = summary.get("Description")
+        if description is not None and not isinstance(description, str):
+            description = str(description)
+
+        decks.append(
+            DeckSummary(
+                name=name,
+                deck_id=deck_id,
+                deck_tile_id=deck_tile_id,
+                description=description,
+                attributes=attributes,
+                format_legalities=format_legalities,
+                is_companion_valid=None,
+                mana=None,
+            )
+        )
+
+    return decks, warnings
+
+
+def _dedupe_decks(decks: list[DeckSummary]) -> list[DeckSummary]:
+    """Dedupere Decks nach DeckId oder Name, letzter Treffer gewinnt."""
+    seen: dict[str, DeckSummary] = {}
+    order: list[str] = []
+    for deck in decks:
+        key = deck.deck_id or deck.name
+        if key not in seen:
+            order.append(key)
+        seen[key] = deck
+    return [seen[key] for key in order]
+
+
 def _build_deck_summary_payload(deck: DeckSummary) -> dict:
     """Baue das Payload für ein einzelnes Deck."""
     return {
         "schema": "deck-summary.v1",
         "name": deck.name,
+        "deckKey": _deck_key(deck),
         "deckId": deck.deck_id,
         "deckTileId": deck.deck_tile_id,
         "description": deck.description,
@@ -222,6 +396,8 @@ def _build_deck_summary_payload(deck: DeckSummary) -> dict:
         "isCompanionValid": deck.is_companion_valid,
         "mana": deck.mana,
         "hasDeckId": deck.deck_id is not None,
+        "isPrecon": _is_precon_deck(deck),
+        "preconReason": _precon_reason(deck),
     }
 
 
@@ -236,6 +412,7 @@ def _build_decks_payload(
         "decks": [
             {
                 "name": d.name,
+                "deckKey": _deck_key(d),
                 "deckId": d.deck_id,
                 "deckTileId": d.deck_tile_id,
                 "description": d.description,
@@ -244,6 +421,8 @@ def _build_decks_payload(
                 "isCompanionValid": d.is_companion_valid,
                 "mana": d.mana,
                 "hasDeckId": d.deck_id is not None,
+                "isPrecon": _is_precon_deck(d),
+                "preconReason": _precon_reason(d),
             }
             for d in decks
         ],
@@ -299,6 +478,35 @@ def _slug(value: str) -> str:
     """Konvertiere einen Wert in einen safe Dateinamen."""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower() or "deck"
     return slug[:50]  # Begrenze Länge für Dateisystem-Kompatibilität
+
+
+def _deck_key(deck: DeckSummary) -> str:
+    """Baue einen stabilen Schlüssel für UI und Detail-Routing."""
+    if deck.deck_id:
+        return deck.deck_id
+    if deck.deck_tile_id is not None:
+        return f"tile-{deck.deck_tile_id}"
+    return _slug(deck.name)
+
+
+def _precon_reason(deck: DeckSummary) -> str | None:
+    """Ermittle den ersten Precon-Hinweis, falls vorhanden."""
+    haystack = " ".join(
+        [
+            deck.name or "",
+            deck.description or "",
+            " ".join(f"{k}:{v}" for k, v in deck.attributes.items()),
+            " ".join(f"{k}:{v}" for k, v in deck.format_legalities.items()),
+        ]
+    ).lower()
+    for marker in PRECON_MARKERS:
+        if marker in haystack:
+            return marker
+    return None
+
+
+def _is_precon_deck(deck: DeckSummary) -> bool:
+    return _precon_reason(deck) is not None
 
 
 def _iso_now() -> str:

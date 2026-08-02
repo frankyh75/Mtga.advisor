@@ -11,13 +11,24 @@ document.addEventListener("DOMContentLoaded", () => {
   const chatSend = document.getElementById("chat-send");
   const chatLoading = document.getElementById("chat-loading");
   const chatDeckCards = document.getElementById("chat-deck-cards");
-
-  // Deck detail panel elements
-  const deckDetail = document.getElementById("deck-detail");
+  const hidePrecons = document.getElementById("hide-precons");
+  const deckVisibility = document.getElementById("deck-visibility");
+  const deckDetailsSection = document.getElementById("deck-details");
+  const deckDetailEmpty = document.getElementById("deck-detail-empty");
+  const deckDetailContent = document.getElementById("deck-detail-content");
   const deckDetailName = document.getElementById("deck-detail-name");
   const deckDetailMeta = document.getElementById("deck-detail-meta");
-  const deckCardsGrid = document.getElementById("deck-cards-grid");
-  const deckDetailClose = document.getElementById("deck-detail-close");
+  const deckDetailBadges = document.getElementById("deck-detail-badges");
+  const deckDetailJson = document.getElementById("deck-detail-json");
+  const deckDetailCards = document.getElementById("deck-detail-cards");
+  const deckRows = Array.from(document.querySelectorAll(".deck-row"));
+
+  const PILE_LABELS = [
+    ["mainboard", "Mainboard"],
+    ["sideboard", "Sideboard"],
+    ["commandZone", "Command Zone"],
+    ["companions", "Companions"],
+  ];
 
   let selectedDeck = null;
 
@@ -32,103 +43,227 @@ document.addEventListener("DOMContentLoaded", () => {
     chatMessages.scrollTop = chatMessages.scrollHeight;
   };
 
-  const PILE_LABELS = [
-    ["mainboard", "Mainboard"],
-    ["sideboard", "Sideboard"],
-    ["commandZone", "Command Zone"],
-    ["companions", "Companions"],
-  ];
+  const extractCards = (payload) => {
+    const direct = payload && typeof payload === "object" ? payload : {};
+    const cardsField = direct.cards;
+    const result = {
+      mainboard: [],
+      sideboard: [],
+      commandZone: [],
+      companions: [],
+    };
 
-  const renderDeckCards = (deckData) => {
-    if (!deckCardsGrid) return;
-    deckCardsGrid.replaceChildren();
-
-    const cards = deckData.cards || {};
-    let totalCards = 0;
-
-    for (const [key, label] of PILE_LABELS) {
-      const pile = cards[key];
-      if (!pile || !Array.isArray(pile) || pile.length === 0) continue;
-
-      const pileDiv = document.createElement("div");
-      pileDiv.className = "deck-pile";
-
-      const h3 = document.createElement("h3");
-      h3.textContent = `${label} (${pile.length})`;
-      pileDiv.appendChild(h3);
-
-      const ul = document.createElement("ul");
-      for (const card of pile) {
-        const li = document.createElement("li");
-        const nameSpan = document.createElement("span");
-        nameSpan.className = "card-name";
-        nameSpan.textContent = card.name || `ID:${card.cardId || "?"}`;
-        const qtySpan = document.createElement("span");
-        qtySpan.className = "qty";
-        qtySpan.textContent = `${card.count || 1}x`;
-        li.appendChild(nameSpan);
-        li.appendChild(qtySpan);
-        ul.appendChild(li);
-        totalCards += (card.count || 1);
-      }
-      pileDiv.appendChild(ul);
-      deckCardsGrid.appendChild(pileDiv);
-    }
-
-    if (deckCardsGrid.children.length === 0) {
-      const p = document.createElement("p");
-      p.className = "meta";
-      p.textContent = "Keine Karten in diesem Deck.";
-      deckCardsGrid.appendChild(p);
-    }
-
-    if (deckDetailMeta) {
-      const source = deckData.source || "unknown";
-      const deckId = deckData.deckId || "?";
-      deckDetailMeta.textContent = `Quelle: ${source} · Deck-ID: ${deckId} · ${totalCards} Karten`;
-    }
-  };
-
-  const loadDeckDetail = async (deckId, deckName) => {
-    if (deckDetail) deckDetail.classList.add("active");
-    if (deckDetailName) deckDetailName.textContent = deckName || "Unnamed";
-    if (deckCardsGrid) {
-      deckCardsGrid.replaceChildren();
-      const loadingP = document.createElement("p");
-      loadingP.className = "meta";
-      loadingP.textContent = "Lade Karten...";
-      deckCardsGrid.appendChild(loadingP);
-    }
-
-    try {
-      const resp = await fetch(`/api/deck/${encodeURIComponent(deckId)}`);
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        if (deckCardsGrid) {
-          deckCardsGrid.replaceChildren();
-          const p = document.createElement("p");
-          p.className = "meta";
-          p.textContent = `Keine Karten verfügbar (${err.message || resp.status})`;
-          deckCardsGrid.appendChild(p);
+    if (cardsField && typeof cardsField === "object" && !Array.isArray(cardsField)) {
+      for (const [pileKey] of PILE_LABELS) {
+        const pile = cardsField[pileKey];
+        if (Array.isArray(pile)) {
+          result[pileKey] = pile;
+        } else if (pile && typeof pile === "object") {
+          result[pileKey] = Object.entries(pile).map(([cardId, count]) => ({
+            cardId: Number.parseInt(cardId, 10) || cardId,
+            name: `ID:${cardId}`,
+            count,
+          }));
         }
-        return;
       }
-      const data = await resp.json();
-      renderDeckCards(data);
-    } catch (err) {
-      if (deckCardsGrid) {
-        deckCardsGrid.replaceChildren();
-        const p = document.createElement("p");
-        p.className = "meta";
-        p.textContent = `Karten konnten nicht geladen werden: ${err.message}`;
-        deckCardsGrid.appendChild(p);
+    } else if (Array.isArray(cardsField)) {
+      result.mainboard = cardsField;
+    }
+
+    if (!result.mainboard.length && Array.isArray(direct.mainDeck)) {
+      result.mainboard = direct.mainDeck.map((card) => ({
+        cardId: card.grpId ?? card.cardId ?? 0,
+        name: card.name || `ID:${card.grpId ?? "?"}`,
+        count: card.quantity ?? card.count ?? 1,
+        rarity: card.rarity,
+        set: card.set,
+      }));
+    }
+    if (!result.sideboard.length && Array.isArray(direct.sideboard)) {
+      result.sideboard = direct.sideboard.map((card) => ({
+        cardId: card.grpId ?? card.cardId ?? 0,
+        name: card.name || `ID:${card.grpId ?? "?"}`,
+        count: card.quantity ?? card.count ?? 1,
+        rarity: card.rarity,
+        set: card.set,
+      }));
+    }
+    if (!result.commandZone.length && Array.isArray(direct.commandZoneGRPIds)) {
+      result.commandZone = direct.commandZoneGRPIds.map((card) => ({
+        cardId: card.grpId ?? card.cardId ?? 0,
+        name: card.name || `ID:${card.grpId ?? "?"}`,
+        count: card.quantity ?? card.count ?? 1,
+        rarity: card.rarity,
+        set: card.set,
+      }));
+    }
+
+    const cardsById = direct.cardsById;
+    if (cardsById && typeof cardsById === "object") {
+      for (const pileKey of ["mainboard", "sideboard", "commandZone", "companions"]) {
+        if (!result[pileKey].length && cardsById[pileKey] && typeof cardsById[pileKey] === "object") {
+          result[pileKey] = Object.entries(cardsById[pileKey]).map(([cardId, count]) => ({
+            cardId,
+            name: `ID:${cardId}`,
+            count,
+          }));
+        }
       }
+    }
+
+    return result;
+  };
+
+  const renderCardSection = (title, cards) => {
+    const section = document.createElement("div");
+    section.className = "deck-card-section";
+
+    const heading = document.createElement("h5");
+    heading.textContent = title;
+    section.appendChild(heading);
+
+    if (!cards.length) {
+      const empty = document.createElement("p");
+      empty.className = "meta";
+      empty.textContent = "Keine Einträge.";
+      section.appendChild(empty);
+      return section;
+    }
+
+    const list = document.createElement("ul");
+    list.className = "deck-list";
+    cards.forEach((card) => {
+      const item = document.createElement("li");
+      const name = card.name || card.cardName || card.title || card.arenaId || card.cardId || "?";
+      const count = card.count ?? card.quantity ?? 1;
+      const extra = [];
+      if (card.rarity) {
+        extra.push(card.rarity);
+      }
+      if (card.set) {
+        extra.push(card.set);
+      }
+      item.textContent = extra.length ? `${name} x${count} (${extra.join(", ")})` : `${name} x${count}`;
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+    return section;
+  };
+
+  const renderChatDeckCards = (payload) => {
+    if (!chatDeckCards) {
+      return;
+    }
+
+    chatDeckCards.replaceChildren();
+    const { mainboard, sideboard, commandZone, companions } = extractCards(payload);
+    const hasDeckList = mainboard.length || sideboard.length || commandZone.length || companions.length;
+
+    if (!hasDeckList) {
+      const note = document.createElement("span");
+      note.className = "meta";
+      note.textContent = "Keine Karten verfügbar.";
+      chatDeckCards.appendChild(note);
+      return;
+    }
+
+    for (const [pileKey, label] of PILE_LABELS) {
+      const pile = {
+        mainboard,
+        sideboard,
+        commandZone,
+        companions,
+      }[pileKey];
+      if (!pile.length) {
+        continue;
+      }
+
+      const pileSpan = document.createElement("div");
+      pileSpan.className = "chat-deck-pile";
+      const entries = pile.slice(0, 30).map((card) => {
+        const name = card.name || card.cardName || card.title || card.arenaId || card.cardId || "?";
+        const count = card.count ?? card.quantity ?? 1;
+        return `${count}x ${name}`;
+      });
+      pileSpan.textContent = `${label}: ${entries.join(", ")}`;
+      if (pile.length > 30) {
+        pileSpan.textContent += ` (+${pile.length - 30})`;
+      }
+      chatDeckCards.appendChild(pileSpan);
     }
   };
 
-  const openChatForDeck = (deckId, deckName) => {
+  const renderDeckDetails = (payload) => {
+    if (!deckDetailContent || !deckDetailEmpty) {
+      return;
+    }
+
+    deckDetailEmpty.style.display = "none";
+    deckDetailContent.style.display = "block";
+
+    const name = payload.name || payload.deckName || "Unnamed";
+    const deckKey = payload.deckKey || payload.deckId || "";
+    const deckId = payload.deckId || "—";
+    const deckTileId = payload.deckTileId ?? "—";
+    const isPrecon = Boolean(payload.isPrecon);
+
+    if (deckDetailName) {
+      deckDetailName.textContent = name;
+    }
+    if (deckDetailMeta) {
+      deckDetailMeta.textContent = `Key: ${deckKey} · DeckId: ${deckId} · DeckTileId: ${deckTileId}`;
+    }
+    if (deckDetailBadges) {
+      deckDetailBadges.replaceChildren();
+      const badges = [isPrecon ? ["Precon", "precon"] : ["Regulär", "normal"]];
+      if (payload.formatLegalities) {
+        badges.push(["Summary", "normal"]);
+      }
+      badges.forEach(([label, cls]) => {
+        const badge = document.createElement("span");
+        badge.className = `deck-type ${cls}`;
+        badge.textContent = label;
+        badge.style.marginRight = "0.35rem";
+        deckDetailBadges.appendChild(badge);
+      });
+    }
+    if (deckDetailJson) {
+      deckDetailJson.textContent = JSON.stringify(payload, null, 2);
+    }
+    if (deckDetailCards) {
+      deckDetailCards.replaceChildren();
+      const { mainboard, sideboard, commandZone, companions } = extractCards(payload);
+      const hasDeckList = mainboard.length || sideboard.length || commandZone.length || companions.length;
+
+      if (!hasDeckList) {
+        const note = document.createElement("p");
+        note.className = "deck-detail-empty";
+        note.textContent = "Diese Ansicht enthält derzeit nur eine Summary. Eine vollständige Deckliste ist für dieses Deck noch nicht verfügbar.";
+        deckDetailCards.appendChild(note);
+      } else {
+        if (mainboard.length) {
+          deckDetailCards.appendChild(renderCardSection("Mainboard", mainboard));
+        }
+        if (sideboard.length) {
+          deckDetailCards.appendChild(renderCardSection("Sideboard", sideboard));
+        }
+        if (commandZone.length) {
+          deckDetailCards.appendChild(renderCardSection("Command Zone", commandZone));
+        }
+        if (companions.length) {
+          deckDetailCards.appendChild(renderCardSection("Companions", companions));
+        }
+      }
+    }
+
+    if (deckDetailsSection) {
+      deckDetailsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  const openChatForDeck = (deckKey, deckName) => {
     selectedDeck = {
-      deckId,
+      deckKey,
       name: deckName,
     };
     if (chatDeckName) {
@@ -140,51 +275,89 @@ document.addEventListener("DOMContentLoaded", () => {
     if (chatPanel) {
       chatPanel.classList.add("active");
     }
-
-    // Load deck cards into chat panel header
     if (chatDeckCards) {
       chatDeckCards.replaceChildren();
       const loadingSpan = document.createElement("span");
       loadingSpan.className = "meta";
       loadingSpan.textContent = "Lade Karten...";
       chatDeckCards.appendChild(loadingSpan);
+    }
+    addMessage("assistant", `Deck "${deckName || "Unnamed"}" geladen. Frag mich was!`);
+  };
 
-      fetch(`/api/deck/${encodeURIComponent(deckId)}`)
-        .then((r) => r.json())
-        .then((data) => {
-          chatDeckCards.replaceChildren();
-          const cards = data.cards || {};
-          for (const [key, label] of PILE_LABELS) {
-            const pile = cards[key];
-            if (!pile || !Array.isArray(pile) || pile.length === 0) continue;
-            const pileSpan = document.createElement("div");
-            pileSpan.className = "chat-deck-pile";
-            const entries = pile.slice(0, 30).map(
-              (c) => `${c.count || 1}x ${c.name || "ID:" + (c.cardId || "?")}`
-            );
-            pileSpan.textContent = `${label}: ${entries.join(", ")}`;
-            if (pile.length > 30) {
-              pileSpan.textContent += ` (+${pile.length - 30})`;
-            }
-            chatDeckCards.appendChild(pileSpan);
-          }
-          if (chatDeckCards.children.length === 0) {
-            const p = document.createElement("span");
-            p.className = "meta";
-            p.textContent = "Keine Karten verfügbar.";
-            chatDeckCards.appendChild(p);
-          }
-        })
-        .catch(() => {
-          chatDeckCards.replaceChildren();
-          const p = document.createElement("span");
-          p.className = "meta";
-          p.textContent = "Karten konnten nicht geladen werden.";
-          chatDeckCards.appendChild(p);
-        });
+  const loadChatDeckCards = async (deckKey) => {
+    if (!chatDeckCards) {
+      return;
     }
 
-    addMessage("assistant", `Deck "${deckName || "Unnamed"}" geladen. Frag mich was!`);
+    try {
+      const response = await fetch(`/api/decks/${encodeURIComponent(deckKey)}`);
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        chatDeckCards.replaceChildren();
+        const note = document.createElement("span");
+        note.className = "meta";
+        note.textContent = payload.message || payload.error || "Karten konnten nicht geladen werden.";
+        chatDeckCards.appendChild(note);
+        return;
+      }
+      renderChatDeckCards(payload);
+    } catch (error) {
+      chatDeckCards.replaceChildren();
+      const note = document.createElement("span");
+      note.className = "meta";
+      note.textContent = `Karten konnten nicht geladen werden: ${error.message}`;
+      chatDeckCards.appendChild(note);
+    }
+  };
+
+  const openDeckDetails = async (deckKey, deckName) => {
+    if (!deckDetailEmpty || !deckDetailContent) {
+      return;
+    }
+
+    deckDetailEmpty.style.display = "block";
+    deckDetailEmpty.textContent = `Lade Details für ${deckName || deckKey}...`;
+    deckDetailContent.style.display = "none";
+
+    deckRows.forEach((row) => {
+      row.classList.toggle("is-selected", row.dataset.deckKey === String(deckKey));
+    });
+
+    try {
+      const response = await fetch(`/api/decks/${encodeURIComponent(deckKey)}`);
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        deckDetailEmpty.textContent = payload.message || payload.error || "Deck konnte nicht geladen werden.";
+        return;
+      }
+      renderDeckDetails(payload);
+    } catch (error) {
+      deckDetailEmpty.textContent = error.message;
+    }
+  };
+
+  const applyDeckFilter = () => {
+    const hide = Boolean(hidePrecons?.checked);
+    let visibleCount = 0;
+    let hiddenCount = 0;
+
+    deckRows.forEach((row) => {
+      const isPrecon = row.dataset.isPrecon === "true";
+      const shouldHide = hide && isPrecon;
+      row.classList.toggle("hidden-by-filter", shouldHide);
+      if (shouldHide) {
+        hiddenCount += 1;
+      } else {
+        visibleCount += 1;
+      }
+    });
+
+    if (deckVisibility) {
+      deckVisibility.textContent = hide
+        ? `${visibleCount} Decks sichtbar, ${hiddenCount} Precons ausgeblendet.`
+        : `${visibleCount} Decks sichtbar.`;
+    }
   };
 
   if (configToggle && configFields) {
@@ -230,33 +403,23 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   document.querySelectorAll(".btn-select-deck").forEach((button) => {
-    button.addEventListener("click", (event) => {
+    button.addEventListener("click", async (event) => {
       event.stopPropagation();
-      const deckId = button.dataset.deckId || "";
+      const deckKey = button.dataset.deckKey || "";
       const deckName = button.dataset.deckName || "Unnamed";
-      loadDeckDetail(deckId, deckName);
-      openChatForDeck(deckId, deckName);
+      openChatForDeck(deckKey, deckName);
+      await loadChatDeckCards(deckKey);
     });
   });
 
-  // Also handle deck-row clicks (the table rows)
-  document.querySelectorAll(".deck-row").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if (event.target.closest(".btn-select-deck")) return;
-      const btn = row.querySelector(".btn-select-deck");
-      if (btn) {
-        const deckId = btn.dataset.deckId || "";
-        const deckName = btn.dataset.deckName || "Unnamed";
-        loadDeckDetail(deckId, deckName);
-        openChatForDeck(deckId, deckName);
-      }
+  deckRows.forEach((row) => {
+    row.addEventListener("click", () => {
+      openDeckDetails(row.dataset.deckKey || "", row.dataset.deckName || "Unnamed");
     });
   });
 
-  if (deckDetailClose) {
-    deckDetailClose.addEventListener("click", () => {
-      if (deckDetail) deckDetail.classList.remove("active");
-    });
+  if (hidePrecons) {
+    hidePrecons.addEventListener("change", applyDeckFilter);
   }
 
   if (chatClose && chatPanel) {
@@ -289,7 +452,7 @@ document.addEventListener("DOMContentLoaded", () => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          deck_id: selectedDeck.deckId,
+          deck_id: selectedDeck.deckKey,
           question,
         }),
       });
@@ -322,4 +485,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
+
+  applyDeckFilter();
 });

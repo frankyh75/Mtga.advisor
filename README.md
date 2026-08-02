@@ -11,6 +11,7 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - **Phase 0:** Planung, Quellenanalyse und Festlegung der technischen Richtung.
 - **Phase 1:** Lokale, deterministische Collection-Erfassung als Grundlage fuer spaetere Empfehlungen.
 - **Aktueller Plan:** Log-Parsing bleibt fuer Deltas und Metadaten erhalten, aber die Vollcollection soll auf macOS per Memory-Scanning aus dem laufenden MTGA-Prozess kommen.
+- **Deck-Status:** `decks.json` ist aktuell nur ein Summary-Export aus `StartHook`; eine belastbare Quelle fuer komplette Decklisten pro Arena-Deck ist noch offen.
 - **Explizit:** Keine Advisor-Logik in Phase 0/1.
 - **Nicht in Scope:** Live-Tracking, Hintergrunddienste, externe Accounts oder Meta-basierte Empfehlungen.
 
@@ -38,7 +39,7 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 
 ## Lokales Dashboard
 - Das Dashboard ist bewusst ein lokaler Web-Viewer statt einer nativen App: weniger macOS-Signierungs-/TCC-Komplexitaet, leichter testbar, und vom Menubar-Helper spaeter direkt oeffenbar.
-- Es zeigt `collection.json`, `run-report.json`, `arena_deck.json` und `advisor-result.json` in einer zusammengefassten Ansicht.
+- Es zeigt `collection.json`, `run-report.json`, `decks.json`, `arena_deck.json` und `advisor-result.json` in einer zusammengefassten Ansicht.
 - API-Endpunkte: `/api/collection`, `/api/run-report`, `/api/deck`, `/api/advisor-result`.
 - Das Dashboard erzeugt keine Empfehlungen selbst; `advisor-result.json` bleibt das kanonische regelbasierte Ergebnis.
 
@@ -49,6 +50,7 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - Wildcards bleiben beim reinen Memory-Scan bewusst `unknown`; harte Craft-Empfehlungen sind erst erlaubt, wenn Wildcards aus Logs/Inventory vollständig validiert sind.
 - Unbekannte Karten-IDs werden im `validation-report.json` vollständig mit Mengen ausgewiesen; diese blockieren nicht den Collection-Export, aber spätere Namen-/Metadaten-Funktionen.
 - `sudo` ist aktuell weiterhin erforderlich, weil `pymem-osx` über `task_for_pid()` auf den MTGA-Prozess zugreift.
+- `decks.json` darf nicht als vollständige Deckliste interpretiert werden; es dient nur der Navigation und Auswahl.
 
 ## Architektur
 - `parser/`: Log-basierte Extraktion von Snapshots, Deltas und Metadaten.

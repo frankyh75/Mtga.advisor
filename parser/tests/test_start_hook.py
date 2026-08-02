@@ -246,6 +246,30 @@ class TestExportDecks:
             assert payload["decks"][0]["name"] == "Deck 1"
             assert payload["decks"][1]["name"] == "Deck 2"
 
+    def test_precon_decks_are_flagged(self):
+        """Precon-Decks werden im Export markiert."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "Player.log"
+            self._write_log(log_path, [
+                {
+                    "event": "StartHook",
+                    "data": {
+                        "DeckSummaries": [
+                            {"Name": "Loc/Decks/Precon/Precon_EPP2024_UR", "DeckId": "precon-1"},
+                            {"Name": "Dragon Deck budget", "DeckId": "deck-1"},
+                        ]
+                    },
+                },
+            ])
+            output_dir = Path(tmp) / "out"
+            export_paths = export_decks([log_path], output_dir)
+
+            payload = json.loads(export_paths.decks.read_text(encoding="utf-8"))
+            decks = {deck["name"]: deck for deck in payload["decks"]}
+            assert decks["Loc/Decks/Precon/Precon_EPP2024_UR"]["isPrecon"] is True
+            assert decks["Loc/Decks/Precon/Precon_EPP2024_UR"]["deckKey"] == "precon-1"
+            assert decks["Dragon Deck budget"]["isPrecon"] is False
+
     def test_multiple_start_hooks(self):
         """Mehrere StartHooks → letzter gewinnt bei gleicher ID."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -327,3 +351,38 @@ class TestExportDecks:
             # Run-Report sollte auch die Warnung enthalten
             report = json.loads(export_paths.run_report.read_text(encoding="utf-8"))
             assert len(report["diagnostics"]["warnings"]) == 1
+
+    def test_course_deck_summary_raw_json_line(self):
+        """Raw JSON mit Courses/CourseDeckSummary wird ebenfalls erkannt."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "Player.log"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "Courses": [
+                            {
+                                "InternalEventName": "Play",
+                                "CourseDeckSummary": {
+                                    "DeckId": "id-1",
+                                    "Name": "Deck from course",
+                                    "Attributes": [
+                                        {"name": "Format", "value": "Standard"},
+                                        {"name": "Version", "value": "11"},
+                                    ],
+                                    "DeckTileId": 123,
+                                },
+                                "CourseDeck": {"MainDeck": [], "Sideboard": []},
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = Path(tmp) / "out"
+            export_paths = export_decks([log_path], output_dir)
+
+            payload = json.loads(export_paths.decks.read_text(encoding="utf-8"))
+            assert payload["diagnostics"]["deckCount"] == 1
+            assert payload["decks"][0]["name"] == "Deck from course"
+            assert payload["decks"][0]["deckId"] == "id-1"

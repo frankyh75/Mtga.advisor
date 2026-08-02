@@ -49,9 +49,11 @@ def test_render_index_includes_collection_deck_and_advisor_summary() -> None:
             {
                 "name": "Control",
                 "deckId": "1",
+                "deckKey": "1",
                 "format": "standard",
                 "colors": ["U"],
                 "cardCount": 60,
+                "isPrecon": False,
             }
         ],
     }
@@ -64,6 +66,8 @@ def test_render_index_includes_collection_deck_and_advisor_summary() -> None:
     assert "Control" in html
     assert "wildcards-unknown" in html
     assert "decks.json" in html
+    assert "Precons ausblenden" in html
+    assert "data-deck-key='1'" in html
     assert '<script src="/dashboard.js" defer></script>' in html
     assert "const decksData" not in html
     assert "document.getElementById('config-toggle')" not in html

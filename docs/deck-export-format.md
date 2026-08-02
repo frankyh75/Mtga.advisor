@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document defines the format for complete deck list exports.
+This document defines the aspirational format for complete deck list exports.
 
 ## Source
 
@@ -11,11 +11,13 @@ This document defines the format for complete deck list exports.
 - **Data**: Deck metadata only (name, deck_id, description, attributes, legalities, mana)
 - **Format**: `decks.json`
 - **Limitation**: Does NOT contain actual card composition
+- **Current status**: This is the only reliably exported deck data we have right now.
 
 ### Complete Deck Lists (new)
 - **Source**: `Deck.Updated` or similar events that contain the actual cards in each deck
 - **Format**: Individual JSON files per deck or container format
 - **Purpose**: Full deck composition with all cards
+- **Status**: Not yet confirmed in the current MTGA log/memory analysis.
 
 ## Format
 

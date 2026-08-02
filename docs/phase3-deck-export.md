@@ -1,5 +1,11 @@
 # Phase 3: Deck-Export-Design
 
+## Reality Check
+
+- `decks.json` ist aktuell nur ein Summary-Export aus `StartHook`.
+- Wir haben in den Logs noch keine belastbare Quelle für vollständige Kartenlisten pro Deck gefunden.
+- Ein hoher `deckCount` kann historische oder interne Deck-/Course-Snapshots enthalten und ist deshalb nicht gleichbedeutend mit der aktuell sichtbaren Arena-Deckliste.
+
 ## Quellen
 
 ### Deck-Summaries (automatisch aus Logs)
@@ -9,8 +15,9 @@
 - **Export-Format:** `decks.json` (schema: `decks.v1`)
 - **Export-Pfad:** `{output}/decks.json`
 
-### Vollständige Decklisten (manuell)
-- **Quelle:** Arena-Textdeckliste (aus MTGA Deck-Editor kopiert)
+### Vollständige Decklisten (aktuell offen)
+- **Status:** Noch nicht belastbar aus MTGA-Logs oder Memory exportiert.
+- **Bekannte Möglichkeit:** Arena-Textdeckliste (aus MTGA Deck-Editor kopiert)
 - **Format:** Arena-Standard-Text (`4 Lightning Strike\nDeck\nSideboard\n...`)
 - **Export-Format:** `arena_deck.json` (schema: `arena-deck.v1`)
 - **Import-Pfad:** `python -m cli.main deck import --file <path> --format standard`
@@ -57,6 +64,8 @@ out/decks/
 | `out/decks/<id>.arena.json` | Vollständige Liste | Manueller Import | Normalisierte Deckliste |
 | `out/arena_deck.json` | Einzelne Liste | Manueller Import | Legacy-Single-Deck-Export |
 
+**Hinweis:** Der aktuelle Log-Export liefert nur Summaries. Echte Kartenlisten erscheinen hier nur, wenn sie manuell importiert wurden oder eine neue belastbare Quelle gefunden ist.
+
 ## CLI-Workflow
 
 ```bash
@@ -84,6 +93,7 @@ python -m cli.main decks show --deck-id <id> --output out/decks
 4. [x] CLI-Subcommand `decks list`
 5. [x] Tests für Container-Export
 6. [x] Integrationstest: Summaries + manueller Import + Container
+7. [ ] Belastbare Quelle für vollständige Decklisten finden
 
 ## Erfolgskriterien
 
@@ -92,3 +102,4 @@ python -m cli.main decks show --deck-id <id> --output out/decks
 - `decks show --deck-id <id>` zeigt Details eines Decks
 - Importierte Decklisten werden korrekt im Container verlinkt
 - Testabdeckung > 90% für neue Logik
+- Summary-Exports werden nicht mehr als vollständige Decklisten missverstanden

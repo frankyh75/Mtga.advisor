@@ -108,6 +108,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Plattform überschreiben (Standard: automatische Erkennung).",
     )
     decks.add_argument(
+        "--windows-local-low",
+        type=Path,
+        help="Override für Windows LocalLow MTGA Pfad.",
+    )
+    decks.add_argument(
+        "--windows-steam-userdata",
+        type=Path,
+        help="Override für Windows Steam userdata Pfad.",
+    )
+    decks.add_argument(
         "--macos-logs",
         type=Path,
         help="Override für macOS Log-Pfad.",
@@ -126,7 +136,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # Container-Export für Decks
-    deck_container = decks.add_subparsers(dest="deck_command", required=True)
+    deck_container = decks.add_subparsers(dest="deck_command")
+    deck_container.required = False
     container_export = deck_container.add_parser(
         "container",
         help="Exportiere Decks als Container mit individuellem Format.",
@@ -267,7 +278,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     deck = subparsers.add_parser("deck", help="Decklisten importieren und normalisieren.")
-    deck_subparsers = deck.add_subparsers(dest="deck_command", required=True)
+    deck_subparsers = deck.add_subparsers(dest="deck_command")
     deck_import = deck_subparsers.add_parser("import", help="Importiert eine Arena-Textdeckliste.")
     deck_import.add_argument("--file", type=Path, required=True, help="Pfad zur Arena-Textdeckliste.")
     deck_import.add_argument("--format", required=True, help="Zielformat, z. B. standard oder brawl.")
@@ -309,11 +320,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _path_config_from_args(args: argparse.Namespace) -> PathConfig:
     return PathConfig(
-        windows_local_low=args.windows_local_low,
-        windows_steam_userdata=args.windows_steam_userdata,
-        macos_logs=args.macos_logs,
-        macos_steam_userdata=args.macos_steam_userdata,
-        custom_logs=args.custom_log_dir or [],
+        windows_local_low=getattr(args, "windows_local_low", None),
+        windows_steam_userdata=getattr(args, "windows_steam_userdata", None),
+        macos_logs=getattr(args, "macos_logs", None),
+        macos_steam_userdata=getattr(args, "macos_steam_userdata", None),
+        custom_logs=getattr(args, "custom_log_dir", []) or [],
     )
 
 
@@ -360,6 +371,30 @@ def _run_decks(args: argparse.Namespace) -> int:
             return _run_deck_show(args)
         elif args.deck_command == 'container':
             return _run_deck_container(args)
+
+    if getattr(args, "deck_command", None) is None:
+        # Standardverhalten: Deck-Summaries aus Logs exportieren.
+        if args.logs:
+            log_paths = [Path(path) for path in args.logs]
+            missing = [path for path in log_paths if not path.exists()]
+            if missing:
+                missing_str = ", ".join(path.as_posix() for path in missing)
+                _error(f"Logdatei(en) nicht gefunden: {missing_str}")
+                return 1
+        else:
+            platform = args.platform or detect_platform()
+            config = _path_config_from_args(args)
+            try:
+                discovery = discover_logs(platform, config)
+            except MissingLogsError as exc:
+                _error(str(exc))
+                return 1
+            log_paths = discovery.found
+
+        export_paths = export_decks(log_paths, args.output)
+        print(f"Decks exportiert: {export_paths.decks}")
+        print(f"Run-Report: {export_paths.run_report}")
+        return 0
 
     # Standard deck export (existing behavior)
     if args.logs:
