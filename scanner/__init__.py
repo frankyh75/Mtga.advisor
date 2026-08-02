@@ -16,7 +16,27 @@ from .deck_scanner import (
     write_deck_artifacts,
 )
 
+from .il2cpp_nav import (
+    DeckNavResult,
+    IL2CPP_OFFSETS,
+    Il2CppDeckResult,
+    Il2CppReader,
+    Il2CppScanResult,
+    MockMemory,
+    MemoryReader,
+    find_class_by_name,
+    find_papa_instance,
+    get_class_fields,
+    navigate_to_all_decks,
+    read_deck,
+    read_dictionary_uint_ptr,
+    read_il2cpp_string,
+    read_list_of_structs,
+    scan_decks_il2cpp,
+)
+
 __all__ = [
+    # Pattern-based deck scanner
     "DeckMemoryResult",
     "DeckScanResult",
     "PILE_COMMAND_ZONE",
@@ -30,4 +50,21 @@ __all__ = [
     "parse_piles_from_bytes",
     "scan_decks",
     "write_deck_artifacts",
+    # IL2CPP navigation scanner
+    "DeckNavResult",
+    "IL2CPP_OFFSETS",
+    "Il2CppDeckResult",
+    "Il2CppReader",
+    "Il2CppScanResult",
+    "MockMemory",
+    "MemoryReader",
+    "find_class_by_name",
+    "find_papa_instance",
+    "get_class_fields",
+    "navigate_to_all_decks",
+    "read_deck",
+    "read_dictionary_uint_ptr",
+    "read_il2cpp_string",
+    "read_list_of_structs",
+    "scan_decks_il2cpp",
 ]
