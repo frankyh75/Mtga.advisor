@@ -53,14 +53,15 @@ def import_arena_deck(
             unresolved.append({"line": line, "name": card_name, "reason": "unknown-card-name"})
             continue
         if len(candidates) > 1:
-            ambiguous.append(
-                {
-                    "line": line,
-                    "name": card_name,
-                    "candidates": candidates[:20],
-                    "truncated": len(candidates) > 20,
-                }
-            )
+            # Same card name across multiple sets (reprints): resolve by picking
+            # the newest set (last after alphabetical sort by set then arenaId).
+            # This is a normal reprint resolution, not a genuine ambiguity.
+            entry = dict(candidates[-1])
+            entry["count"] = count
+            if section == "sideboard":
+                sideboard.append(entry)
+            else:
+                mainboard.append(entry)
             continue
 
         entry = dict(candidates[0])

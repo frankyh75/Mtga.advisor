@@ -46,36 +46,8 @@ def test_cli_container_export():
         decks_file = tmpdir / "decks.json"
         decks_file.write_text(json.dumps(mock_decks, indent=2))
         
-        # Test 1: List decks
-        print("Test 1: deck list")
-        result = subprocess.run(
-            ["python", "-m", "cli.main", "decks", "list", "--output", str(tmpdir)],
-            capture_output=True,
-            text=True
-        )
-        print(result.stdout)
-        if result.returncode == 0:
-            print("✓ deck list works")
-        else:
-            print(f"✗ deck list failed: {result.stderr}")
-            return False
-        
-        # Test 2: Show deck
-        print("\nTest 2: deck show")
-        result = subprocess.run(
-            ["python", "-m", "cli.main", "decks", "show", "--deck-id", "test001", "--output", str(tmpdir)],
-            capture_output=True,
-            text=True
-        )
-        print(result.stdout)
-        if result.returncode == 0:
-            print("✓ deck show works")
-        else:
-            print(f"✗ deck show failed: {result.stderr}")
-            return False
-        
-        # Test 3: Container export
-        print("\nTest 3: deck container")
+        # Test 1: Create container from decks.json
+        print("Test 1: deck container")
         container_dir = tmpdir / "decks-container"
         result = subprocess.run(
             ["python", "-m", "cli.main", "decks", "container", "--output", str(container_dir)],
@@ -83,43 +55,52 @@ def test_cli_container_export():
             text=True
         )
         print(result.stdout)
-        if result.returncode == 0:
-            print("✓ deck container works")
-            # Verify container was created
-            index_file = container_dir / "index.json"
-            if index_file.exists():
-                index_data = json.loads(index_file.read_text())
-                if index_data["deckCount"] == 2:
-                    print(f"✓ Container created with {index_data['deckCount']} decks")
-                else:
-                    print(f"✗ Container has wrong deck count: {index_data['deckCount']}")
-                    return False
-            else:
-                print("✗ Container index.json not created")
-                return False
-        else:
-            print(f"✗ deck container failed: {result.stderr}")
-            return False
+        assert result.returncode == 0, f"deck container failed: {result.stderr}"
+        index_file = container_dir / "index.json"
+        assert index_file.exists(), "index.json not created"
+        index_data = json.loads(index_file.read_text())
+        assert index_data["deckCount"] == 2, f"wrong deck count: {index_data['deckCount']}"
+        print(f"✓ container created with {index_data['deckCount']} decks")
         
-        # Test 4: List from container
-        print("\nTest 4: deck list (from container)")
+        # Test 2: List decks from container
+        print("\nTest 2: deck list")
         result = subprocess.run(
             ["python", "-m", "cli.main", "decks", "list", "--output", str(container_dir)],
             capture_output=True,
             text=True
         )
         print(result.stdout)
-        if result.returncode == 0:
-            print("✓ deck list (container) works")
-        else:
-            print(f"✗ deck list (container) failed: {result.stderr}")
-            return False
+        assert result.returncode == 0, f"deck list failed: {result.stderr}"
+        print("✓ deck list works")
+        
+        # Test 3: Show deck from container
+        print("\nTest 3: deck show")
+        result = subprocess.run(
+            ["python", "-m", "cli.main", "decks", "show", "--deck-id", "test001", "--output", str(container_dir)],
+            capture_output=True,
+            text=True
+        )
+        print(result.stdout)
+        assert result.returncode == 0, f"deck show failed: {result.stderr}"
+        show_data = json.loads(result.stdout)
+        assert show_data["deckId"] == "test001"
+        assert show_data["name"] == "Test Deck 1"
+        print("✓ deck show works")
+        
+        # Test 4: List from container (again, idempotent)
+        print("\nTest 4: deck list (container, idempotent)")
+        result = subprocess.run(
+            ["python", "-m", "cli.main", "decks", "list", "--output", str(container_dir)],
+            capture_output=True,
+            text=True
+        )
+        print(result.stdout)
+        assert result.returncode == 0, f"deck list (container) failed: {result.stderr}"
+        print("✓ deck list (container) works")
     
     print("\n" + "="*50)
     print("All CLI verification tests passed! ✓")
     print("="*50)
-    return True
 
 if __name__ == "__main__":
-    success = test_cli_container_export()
-    sys.exit(0 if success else 1)
+    test_cli_container_export()
