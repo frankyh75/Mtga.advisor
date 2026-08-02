@@ -25,10 +25,24 @@ from scanner.memory_scanner import scan_collection_detailed as scan_memory_colle
 from scanner.memory_scanner import validate_collection
 from scanner.memory_scanner import write_collection_artifacts
 from scanner.deck_scanner import scan_decks, write_deck_artifacts, DeckScanResult
+from scanner.history import (
+    save_snapshot as save_history_snapshot,
+    list_snapshots as list_history_snapshots,
+    diff_snapshots as diff_history_snapshots,
+    format_diff_summary as format_history_diff,
+    format_snapshot_list as format_history_list,
+)
 from scanner.il2cpp_nav import (
     PymemMemoryAdapter,
     Il2CppScanResult,
     scan_decks_il2cpp,
+)
+from scanner.rank_scanner import (
+    scan_ranks_and_account,
+    format_rank_table,
+    format_rank_summary,
+    format_account_table,
+    format_account_summary,
 )
 from scanner.macos_paths import get_macos_mtga_process_names
 from scanner.pattern_scanner import scan_process_memory_many_with_stats
@@ -228,6 +242,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deck_scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken aus.")
 
+    ranks = subparsers.add_parser(
+        "ranks",
+        help="Scannt Spieler-Rang und Account-Info aus dem MTGA-Prozessspeicher (IL2CPP).",
+    )
+    ranks.add_argument(
+        "--json",
+        action="store_true",
+        help="Ausgabe als JSON statt Text-Tabelle.",
+    )
+    ranks.add_argument(
+        "--no-account",
+        action="store_true",
+        help="Nur Ränge scannen, Account-Info überspringen.",
+    )
+    ranks.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional: JSON-Ergebnis in Datei schreiben.",
+    )
+
     run = subparsers.add_parser("run", help="Kanonischer Phase-1-Export: macOS Memory-Scan, sonst Log-Export.")
     run.add_argument(
         "--output",
@@ -318,18 +353,125 @@ def _build_parser() -> argparse.ArgumentParser:
     advisor_llm.add_argument("--temperature", type=float, help="Sampling-Temperatur (0.0 - 1.0).")
     advisor_llm.add_argument("--max-tokens", type=int, help="Maximale Token-Anzahl.")
     advisor_llm.add_argument("--config", type=Path, help="Pfad zu einer Config-Datei (JSON/YAML).")
+    advisor_llm.add_argument(
+        "--meta-format",
+        default="standard",
+        help="Format für Meta-Daten (standard, modern, etc.). Set to empty to disable. Default: standard.",
+    )
+    advisor_llm.add_argument(
+        "--no-meta",
+        action="store_true",
+        help="Meta-Daten nicht in den LLM-Prompt einfügen.",
+    )
 
     advisor_config = advisor_subparsers.add_parser("init-config", help="Erzeugt eine Default-Config-Datei.")
     advisor_config.add_argument("--output", type=Path, default=None, help="Zielpfad (Default: ~/.config/mtga-advisor/config.json).")
 
+    advisor_meta = advisor_subparsers.add_parser("meta", help="Zeigt aktuelle Meta-Daten von MTGGoldfish.")
+    advisor_meta.add_argument(
+        "--format",
+        default="standard",
+        help="Format (standard, modern, pioneer, historic, explorer, timeless, alchemy, pauper, legacy, vintage, brawl, commander). Default: standard.",
+    )
+    advisor_meta.add_argument(
+        "--full",
+        action="store_true",
+        help="Scrape die /full Seite (alle Decks, nicht nur Top-12).",
+    )
+    advisor_meta.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Ignoriere den Cache und lade neu von MTGGoldfish.",
+    )
+    advisor_meta.add_argument(
+        "--json",
+        action="store_true",
+        help="Ausgabe als JSON statt Text-Tabelle.",
+    )
+    advisor_meta.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional: JSON-Ergebnis in Datei schreiben.",
+    )
+    advisor_meta.add_argument(
+        "--max-decks",
+        type=int,
+        default=20,
+        help="Maximale Anzahl Decks in der Ausgabe (Default: 20).",
+    )
+
     serve = subparsers.add_parser("serve", help="Startet einen lokalen Server für die Artefakte.")
-    serve.add_argument("--host", default=DEFAULT_HOST, help="Host (Standard: 127.0.0.1).")
-    serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (Standard: 8000).")
+    serve.add_argument("--host", default=DEFAULT_HOST, help=f"Host (Standard: {DEFAULT_HOST} — vom Handy erreichbar).")
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port (Standard: {DEFAULT_PORT}).")
     serve.add_argument(
         "--output",
         type=Path,
         default=Path("out"),
         help="Verzeichnis mit collection.json/run-report.json (Standard: ./out).",
+    )
+    serve.add_argument(
+        "--auth",
+        default=None,
+        help="Basic-Auth Credentials als user:password (oder via MTGA_ADVISOR_AUTH env var).",
+    )
+    serve.add_argument(
+        "--no-qr",
+        action="store_true",
+        help="QR-Code im Terminal unterdrücken.",
+    )
+
+    # --- history subcommand ---
+    history = subparsers.add_parser(
+        "history",
+        help="Collection-History: Snapshots speichern und Diffs anzeigen.",
+    )
+    history_subparsers = history.add_subparsers(dest="history_command", required=True)
+
+    history_save = history_subparsers.add_parser(
+        "save",
+        help="Speichert einen Snapshot der aktuellen Collection/Decks.",
+    )
+    history_save.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Verzeichnis mit collection.json/decks.json (Standard: ./out).",
+    )
+
+    history_list = history_subparsers.add_parser(
+        "list",
+        help="Listet alle gespeicherten Snapshots auf.",
+    )
+    history_list.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Verzeichnis mit history/ Unterverzeichnis (Standard: ./out).",
+    )
+
+    history_diff = history_subparsers.add_parser(
+        "diff",
+        help="Zeigt Änderungen zwischen zwei Snapshots (Default: letzter vs. vorletzter).",
+    )
+    history_diff.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Verzeichnis mit history/ Unterverzeichnis (Standard: ./out).",
+    )
+    history_diff.add_argument(
+        "--older",
+        help="Timestamp des älteren Snapshots (Default: vorletzter).",
+    )
+    history_diff.add_argument(
+        "--newer",
+        help="Timestamp des neueren Snapshots (Default: letzter).",
+    )
+    history_diff.add_argument(
+        "--json",
+        action="store_true",
+        help="Gibt das Diff als JSON aus (statt formatiertem Text).",
     )
 
     return parser
@@ -375,8 +517,75 @@ def _run_collection(args: argparse.Namespace) -> int:
 
 
 def _run_serve(args: argparse.Namespace) -> int:
-    run_server(host=args.host, port=args.port, output_dir=args.output)
+    run_server(
+        host=args.host,
+        port=args.port,
+        output_dir=args.output,
+        auth=getattr(args, "auth", None),
+        show_qr=not getattr(args, "no_qr", False),
+    )
     return 0
+
+
+def _run_history(args: argparse.Namespace) -> int:
+    """Collection-History Subcommand: save, list, diff."""
+    if args.history_command == "save":
+        return _run_history_save(args)
+    if args.history_command == "list":
+        return _run_history_list(args)
+    if args.history_command == "diff":
+        return _run_history_diff(args)
+    return 1
+
+
+def _run_history_save(args: argparse.Namespace) -> int:
+    """Speichert einen Snapshot der aktuellen Collection/Decks."""
+    output_dir = args.output
+    collection_path = output_dir / "collection.json"
+    decks_path = output_dir / "decks.json"
+
+    if not collection_path.exists() and not decks_path.exists():
+        _error(f"Weder collection.json noch decks.json gefunden in {output_dir}")
+        return 1
+
+    history_dir = save_history_snapshot(output_dir=output_dir)
+    snapshots = list_history_snapshots(output_dir=output_dir)
+    print(f"Snapshot gespeichert: {history_dir}")
+    print(f"  Snapshots insgesamt: {len(snapshots)}")
+    latest = snapshots[-1] if snapshots else None
+    if latest:
+        print(f"  Timestamp: {latest['timestamp']}")
+        files = latest.get("files", {})
+        if files:
+            print(f"  Dateien: {', '.join(files.keys())}")
+        if "collectionStats" in latest:
+            cs = latest["collectionStats"]
+            print(f"  Collection: {cs['uniqueCards']} unique, {cs['totalCards']} total")
+        if "deckStats" in latest:
+            ds = latest["deckStats"]
+            print(f"  Decks: {ds['deckCount']}")
+    return 0
+
+
+def _run_history_list(args: argparse.Namespace) -> int:
+    """Listet alle gespeicherten Snapshots auf."""
+    snapshots = list_history_snapshots(output_dir=args.output)
+    print(format_history_list(snapshots))
+    return 0
+
+
+def _run_history_diff(args: argparse.Namespace) -> int:
+    """Zeigt Änderungen zwischen zwei Snapshots."""
+    diff = diff_history_snapshots(
+        output_dir=args.output,
+        older=args.older,
+        newer=args.newer,
+    )
+    if args.json:
+        print(json.dumps(diff, ensure_ascii=False, indent=2))
+    else:
+        print(format_history_diff(diff))
+    return 0 if "error" not in diff else 1
 
 
 def _run_decks(args: argparse.Namespace) -> int:
@@ -753,6 +962,73 @@ def _piles_to_cards_by_id(piles: dict[int, dict[int, int]]) -> dict[str, dict[st
     return result
 
 
+def _run_ranks(args: argparse.Namespace) -> int:
+    """Scannt Spieler-Rang und Account-Info aus dem MTGA-Prozessspeicher.
+
+    Nutzt IL2CPP-Navigation: WrapperController → PlayerRankServiceWrapper → _combinedRankInfo
+    und WrapperController → AccountClient → AccountInformation.
+    """
+    from scanner.memory_scanner import _attach_process
+
+    print("🔍 Rang-Scan (IL2CPP-Navigation)")
+
+    # An MTGA-Prozess attachen
+    candidate_names = get_macos_mtga_process_names()
+    pm = _attach_process(candidate_names)
+    if pm is None:
+        print("❌ MTGA-Prozess nicht gefunden")
+        return 1
+
+    adapter = PymemMemoryAdapter(pm)
+    read_account = not args.no_account
+
+    print(f"🧭 Navigiere: WrapperController → PlayerRankServiceWrapper → _combinedRankInfo")
+    if read_account:
+        print(f"🧭 Navigiere: WrapperController → AccountClient → AccountInformation")
+
+    result = scan_ranks_and_account(adapter, read_account=read_account)
+
+    if result.warnings:
+        for w in result.warnings:
+            print(f"⚠ {w}")
+
+    if args.json:
+        import json as _json
+        output = _json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+        print(output)
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+            print(f"📄 JSON geschrieben: {args.output}")
+    else:
+        # Text-Ausgabe
+        print()
+        print("=" * 50)
+        print("RÄNGE")
+        print("=" * 50)
+        print(format_rank_table(result.ranks))
+        print(format_rank_summary(result.ranks))
+        print()
+
+        if read_account:
+            print("=" * 50)
+            print("ACCOUNT")
+            print("=" * 50)
+            print(format_account_table(result.account))
+            print()
+            print(format_account_summary(result.account))
+            print()
+
+        if args.output:
+            import json as _json
+            args.output.write_text(
+                _json.dumps(result.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(f"📄 JSON geschrieben: {args.output}")
+
+    return 0
+
+
 def _run_run(args: argparse.Namespace) -> int:
     platform = args.platform or detect_platform()
     if platform == "macos" and not args.logs:
@@ -854,6 +1130,46 @@ def _run_deck_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_advisor_meta(args: argparse.Namespace) -> int:
+    """Zeigt aktuelle Meta-Daten von MTGGoldfish an."""
+    from advisor.meta import fetch_meta, format_meta_table, save_meta_to_file
+
+    fmt = args.format
+    print(f"📡 Fetch Meta-Daten: {fmt} (MTGGoldfish)")
+
+    try:
+        meta = fetch_meta(
+            format_name=fmt,
+            use_cache=not args.no_cache,
+            full=args.full,
+        )
+    except ValueError as exc:
+        _error(str(exc))
+        return 1
+    except RuntimeError as exc:
+        _error(str(exc))
+        return 1
+
+    if meta.warnings:
+        for w in meta.warnings:
+            print(f"  WARN: {w}")
+
+    if args.json:
+        import json as _json
+        output = _json.dumps(meta.to_dict(), ensure_ascii=False, indent=2)
+        print(output)
+        if args.output:
+            save_meta_to_file(meta, args.output)
+            print(f"\n📄 JSON geschrieben: {args.output}")
+    else:
+        print(format_meta_table(meta, max_decks=args.max_decks))
+        if args.output:
+            save_meta_to_file(meta, args.output)
+            print(f"\n📄 JSON geschrieben: {args.output}")
+
+    return 0
+
+
 def _run_advisor(args: argparse.Namespace) -> int:
     if args.advisor_command == "complete":
         if not args.collection.exists():
@@ -914,6 +1230,7 @@ def _run_advisor(args: argparse.Namespace) -> int:
             decks_path=args.decks if args.decks and args.decks.exists() else None,
             output_dir=args.output,
             llm_config=llm_config,
+            meta_format="" if args.no_meta else args.meta_format,
         )
         if result.warnings:
             for w in result.warnings:
@@ -948,6 +1265,10 @@ def _run_advisor(args: argparse.Namespace) -> int:
         print(f"Bearbeite die Datei und passe endpoint, temperature etc. an.")
         print(f"Danach: python -m cli.main advisor llm")
         return 0
+
+    if args.advisor_command == "meta":
+        return _run_advisor_meta(args)
+
     return 1
 
 
@@ -963,6 +1284,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_scan(args)
     if args.command == "deck-scan":
         return _run_deck_scan(args)
+    if args.command == "ranks":
+        return _run_ranks(args)
     if args.command == "run":
         return _run_run(args)
     if args.command == "validate":
@@ -973,6 +1296,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_advisor(args)
     if args.command == "serve":
         return _run_serve(args)
+    if args.command == "history":
+        return _run_history(args)
     parser.print_help()
     return 1
 

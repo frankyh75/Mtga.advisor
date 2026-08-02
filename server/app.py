@@ -6,23 +6,35 @@ Unterstützt interaktive Deck-Auswahl und LLM-Chat.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import urllib.request
 import urllib.error
 import urllib.parse
+import threading
+import time
+import socket
+import io
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import html
 import os
+import secrets
 from string import Template
 from urllib.parse import urlparse, parse_qs
 
 from advisor.llm_config import LLMConfig, load_config, write_default_config
+from scanner.history import (
+    list_snapshots as list_history_snapshots,
+    diff_snapshots as diff_history_snapshots,
+    save_snapshot as save_history_snapshot,
+)
 
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "out"
 DASHBOARD_JS_PATH = Path(__file__).with_name("dashboard.js")
@@ -54,7 +66,7 @@ def _html_response(handler: BaseHTTPRequestHandler, body: str, *, status: int) -
     handler.send_header("Cache-Control", "no-store")
     handler.send_header(
         "Content-Security-Policy",
-        "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'self'; connect-src 'self';",
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' https://cards.scryfall.io https://c1.scryfall.com https://c2.scryfall.com data:; script-src 'self'; connect-src 'self';",
     )
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
@@ -75,15 +87,240 @@ def _dashboard_js() -> str:
     return DASHBOARD_JS_PATH.read_text(encoding="utf-8")
 
 
+# --- Scryfall image lookup with in-memory cache ---
+
+_SCRYFALL_IMAGE_CACHE: dict[int, str | None] = {}
+_SCRYFALL_CACHE_LOCK = threading.Lock()
+_SCRYFALL_API_BASE = "https://api.scryfall.com/cards/arena"
+
+
+def _fetch_scryfall_image_url(grp_id: int) -> str | None:
+    """Fetch a card image URL from Scryfall by Arena grp_id.
+
+    Returns the 'normal' size image URI, or None if not found / on error.
+    Caches results in-memory (including None for misses) to avoid repeated API calls.
+    """
+    with _SCRYFALL_CACHE_LOCK:
+        if grp_id in _SCRYFALL_IMAGE_CACHE:
+            return _SCRYFALL_IMAGE_CACHE[grp_id]
+
+    url = f"{_SCRYFALL_API_BASE}/{grp_id}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mtga.advisor/0.1",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            with _SCRYFALL_CACHE_LOCK:
+                _SCRYFALL_IMAGE_CACHE[grp_id] = None
+            return None
+        with _SCRYFALL_CACHE_LOCK:
+            _SCRYFALL_IMAGE_CACHE[grp_id] = None
+        return None
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        with _SCRYFALL_CACHE_LOCK:
+            _SCRYFALL_IMAGE_CACHE[grp_id] = None
+        return None
+
+    # Scryfall card object: image_uris.normal or image_uris.small
+    image_uris = data.get("image_uris")
+    if not image_uris:
+        # Double-faced cards: use card_faces[0].image_uris
+        card_faces = data.get("card_faces", [])
+        if card_faces:
+            image_uris = card_faces[0].get("image_uris")
+
+    image_url = None
+    if image_uris:
+        image_url = image_uris.get("normal") or image_uris.get("small")
+
+    with _SCRYFALL_CACHE_LOCK:
+        _SCRYFALL_IMAGE_CACHE[grp_id] = image_url
+    return image_url
+
+
+def _send_redirect(handler: BaseHTTPRequestHandler, target_url: str) -> None:
+    handler.send_response(HTTPStatus.FOUND)
+    handler.send_header("Location", target_url)
+    handler.send_header("Cache-Control", "public, max-age=86400")
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
+def _send_image_not_found(handler: BaseHTTPRequestHandler) -> None:
+    # Return a 1x1 transparent PNG as placeholder
+    transparent_png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+        "890000000d49444154789c6300010000050001a5f645240000000049454e44ae426082"
+    )
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "image/png")
+    handler.send_header("Content-Length", str(len(transparent_png)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(transparent_png)
+
+
 def _format_json(payload: dict[str, Any] | None) -> str:
     if payload is None:
         return "(keine Daten gefunden)"
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
 
 
+
 def _json_for_script(payload: Any) -> str:
     """Serialisiere JSON so, dass es sicher in einem script[type=json] liegt."""
     return json.dumps(payload, ensure_ascii=False, sort_keys=True).replace("</", "<\\/")
+# ---------------------------------------------------------------------------
+# Basic-Auth middleware
+# ---------------------------------------------------------------------------
+
+_AUTH_ENABLED: bool = False
+_AUTH_USER: str = ""
+_AUTH_PASS: str = ""
+
+
+def configure_basic_auth(credentials: str | None) -> None:
+    """Enable optional Basic-Auth.
+
+    Args:
+        credentials: ``user:password`` string, or None/empty to disable.
+    """
+    global _AUTH_ENABLED, _AUTH_USER, _AUTH_PASS
+    if not credentials or ":" not in credentials:
+        _AUTH_ENABLED = False
+        _AUTH_USER = ""
+        _AUTH_PASS = ""
+        return
+    user, _, password = credentials.partition(":")
+    _AUTH_USER = user
+    _AUTH_PASS = password
+    _AUTH_ENABLED = True
+
+def _check_auth(handler: BaseHTTPRequestHandler) -> bool:
+    """Return True if the request is authorized (or auth is disabled)."""
+    if not _AUTH_ENABLED:
+        return True
+    auth_header = handler.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    user, _, password = decoded.partition(":")
+    # Constant-time comparison to prevent timing attacks
+    user_ok = secrets.compare_digest(user, _AUTH_USER)
+    pass_ok = secrets.compare_digest(password, _AUTH_PASS)
+    return user_ok and pass_ok
+
+
+def _send_auth_required(handler: BaseHTTPRequestHandler) -> None:
+    """Send a 401 Unauthorized response with WWW-Authenticate header."""
+    body = json.dumps({"error": "unauthorized", "message": "Authentifizierung erforderlich."}, ensure_ascii=False)
+    encoded = body.encode("utf-8")
+    handler.send_response(HTTPStatus.UNAUTHORIZED)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(encoded)))
+    handler.send_header("WWW-Authenticate", 'Basic realm="MTGA Advisor"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(encoded)
+
+
+# ---------------------------------------------------------------------------
+# /health endpoint
+# ---------------------------------------------------------------------------
+
+def _health_response(handler: BaseHTTPRequestHandler, output_dir: Path) -> None:
+    """Return a JSON health status."""
+    status: dict[str, Any] = {
+        "status": "ok",
+        "timestamp": time.time(),
+        "version": "0.3",
+        "output_dir": str(output_dir),
+        "auth_enabled": _AUTH_ENABLED,
+    }
+    # Check for key data files
+    checks: dict[str, bool] = {}
+    for fname in ("collection.json", "decks.json", "run-report.json"):
+        checks[fname] = (output_dir / fname).exists()
+    status["files"] = checks
+    _json_response(handler, status, status=HTTPStatus.OK)
+
+
+# ---------------------------------------------------------------------------
+# QR-Code generation for terminal display
+# ---------------------------------------------------------------------------
+
+def _get_lan_ip() -> str:
+    """Determine the local network IP address (non-loopback)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+def _generate_qr_ascii(url: str) -> str:
+    """Generate a QR code as ASCII art string.
+
+    Falls back to a simple message if the ``qrcode`` package is not installed.
+    """
+    try:
+        import qrcode  # type: ignore[import-untyped]
+    except ImportError:
+        return f"  (qrcode package not installed — install with: pip install qrcode)\n  URL: {url}"
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,  # type: ignore[attr-defined]
+        box_size=1,
+        border=1,
+    )
+    qr.add_data(url)
+    qr.make()
+    buf = io.StringIO()
+    qr.print_ascii(invert=True, out=buf)
+    return buf.getvalue()
+
+
+def _print_server_banner(host: str, port: int, lan_ip: str, auth_enabled: bool, show_qr: bool) -> None:
+    """Print a startup banner with connection info and optional QR code."""
+    # Determine display URL
+    if host == "0.0.0.0":
+        display_host = lan_ip
+    else:
+        display_host = host
+    url = f"http://{display_host}:{port}"
+
+    print()
+    print("=" * 60)
+    print("  MTGA Advisor Dashboard")
+    print("=" * 60)
+    print(f"  URL:   {url}")
+    print(f"  Host:  {host}:{port}")
+    if host == "0.0.0.0":
+        print(f"  LAN:   {lan_ip}:{port}")
+    print(f"  Auth:  {'enabled' if auth_enabled else 'disabled'}")
+    print("=" * 60)
+
+    if show_qr:
+        print()
+        print(_generate_qr_ascii(url))
+        print()
+        print("  Scan the QR code with your phone to open the dashboard.")
+        print()
+        print("=" * 60)
 
 
 def _extract_diagnostics(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -470,14 +707,23 @@ def _render_deck_cards_section(deck: dict[str, Any] | None) -> str:
         for card in pile[:80]:
             name = html.escape(str(card.get("name", "?")))
             count = card.get("count", card.get("quantity", 1))
-            rows += f"<tr><td>{count}x</td><td>{name}</td></tr>"
+            card_id = card.get("cardId", card.get("grpId", ""))
+            card_id_str = str(card_id) if card_id else ""
+            rows += (
+                f"<tr class='card-row' data-card-id='{html.escape(card_id_str)}'>"
+                f"<td>{count}x</td>"
+                f"<td>{name}</td>"
+                f"<td class='card-thumb-cell'>"
+                f"<div class='card-thumb-placeholder' data-card-id='{html.escape(card_id_str)}'>?</div>"
+                f"</td></tr>"
+            )
         suffix = ""
         if len(pile) > 80:
             suffix = f'<p class="meta">+{len(pile) - 80} weitere</p>'
         sections.append(
             f'<div class="deck-cards-pile">'
             f'<h4>{label} ({len(pile)} Karten)</h4>'
-            f'<table><thead><tr><th>Anz</th><th>Name</th></tr></thead>'
+            f'<table><thead><tr><th>Anz</th><th>Name</th><th>Img</th></tr></thead>'
             f'<tbody>{rows}</tbody></table>{suffix}</div>'
         )
 
@@ -491,6 +737,64 @@ def _render_meta_notes(advisor: dict[str, Any] | None) -> str:
     if not notes:
         return ""
     return f"<ul>{''.join(f'<li>{html.escape(n)}</li>' for n in notes)}</ul>"
+
+
+def _render_history_section(output_dir: Path) -> str:
+    """Render the Collection-History section for the dashboard.
+
+    Shows snapshot list and a diff button. The actual diff content is
+    loaded dynamically via JavaScript from /api/history/diff.
+    """
+    snapshots = list_history_snapshots(output_dir=output_dir)
+    snapshot_count = len(snapshots)
+
+    if snapshot_count == 0:
+        return (
+            '<div class="section" id="history-section">'
+            '<h2>Collection-History <span class="badge">T4</span></h2>'
+            '<p class="meta">Noch keine Snapshots gespeichert. '
+            'Führe <code>python3 -m cli.main history save</code> aus '
+            'oder klicke auf "Snapshot speichern".</p>'
+            '<button id="history-save-btn" class="btn-select-deck">Snapshot speichern</button>'
+            '</div>'
+        )
+
+    # Build snapshot list
+    snapshot_rows = ""
+    for i, s in enumerate(snapshots):
+        ts = html.escape(s.get("timestamp", "?"))
+        stats = []
+        if "collectionStats" in s:
+            cs = s["collectionStats"]
+            stats.append(f"{cs['uniqueCards']} unique, {cs['totalCards']} total")
+        if "deckStats" in s:
+            ds = s["deckStats"]
+            stats.append(f"{ds['deckCount']} decks")
+        stat_str = f" ({', '.join(stats)})" if stats else ""
+        marker = " ← latest" if i == snapshot_count - 1 else ""
+        snapshot_rows += f"<li>{ts}{html.escape(stat_str)}{html.escape(marker)}</li>"
+
+    diff_available = snapshot_count >= 2
+
+    diff_btn = ""
+    if diff_available:
+        diff_btn = '<button id="history-diff-btn" class="btn-select-deck" style="margin-left:.5rem">Diff anzeigen</button>'
+
+    return (
+        '<div class="section" id="history-section">'
+        '<h2>Collection-History <span class="badge">T4</span></h2>'
+        f'<p class="meta">{snapshot_count} Snapshot(s) gespeichert.</p>'
+        f'<ul class="history-list">{snapshot_rows}</ul>'
+        '<div class="history-controls">'
+        '<button id="history-save-btn" class="btn-select-deck">Snapshot speichern</button>'
+        f'{diff_btn}'
+        '</div>'
+        '<div id="history-diff-result" style="display:none;margin-top:1rem;">'
+        '<h3>Diff (letzter vs. vorletzter Snapshot)</h3>'
+        '<div id="history-diff-content"></div>'
+        '</div>'
+        '</div>'
+    )
 
 
 def _build_chat_prompt(deck: dict[str, Any], collection: dict[str, Any] | None, question: str) -> str:
@@ -602,6 +906,7 @@ def _render_index(
     advisor_result: dict[str, Any] | None,
     decks: dict[str, Any] | None,
     llm_config: LLMConfig,
+    output_dir: Path | None = None,
 ) -> str:
     collection_diag = _extract_diagnostics(collection)
     report_diag = _extract_diagnostics(run_report)
@@ -683,10 +988,52 @@ def _render_index(
     .deck-cards-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .5rem; }
     @media (max-width: 700px) { .deck-cards-grid { grid-template-columns: 1fr; } }
     .deck-pile h3 { margin: .2rem 0 .4rem; font-size: 1rem; }
+    .history-list { list-style: none; padding: 0; margin: .5rem 0; }
+    .history-list li { padding: .2rem 0; font-size: .9rem; color: var(--muted); }
+    .history-controls { margin: .5rem 0; }
+    #history-diff-result h3 { margin: .5rem 0; font-size: 1rem; }
+    #history-diff-result h4 { margin: .4rem 0 .2rem; font-size: .95rem; }
+    #history-diff-result h5 { margin: .3rem 0 .1rem; font-size: .85rem; color: var(--muted); }
+    #history-diff-result ul { margin: .2rem 0 .4rem; padding-left: 1.2rem; font-size: .85rem; }
+    #history-diff-result li { padding: .1rem 0; }
     .deck-pile ul { list-style: none; padding: 0; margin: 0; }
     .deck-pile li { padding: .2rem .4rem; border-bottom: 1px solid var(--line); font-size: .9rem; display: flex; justify-content: space-between; }
     .deck-pile li .qty { color: var(--accent); font-weight: bold; }
     .deck-pile li .card-name { flex: 1; }
+
+    /* Card thumbnails */
+    .card-thumb {
+      width: 80px;
+      height: 112px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: #e8dcc8;
+      border: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .deck-pile li.with-thumb {
+      align-items: center;
+      gap: .5rem;
+    }
+    .deck-pile li .card-info {
+      flex: 1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .card-thumb-placeholder {
+      width: 80px;
+      height: 112px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #e8dcc8, #d4c4a8);
+      border: 1px solid var(--line);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .7rem;
+      color: var(--muted);
+    }
 
     /* Chat Panel */
     #chat-panel { display: none; position: fixed; bottom: 0; right: 0; width: 480px; max-width: 100vw; height: 600px; max-height: 80vh; background: var(--panel); border: 2px solid var(--accent); border-radius: 16px 0 0 0; box-shadow: -8px -8px 32px rgba(0,0,0,.15); flex-direction: column; z-index: 100; }
@@ -734,8 +1081,10 @@ def _render_index(
     <nav>
       <a href="/api/collection">collection.json</a>
       <a href="/api/decks">decks.json</a>
+      <a href="/api/ranks">ranks.json</a>
       <a href="/api/run-report">run-report.json</a>
       <a href="/api/advisor-result">advisor-result.json</a>
+      <a href="/api/meta">meta.json</a>
       <span id="config-toggle">⚙ LLM-Config</span>
     </nav>
   </div>
@@ -759,6 +1108,14 @@ def _render_index(
     $collection_summary
     $decks_summary
     $llm_advisor_summary
+  </div>
+
+  <div class="section" id="ranks-section">
+    <h2>Ränge &amp; Account <span class="badge">Phase 1.3</span></h2>
+    <p class="meta">Spieler-Rang und Account-Info aus dem MTGA-Prozessspeicher (IL2CPP-Navigation).</p>
+    <div id="ranks-content">
+      <p class="meta" id="ranks-loading">Lade Rang-Daten...</p>
+    </div>
   </div>
 
   <div class="section">
@@ -785,6 +1142,16 @@ def _render_index(
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  $history_section
+
+  <div class="section" id="meta-section">
+    <h2>Meta-Daten <span class="badge badge-green">Phase 2</span></h2>
+    <p class="meta">Aktuelle Metagame-Daten von MTGGoldfish. Top-Decks und häufigste Karten.</p>
+    <div id="meta-content">
+      <p class="meta" id="meta-loading">Lade Meta-Daten...</p>
     </div>
   </div>
 
@@ -853,6 +1220,7 @@ def _render_index(
         crafting_priorities=_render_crafting_priorities(advisor_result),
         deck_optimizations=_render_deck_optimizations(advisor_result),
         meta_notes=_render_meta_notes(advisor_result),
+        history_section=_render_history_section(output_dir) if output_dir else "",
         collection_completeness=html.escape(str(collection_diag["completeness"])),
         collection_warnings=_render_list(collection_diag["warnings"]),
         collection_json=html.escape(_format_json(collection)),
@@ -871,6 +1239,16 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         output_dir = self.server.output_dir
+
+        # /health endpoint — always accessible (even with auth) for health checks
+        if self.path == "/health":
+            _health_response(self, output_dir)
+            return
+
+        # Auth check (skip for /health so monitoring tools can probe)
+        if not _check_auth(self):
+            _send_auth_required(self)
+            return
 
         if self.path == "/dashboard.js":
             try:
@@ -907,15 +1285,39 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             _json_response(self, payload, status=HTTPStatus.OK)
             return
 
-        if self.path.startswith("/api/decks/") or self.path.startswith("/api/deck/"):
-            deck_key = self.path.split("/", 3)[-1]
-            deck = _find_deck_payload(output_dir, deck_key)
+        if self.path == "/api/ranks":
+            payload = _read_json(output_dir / "ranks.json")
+            if payload is None:
+                _json_response(self, {"error": "not_found", "message": "ranks.json fehlt. Führe 'mtga-export ranks --output out/ranks.json' aus."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _json_response(self, payload, status=HTTPStatus.OK)
+            return
+
+        # /api/card-image/<grp_id> — redirect to Scryfall image URL
+        if self.path.startswith("/api/card-image/"):
+            grp_id_str = self.path[len("/api/card-image/"):]
+            if "?" in grp_id_str:
+                grp_id_str = grp_id_str.split("?")[0]
+            if not grp_id_str or not grp_id_str.lstrip("-").isdigit():
+                _json_response(self, {"error": "bad_request", "message": "Invalid card ID."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            grp_id = int(grp_id_str)
+            image_url = _fetch_scryfall_image_url(grp_id)
+            if image_url:
+                _send_redirect(self, image_url)
+            else:
+                _send_image_not_found(self)
+            return
+
+        # /api/deck/<deckId> — individual deck file
+        if self.path.startswith("/api/deck/"):
+            deck_id = self.path[len("/api/deck/"):]
+            if not deck_id or not all(c.isalnum() or c in "-_" for c in deck_id):
+                _json_response(self, {"error": "bad_request", "message": "Invalid deck ID."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            deck = _find_deck_payload(output_dir, deck_id)
             if deck is None:
-                _json_response(
-                    self,
-                    {"error": "not_found", "message": f"Deck {deck_key} nicht gefunden."},
-                    status=HTTPStatus.NOT_FOUND,
-                )
+                _json_response(self, {"error": "not_found", "message": f"Deck {deck_id} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
                 return
             _json_response(self, deck, status=HTTPStatus.OK)
             return
@@ -941,7 +1343,36 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             _json_response(self, config.to_dict(), status=HTTPStatus.OK)
             return
 
+        # /api/meta — MTGGoldfish Meta-Daten (cached, optional format query param)
         parsed = urlparse(self.path)
+        if parsed.path == "/api/meta":
+            qs = parse_qs(parsed.query)
+            fmt = qs.get("format", ["standard"])[0]
+            no_cache = qs.get("no_cache", ["false"])[0].lower() in ("1", "true", "yes")
+            try:
+                from advisor.meta import fetch_meta
+                meta = fetch_meta(fmt, use_cache=not no_cache)
+                _json_response(self, meta.to_dict(), status=HTTPStatus.OK)
+            except ValueError as exc:
+                _json_response(self, {"error": "bad_request", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            except RuntimeError as exc:
+                _json_response(self, {"error": "fetch_failed", "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        # --- History API ---
+        if self.path == "/api/history/snapshots":
+            snapshots = list_history_snapshots(output_dir=output_dir)
+            _json_response(self, {"snapshots": snapshots, "count": len(snapshots)}, status=HTTPStatus.OK)
+            return
+
+        if parsed.path == "/api/history/diff":
+            qs = parse_qs(parsed.query)
+            older = qs.get("older", [None])[0]
+            newer = qs.get("newer", [None])[0]
+            diff = diff_history_snapshots(output_dir=output_dir, older=older, newer=newer)
+            _json_response(self, diff, status=HTTPStatus.OK if "error" not in diff else HTTPStatus.BAD_REQUEST)
+            return
+
         if parsed.path == "/api/deck-cards":
             qs = parse_qs(parsed.query)
             deck_id = qs.get("deck_id", [None])[0]
@@ -975,7 +1406,7 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             advisor_result = _read_json(output_dir / "advisor-result.json")
             decks = _read_json(output_dir / "decks.json")
             llm_config = load_config()
-            body = _render_index(collection, run_report, deck, advisor_result, decks, llm_config)
+            body = _render_index(collection, run_report, deck, advisor_result, decks, llm_config, output_dir=output_dir)
             _html_response(self, body, status=HTTPStatus.OK)
             return
 
@@ -983,6 +1414,11 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         output_dir = self.server.output_dir
+
+        # Auth check for POST requests
+        if not _check_auth(self):
+            _send_auth_required(self)
+            return
 
         if self.path == "/api/chat":
             content_len = int(self.headers.get("Content-Length", 0))
@@ -1076,6 +1512,17 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             _json_response(self, {"status": "saved", "config": current.to_dict()}, status=HTTPStatus.OK)
             return
 
+        if self.path == "/api/history/save":
+            history_dir = save_history_snapshot(output_dir=output_dir)
+            snapshots = list_history_snapshots(output_dir=output_dir)
+            _json_response(self, {
+                "status": "saved",
+                "historyDir": str(history_dir),
+                "snapshotCount": len(snapshots),
+                "latest": snapshots[-1] if snapshots else None,
+            }, status=HTTPStatus.OK)
+            return
+
         _json_response(self, {"error": "not_found", "message": "Pfad nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -1088,13 +1535,58 @@ class MtgaAdvisorServer(ThreadingHTTPServer):
         self.output_dir = output_dir
 
 
-def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+def run_server(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    *,
+    auth: str | None = None,
+    show_qr: bool = True,
+) -> None:
+    """Start the MTGA Advisor dashboard server.
+
+    Args:
+        host: Bind address (default 0.0.0.0 for LAN/Tailscale access).
+        port: Port number (default 8000).
+        output_dir: Directory containing collection.json, decks.json, etc.
+        auth: Optional ``user:password`` for Basic-Auth. If None, checks
+              the ``MTGA_ADVISOR_AUTH`` environment variable.
+        show_qr: If True, print a QR code in the terminal for mobile access.
+    """
+    # Resolve auth from env var if not explicitly provided
+    if auth is None:
+        auth = os.environ.get("MTGA_ADVISOR_AUTH")
+    configure_basic_auth(auth)
+
+    lan_ip = _get_lan_ip()
+    _print_server_banner(host, port, lan_ip, _AUTH_ENABLED, show_qr)
+
     server = MtgaAdvisorServer((host, port), MtgaAdvisorHandler, output_dir)
-    print(f"Serving MTGA Advisor on http://{host}:{port} (output={output_dir})")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Server wird heruntergefahren ...")
+        server.shutdown()
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MTGA Advisor Dashboard Server")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address (default: {DEFAULT_HOST})")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port (default: {DEFAULT_PORT})")
+    parser.add_argument("--output", type=Path, default=None, help="Output directory with JSON artifacts")
+    parser.add_argument("--auth", default=None, help="Basic-Auth credentials as user:password")
+    parser.add_argument("--no-qr", action="store_true", help="Disable QR code display in terminal")
+    args = parser.parse_args()
+
     output_env = os.environ.get("MTGA_ADVISOR_OUTPUT_DIR")
-    resolved_output = Path(output_env).expanduser().resolve() if output_env else DEFAULT_OUTPUT_DIR
-    run_server(output_dir=resolved_output)
+    resolved_output = Path(args.output or output_env or DEFAULT_OUTPUT_DIR).expanduser().resolve()
+
+    run_server(
+        host=args.host,
+        port=args.port,
+        output_dir=resolved_output,
+        auth=args.auth,
+        show_qr=not args.no_qr,
+    )
