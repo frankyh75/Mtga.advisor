@@ -141,6 +141,47 @@ def test_format_deck_cards_grpId_dict() -> None:
     assert "2x ID:200" in lines[0]
 
 
+def test_format_deck_cards_truncation_named_list() -> None:
+    """When a pile exceeds max_cards_per_pile, entries should be truncated."""
+    cards = {
+        "mainboard": [
+            {"cardId": i, "name": f"Card{i}", "count": 1}
+            for i in range(100)
+        ],
+    }
+    lines = _format_deck_cards_for_prompt(cards, max_cards_per_pile=10)
+    assert len(lines) == 1
+    assert "Card0" in lines[0]
+    assert "Card9" in lines[0]
+    assert "Card10" not in lines[0]
+    assert "+90 more" in lines[0]
+    assert "100 unique" in lines[0]
+
+
+def test_format_deck_cards_truncation_grpId_dict() -> None:
+    """When a grpId dict pile exceeds max_cards_per_pile, entries should be truncated."""
+    cards = {
+        "mainboard": {str(i): 1 for i in range(100)},
+    }
+    lines = _format_deck_cards_for_prompt(cards, max_cards_per_pile=10)
+    assert len(lines) == 1
+    assert "+90 more" in lines[0]
+    assert "100 unique" in lines[0]
+
+
+def test_format_deck_cards_no_truncation_under_limit() -> None:
+    """When pile size is under max_cards_per_pile, no truncation suffix."""
+    cards = {
+        "mainboard": [
+            {"cardId": 100, "name": "Bolt", "count": 4},
+        ],
+    }
+    lines = _format_deck_cards_for_prompt(cards, max_cards_per_pile=60)
+    assert len(lines) == 1
+    assert "+" not in lines[0]
+    assert "1 unique" in lines[0]
+
+
 def test_build_prompt_includes_deck_cards() -> None:
     """_build_prompt should include deck card names when available."""
     collection = {
@@ -268,5 +309,69 @@ def test_api_deck_not_found(tmp_path: Path) -> None:
             assert False, "Should have raised HTTPError"
         except urllib.error.HTTPError as exc:
             assert exc.code == 404
+    finally:
+        server.server_close()
+
+
+def test_api_deck_path_traversal_blocked(tmp_path: Path) -> None:
+    """Server should reject path traversal attempts in /api/deck/{deckId}."""
+    from server.app import MtgaAdvisorHandler, MtgaAdvisorServer
+    import urllib.error
+    import urllib.request
+
+    # Create a secret file outside decks/ that should not be accessible
+    secret_path = tmp_path / "secret.json"
+    secret_path.write_text('{"secret": "should-not-leak"}', encoding="utf-8")
+
+    decks_dir = tmp_path / "decks"
+    decks_dir.mkdir()
+
+    server = MtgaAdvisorServer(("127.0.0.1", 0), MtgaAdvisorHandler, tmp_path)
+    port = server.server_address[1]
+    server.timeout = 1
+
+    import threading
+    traversal_attempts = [
+        "/api/deck/..%2f..%2fsecret",
+        "/api/deck/../../secret",
+        "/api/deck/..%2F..%2Fsecret",
+    ]
+
+    try:
+        for attempt in traversal_attempts:
+            thread = threading.Thread(target=server.handle_request, daemon=True)
+            thread.start()
+
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{attempt}", timeout=2)
+                assert False, f"Should have raised HTTPError for {attempt}"
+            except urllib.error.HTTPError as exc:
+                # Should be 400 (bad request) not 200 (data leaked)
+                assert exc.code in (400, 404), f"Got {exc.code} for {attempt}"
+            thread.join(timeout=2)
+    finally:
+        server.server_close()
+
+
+def test_api_deck_special_chars_blocked(tmp_path: Path) -> None:
+    """Server should reject deck IDs with special characters."""
+    from server.app import MtgaAdvisorHandler, MtgaAdvisorServer
+    import urllib.error
+    import urllib.request
+
+    server = MtgaAdvisorServer(("127.0.0.1", 0), MtgaAdvisorHandler, tmp_path)
+    port = server.server_address[1]
+    server.timeout = 1
+
+    import threading
+    try:
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/deck/..;DROP", timeout=2)
+            assert False, "Should have raised HTTPError"
+        except urllib.error.HTTPError as exc:
+            assert exc.code in (400, 404)
     finally:
         server.server_close()

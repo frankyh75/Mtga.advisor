@@ -597,7 +597,9 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
     # Individual deck files (deck.v1 schema)
     for deck_entry in all_decks:
         deck_id = deck_entry["deckId"]
-        deck_path = decks_dir / f"deck-{deck_id}.json"
+        # Sanitize deck_id for filesystem safety
+        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(deck_id))
+        deck_path = decks_dir / f"deck-{safe_id}.json"
         payload = {
             "schema": "deck.v1",
             "deckId": deck_id,

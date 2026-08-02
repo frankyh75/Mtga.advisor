@@ -158,7 +158,7 @@ def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> s
             # Deck cards (from decks-container or deck-scan format)
             cards = deck.get("cards", {})
             if cards:
-                deck_lines = _format_deck_cards_for_prompt(cards)
+                deck_lines = _format_deck_cards_for_prompt(cards, max_cards_per_pile=60)
                 lines.extend(deck_lines)
 
         if len(deck_list) > 15:
@@ -213,12 +213,16 @@ def _build_prompt(collection: dict[str, Any], decks: dict[str, Any] | None) -> s
     return "\n".join(lines)
 
 
-def _format_deck_cards_for_prompt(cards: dict[str, Any]) -> list[str]:
+def _format_deck_cards_for_prompt(cards: dict[str, Any], max_cards_per_pile: int = 60) -> list[str]:
     """Format deck cards for the LLM prompt.
 
     Supports two formats:
     - Named card lists: {"mainboard": [{"cardId": 123, "name": "Lightning Bolt", "count": 4}, ...]}
     - grpId→qty dicts:  {"mainboard": {"123": 4, "456": 2}, ...}
+
+    Args:
+        max_cards_per_pile: Maximum number of card entries per pile to include
+            in the prompt. Excess entries are truncated with a summary count.
     """
     pile_labels = [
         ("mainboard", "Mainboard"),
@@ -234,17 +238,24 @@ def _format_deck_cards_for_prompt(cards: dict[str, Any]) -> list[str]:
         if isinstance(pile, list):
             # Named card list format
             entries = []
-            for card in pile:
+            for card in pile[:max_cards_per_pile]:
                 name = card.get("name") or f"ID:{card.get('cardId', '?')}"
                 count = card.get("count", 1)
                 entries.append(f"{count}x {name}")
             if entries:
-                result.append(f"  - {label} ({len(entries)} unique): {', '.join(entries)}")
+                suffix = ""
+                if len(pile) > max_cards_per_pile:
+                    suffix = f" (+{len(pile) - max_cards_per_pile} more)"
+                result.append(f"  - {label} ({len(pile)} unique): {', '.join(entries)}{suffix}")
         elif isinstance(pile, dict):
             # grpId→qty format (no names available)
-            entries = [f"{qty}x ID:{grp_id}" for grp_id, qty in sorted(pile.items())]
+            items = sorted(pile.items())
+            entries = [f"{qty}x ID:{grp_id}" for grp_id, qty in items[:max_cards_per_pile]]
             if entries:
-                result.append(f"  - {label} ({len(entries)} unique): {', '.join(entries)}")
+                suffix = ""
+                if len(items) > max_cards_per_pile:
+                    suffix = f" (+{len(items) - max_cards_per_pile} more)"
+                result.append(f"  - {label} ({len(items)} unique): {', '.join(entries)}{suffix}")
     return result
 
 

@@ -740,8 +740,19 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
         # /api/deck/<deckId> — individual deck file
         if self.path.startswith("/api/deck/"):
             deck_id = self.path[len("/api/deck/"):]
+            # Sanitize deck_id: only alphanumeric, dash, underscore
+            if not deck_id or not all(c.isalnum() or c in "-_" for c in deck_id):
+                _json_response(self, {"error": "bad_request", "message": "Invalid deck ID."}, status=HTTPStatus.BAD_REQUEST)
+                return
             # Try decks/deck-<deckId>.json first
             deck_path = output_dir / "decks" / f"deck-{deck_id}.json"
+            # Resolve and verify it's still under decks_dir
+            decks_dir = output_dir / "decks"
+            try:
+                deck_path.resolve().relative_to(decks_dir.resolve())
+            except ValueError:
+                _json_response(self, {"error": "bad_request", "message": "Invalid deck ID."}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload = _read_json(deck_path)
             if payload is None:
                 _json_response(self, {"error": "not_found", "message": f"Deck {deck_id} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
