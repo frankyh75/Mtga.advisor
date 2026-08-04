@@ -1249,7 +1249,12 @@ def scan_decks_il2cpp(
             if nav_result is not None and nav_result.entries:
                 decks: list[Il2CppDeckResult] = []
                 for idx, (deck_id, deck_ptr) in enumerate(nav_result.entries):
-                    deck = read_deck(mem, deck_ptr, debug=debug and idx == 0)
+                    # debug=idx==0 alone is fragile: if the very first dict
+                    # entry happens to be an invalid/orphaned deck, read_deck
+                    # returns None before ever reaching its field-dump prints,
+                    # and every later (successful) deck gets no debug output
+                    # at all. Give the first few entries a chance instead.
+                    deck = read_deck(mem, deck_ptr, debug=debug and idx < 3)
                     if deck is not None:
                         deck.deck_id = deck_id
                         decks.append(deck)
