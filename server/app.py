@@ -797,6 +797,237 @@ def _render_history_section(output_dir: Path) -> str:
     )
 
 
+def _compute_missing_cards(
+    deck: dict[str, Any],
+    collection: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Deterministically compute which deck cards are missing from the collection.
+
+    Compares each mainboard/sideboard card's required count against the
+    player's collection inventory.  Returns a list of missing-card dicts:
+      [{"name": ..., "cardId": ..., "needed": N, "owned": M, "missing": N-M}]
+
+    Cards with missing == 0 are excluded.  Cards whose grpId is not in
+    the collection at all are treated as owned=0.
+
+    Supports both deck card formats:
+      - Named card list:  [{"cardId": 123, "name": "Bolt", "count": 4}, ...]
+      - grpId->qty dict:  {"123": 4, "456": 2}
+    """
+    if not collection:
+        return []
+
+    coll_cards = collection.get("cards", {})
+    if not isinstance(coll_cards, dict):
+        return []
+
+    deck_cards = deck.get("cards", deck.get("mainDeck", []))
+    if not deck_cards:
+        return []
+
+    # Gather all card entries from all piles
+    entries: list[tuple[str | int, str, int]] = []  # (cardId, name, needed)
+
+    if isinstance(deck_cards, dict):
+        for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+            pile = deck_cards.get(pile_key)
+            if not pile:
+                continue
+            if isinstance(pile, list):
+                for card in pile:
+                    if isinstance(card, dict):
+                        cid = card.get("cardId", card.get("id", "?"))
+                        name = card.get("name", f"ID:{cid}")
+                        count = int(card.get("count", card.get("quantity", 1)))
+                        entries.append((cid, name, count))
+            elif isinstance(pile, dict):
+                for cid, count in pile.items():
+                    entries.append((cid, f"ID:{cid}", int(count)))
+    elif isinstance(deck_cards, list):
+        for card in deck_cards:
+            if isinstance(card, dict):
+                cid = card.get("cardId", card.get("id", "?"))
+                name = card.get("name", f"ID:{cid}")
+                count = int(card.get("count", card.get("quantity", 1)))
+                entries.append((cid, name, count))
+
+    missing_cards: list[dict[str, Any]] = []
+    for cid, name, needed in entries:
+        owned = int(coll_cards.get(str(cid), 0))
+        missing = needed - owned
+        if missing > 0:
+            missing_cards.append({
+                "name": name,
+                "cardId": cid,
+                "needed": needed,
+                "owned": owned,
+                "missing": missing,
+            })
+
+    return missing_cards
+
+
+def _build_analysis_prompt(
+    deck: dict[str, Any],
+    collection: dict[str, Any] | None,
+    computed_missing: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build a dedicated deck-analysis prompt requesting structured JSON output.
+
+    Inspired by advisor/llm_advisor.py _build_prompt(), but focused on a
+    single deck rather than the whole collection.  Requests the exact JSON
+    schema that _parse_structured_analysis() can extract.
+
+    Args:
+        deck: Deck payload (deck.v1 or arena-deck.v1 format).
+        collection: Player's collection.json (optional).
+        computed_missing: Pre-computed missing-cards list from
+            _compute_missing_cards().  If provided, the prompt tells the
+            LLM which cards are already known to be missing, so it can
+            focus on reasoning/priorities rather than raw computation.
+    """
+    lines = [
+        "Du bist ein MTG Arena Deck-Building Advisor.",
+        "Analysiere das folgende Deck gegen die Collection des Spielers.",
+        "",
+        "## Deck",
+    ]
+
+    name = deck.get("name", "Unnamed")
+    fmt = deck.get("attributes", {}).get("Format", "unknown")
+    deck_id = deck.get("deckId", "?")
+    lines.append(f"Name: {name}")
+    lines.append(f"Format: {fmt}")
+    lines.append(f"DeckId: {deck_id}")
+
+    # Deck cards — supports deck-scan format and log-export format
+    deck_cards = deck.get("cards", deck.get("mainDeck", []))
+    if deck_cards:
+        lines.append("\nKarten:")
+        if isinstance(deck_cards, dict):
+            for pile_key, label in [
+                ("mainboard", "Mainboard"),
+                ("sideboard", "Sideboard"),
+                ("commandZone", "Command Zone"),
+                ("companions", "Companions"),
+            ]:
+                pile = deck_cards.get(pile_key, [])
+                if not pile:
+                    continue
+                lines.append(f"  {label}:")
+                if isinstance(pile, list):
+                    for card in pile[:60]:
+                        if isinstance(card, dict):
+                            lines.append(
+                                f"    {card.get('name', '?')} x{card.get('count', card.get('quantity', 1))}"
+                            )
+                        elif isinstance(card, str):
+                            lines.append(f"    {card}")
+                elif isinstance(pile, dict):
+                    for card_id, count in list(pile.items())[:60]:
+                        lines.append(f"    ID:{card_id} x{count}")
+        elif isinstance(deck_cards, list):
+            for card in deck_cards[:60]:
+                if isinstance(card, dict):
+                    lines.append(
+                        f"  {card.get('name', '?')} x{card.get('count', card.get('quantity', 1))}"
+                    )
+                elif isinstance(card, str):
+                    lines.append(f"  {card}")
+
+    # Collection context
+    if collection:
+        cards = collection.get("cards", {})
+        wildcards = collection.get("wildcards", {})
+        total = sum(int(v) for v in cards.values()) if isinstance(cards, dict) else 0
+        unique = len(cards) if isinstance(cards, dict) else 0
+        lines.append(f"\n## Collection ({unique} unique, {total} total)")
+        if wildcards:
+            lines.append("Wildcards:")
+            # Support both wcXxx and plain key formats, show each rarity once
+            wc_keys = [
+                ("wcCommon", "common", "Common"),
+                ("wcUncommon", "uncommon", "Uncommon"),
+                ("wcRare", "rare", "Rare"),
+                ("wcMythic", "mythic", "Mythic"),
+            ]
+            shown = set()
+            for wc_key, plain_key, label in wc_keys:
+                if wc_key in wildcards and label not in shown:
+                    lines.append(f"  {label}: {wildcards[wc_key]}")
+                    shown.add(label)
+                elif plain_key in wildcards and label not in shown:
+                    lines.append(f"  {label}: {wildcards[plain_key]}")
+                    shown.add(label)
+    else:
+        lines.append("\n## Collection: nicht verfuegbar")
+
+    # Pre-computed missing cards (deterministic)
+    if computed_missing:
+        lines.append(f"\n## Fehlende Karten (berechnet, {len(computed_missing)} Karten)")
+        for mc in computed_missing:
+            lines.append(
+                f"  - {mc['name']}: braucht {mc['needed']}, hat {mc['owned']}, fehlt {mc['missing']}"
+            )
+    else:
+        lines.append("\n## Fehlende Karten: nicht berechenbar (Collection nicht verfuegbar)")
+
+    # JSON schema instructions — matching _parse_structured_analysis fields
+    lines.extend([
+        "",
+        "## Aufgabe",
+        "",
+        "Analysiere das Deck und gib eine strukturierte Bewertung im folgenden JSON-Format.",
+        "Antworte NUR mit JSON (kein Markdown drumherum):",
+        "",
+        """{
+  "summary": {
+    "topPriority": "<hoechste Prioritaet: was zuerst tun?>",
+    "confidence": "high|medium|low",
+    "notes": "<kurze Zusammenfassung>"
+  },
+  "coreCards": [
+    {"name": "<Kartenname>", "count": <Anzahl>, "role": "<Rolle im Deck>"}
+  ],
+  "missingCards": [
+    {"name": "<Kartenname>", "count": <Anzahl die fehlt>, "rarity": "common|uncommon|rare|mythic", "reason": "<warum braucht man die?>"}
+  ],
+  "craftPriorities": [
+    {
+      "reason": "<warum diese Prioritaet>",
+      "cards": [
+        {"name": "<Kartenname>", "count": <Anzahl>, "rarity": "<rarity>", "forDecks": ["<Deckname>"]}
+      ]
+    }
+  ],
+  "cuts": [
+    {"name": "<Kartenname>", "count": <Anzahl>, "reason": "<warum cutten?>"}
+  ],
+  "manaCurve": {
+    "cmc0": <Anzahl>, "cmc1": <Anzahl>, "cmc2": <Anzahl>,
+    "cmc3": <Anzahl>, "cmc4": <Anzahl>, "cmc5": <Anzahl>, "cmc6plus": <Anzahl>
+  },
+  "riskAssessment": {
+    "lands": "<Einschaetzung: good|warning|critical + Begründung>",
+    "curve": "<Einschaetzung>",
+    "synergy": "<Einschaetzung>",
+    "sideboard": "<Einschaetzung>"
+  }
+}""",
+        "",
+        "Wichtig:",
+        "- Nutze die berechneten fehlenden Karten als Basis fuer missingCards und craftPriorities",
+        "- Priorisiere Rares und Mythics (teuerste Wildcards zuerst)",
+        "- Nenne konkrete Kartennamen, keine Platzhalter",
+        "- Bei cuts: welche Karten sollten aus dem Deck entfernt werden?",
+        "- manaCurve: zaehle die Karten pro CMC-Wert im Mainboard",
+        "- Maximal 10 craftPriorities, maximal 10 cuts",
+        "- Sei praezise und hilfreich",
+    ])
+
+    return "\n".join(lines)
+
+
 def _build_chat_prompt(deck: dict[str, Any], collection: dict[str, Any] | None, question: str) -> str:
     """Baue einen Chat-Prompt für eine spezifische Deck-Frage."""
     lines = [
@@ -855,6 +1086,146 @@ def _build_chat_prompt(deck: dict[str, Any], collection: dict[str, Any] | None, 
     lines.append("\nAntworte auf Deutsch, präzise und mit konkreten Kartennamen.")
 
     return "\n".join(lines)
+
+
+def _parse_structured_analysis(raw_text: str) -> dict[str, Any]:
+    """Try to parse an LLM analysis response as JSON and extract structured fields.
+
+    The advisor-analyze.v2 schema supports these optional blocks:
+      - summary: {topPriority, confidence, notes}
+      - coreCards: [{name, count, role}]
+      - missingCards: [{name, count, rarity, reason}]
+      - craftPriorities: [{reason, cards: [{name, count, rarity, forDecks}]}]
+      - cuts: [{name, count, reason}]
+      - manaCurve: {cmc0, cmc1, cmc2, cmc3, cmc4, cmc5, cmc6plus}
+      - riskAssessment: {lands, curve, synergy, sideboard}
+
+    If the LLM returns plain text (not JSON), returns {} — the caller
+    falls back to rendering the raw text in a <pre>.
+    """
+    import re as _re
+
+    text = raw_text.strip()
+
+    # Strip ```json ... ``` or ``` ... ``` fencing
+    code_block = _re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, _re.DOTALL)
+    if code_block:
+        text = code_block.group(1).strip()
+
+    # Try direct JSON parse
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Try to find outermost JSON object
+        brace_start = text.find("{")
+        brace_end = text.rfind("}")
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                data = json.loads(text[brace_start : brace_end + 1])
+            except json.JSONDecodeError:
+                return {}
+        else:
+            return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    result: dict[str, Any] = {}
+
+    # summary
+    summary = data.get("summary")
+    if isinstance(summary, dict):
+        result["summary"] = {
+            "topPriority": str(summary.get("topPriority", "")),
+            "confidence": str(summary.get("confidence", "")),
+            "notes": str(summary.get("notes", "")),
+        }
+
+    # coreCards
+    core_cards = data.get("coreCards")
+    if isinstance(core_cards, list):
+        result["coreCards"] = [
+            {
+                "name": str(c.get("name", "?")),
+                "count": int(c.get("count", 1)),
+                "role": str(c.get("role", "")),
+            }
+            for c in core_cards
+            if isinstance(c, dict)
+        ]
+
+    # missingCards
+    missing = data.get("missingCards")
+    if isinstance(missing, list):
+        result["missingCards"] = [
+            {
+                "name": str(c.get("name", "?")),
+                "count": int(c.get("count", 1)),
+                "rarity": str(c.get("rarity", "?")),
+                "reason": str(c.get("reason", "")),
+            }
+            for c in missing
+            if isinstance(c, dict)
+        ]
+
+    # craftPriorities
+    craft = data.get("craftPriorities")
+    if isinstance(craft, list):
+        result["craftPriorities"] = [
+            {
+                "reason": str(p.get("reason", "?")),
+                "cards": [
+                    {
+                        "name": str(c.get("name", "?")),
+                        "count": int(c.get("count", 1)),
+                        "rarity": str(c.get("rarity", "?")),
+                        "forDecks": list(c.get("forDecks", [])),
+                    }
+                    for c in p.get("cards", [])
+                    if isinstance(c, dict)
+                ],
+            }
+            for p in craft
+            if isinstance(p, dict)
+        ]
+
+    # cuts
+    cuts = data.get("cuts")
+    if isinstance(cuts, list):
+        result["cuts"] = [
+            {
+                "name": str(c.get("name", "?")),
+                "count": int(c.get("count", 1)),
+                "reason": str(c.get("reason", "")),
+            }
+            for c in cuts
+            if isinstance(c, dict)
+        ]
+
+    # manaCurve
+    curve = data.get("manaCurve")
+    if isinstance(curve, dict):
+        result["manaCurve"] = {
+            "cmc0": int(curve.get("cmc0", 0)),
+            "cmc1": int(curve.get("cmc1", 0)),
+            "cmc2": int(curve.get("cmc2", 0)),
+            "cmc3": int(curve.get("cmc3", 0)),
+            "cmc4": int(curve.get("cmc4", 0)),
+            "cmc5": int(curve.get("cmc5", 0)),
+            "cmc6plus": int(curve.get("cmc6plus", curve.get("cmc6+", 0))),
+        }
+
+    # riskAssessment
+    risk = data.get("riskAssessment")
+    if isinstance(risk, dict):
+        result["riskAssessment"] = {
+            "lands": str(risk.get("lands", "")),
+            "curve": str(risk.get("curve", "")),
+            "synergy": str(risk.get("synergy", "")),
+            "sideboard": str(risk.get("sideboard", "")),
+        }
+
+    return result
 
 
 def _call_llm_chat(config: LLMConfig, prompt: str) -> dict[str, Any]:
@@ -964,12 +1335,15 @@ def _render_index(
     .btn-select-deck:hover { opacity: .85; }
     .deck-row:hover { background: rgba(180,83,9,.06); cursor: pointer; }
     .deck-row.is-selected { background: rgba(180,83,9,.14); }
-    .deck-row.hidden-by-filter { display: none; }
+    .deck-row.hidden-by-filter, .deck-row.hidden-by-search { display: none; }
     .deck-type { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .75rem; }
     .deck-type.precon { background: #fee8d1; color: #8a4b08; }
     .deck-type.normal { background: #e7efe9; color: #26513a; }
     .deck-toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: .5rem; flex-wrap: wrap; }
     .deck-toolbar label { display: inline-flex; gap: .45rem; align-items: center; cursor: pointer; }
+    .deck-search { flex: 0 1 18rem; }
+    .deck-search input { width: 100%; padding: .3rem .6rem; border: 1px solid var(--line); border-radius: 8px; font-size: .9rem; background: var(--bg); color: var(--fg); }
+    .deck-search input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
     .deck-details { margin-top: 1rem; border: 1px solid var(--line); border-radius: 16px; background: rgba(247,241,231,.9); padding: 1rem; }
     .deck-details code, .deck-details pre { background: #231f1a; color: #f8ead1; }
     .deck-details pre { max-height: 20rem; }
@@ -985,6 +1359,58 @@ def _render_index(
     .deck-detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
     .deck-detail-header h2 { margin: 0; }
     .deck-detail-close { background: none; border: 1px solid var(--line); border-radius: 8px; padding: .3rem .8rem; cursor: pointer; font-size: .85rem; color: var(--muted); }
+    /* Quick-Action Bar (T10) */
+    .deck-detail-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin: .6rem 0; }
+    .action-btn { padding: .4rem .9rem; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: .85rem; font-weight: 600; transition: opacity .15s; }
+    .action-btn:hover { opacity: .82; }
+    .action-btn:disabled { opacity: .5; cursor: wait; }
+    .action-btn.export { background: var(--green); color: #fff; border-color: var(--green); }
+    .action-btn.analyze { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .action-btn.improve { background: #6b46c1; color: #fff; border-color: #6b46c1; }
+    .action-status { font-size: .82rem; color: var(--muted); margin-left: .4rem; }
+    .action-status.error { color: #b91c1c; }
+    .action-status.ok { color: var(--green); }
+
+    /* Advisor Result View (T8) — structured analysis blocks */
+    .advisor-result { margin-top: .6rem; }
+    .advisor-result-block { background: rgba(255,250,240,.7); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .8rem; margin-bottom: .6rem; }
+    .advisor-result-block h4 { margin: .2rem 0 .4rem; font-size: .95rem; color: var(--accent); border-bottom: 1px solid var(--line); padding-bottom: .2rem; }
+    .advisor-result-block .meta { font-size: .82rem; color: var(--muted); }
+    .advisor-result-summary { font-size: .9rem; line-height: 1.5; }
+    .advisor-result-summary .top-priority { font-weight: bold; color: var(--ink); }
+    .advisor-result-summary .confidence-badge { display: inline-block; padding: .1rem .5rem; border-radius: 8px; font-size: .78rem; font-weight: bold; margin-left: .4rem; }
+    .advisor-result-summary .confidence-badge.high { background: #d4edda; color: #155724; }
+    .advisor-result-summary .confidence-badge.medium { background: #fff3cd; color: #856404; }
+    .advisor-result-summary .confidence-badge.low { background: #f8d7da; color: #721c24; }
+    .advisor-result-card-list { list-style: none; padding: 0; margin: .2rem 0; }
+    .advisor-result-card-list li { padding: .2rem .4rem; border-bottom: 1px solid rgba(216,207,192,.4); font-size: .88rem; display: flex; gap: .4rem; align-items: baseline; }
+    .advisor-result-card-list li:last-child { border-bottom: none; }
+    .advisor-result-card-list .card-count { color: var(--accent); font-weight: bold; min-width: 2.2rem; }
+    .advisor-result-card-list .card-name { font-weight: 500; }
+    .advisor-result-card-list .card-role, .advisor-result-card-list .card-reason { color: var(--muted); font-size: .82rem; }
+    .advisor-result-card-list .card-rarity { font-size: .78rem; font-weight: bold; padding: .05rem .3rem; border-radius: 4px; }
+    .advisor-result-card-list .card-rarity.common { color: #333; }
+    .advisor-result-card-list .card-rarity.uncommon { color: #777; }
+    .advisor-result-card-list .card-rarity.rare { color: #b8860b; }
+    .advisor-result-card-list .card-rarity.mythic { color: #c45a18; }
+    .advisor-craft-group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; margin-bottom: .4rem; }
+    .advisor-craft-group h5 { margin: .15rem 0 .25rem; font-size: .88rem; color: var(--ink); }
+    .advisor-craft-group .for-decks { font-size: .8rem; color: var(--muted); }
+    .advisor-mana-curve { display: flex; gap: .5rem; align-items: flex-end; height: 80px; padding: .4rem 0; }
+    .advisor-mana-curve-bar { display: flex; flex-direction: column; align-items: center; flex: 1; max-width: 60px; }
+    .advisor-mana-curve-bar .bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .2s; }
+    .advisor-mana-curve-bar .label { font-size: .75rem; color: var(--muted); margin-top: .2rem; }
+    .advisor-mana-curve-bar .count { font-size: .72rem; color: var(--ink); font-weight: bold; }
+    .advisor-risk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: .5rem; margin-top: .3rem; }
+    .advisor-risk-item { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; }
+    .advisor-risk-item .risk-label { font-size: .8rem; color: var(--muted); margin-bottom: .15rem; }
+    .advisor-risk-item .risk-value { font-size: .85rem; font-weight: 500; }
+    .advisor-risk-item .risk-value.good { color: var(--green); }
+    .advisor-risk-item .risk-value.warning { color: #856404; }
+    .advisor-risk-item .risk-value.critical { color: var(--danger); }
+    .advisor-no-data { color: var(--muted); font-size: .85rem; font-style: italic; padding: .3rem 0; }
+    .advisor-cuts-list li { color: var(--danger); }
+    .advisor-cuts-list .card-reason { color: var(--muted); }
     .deck-cards-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .5rem; }
     @media (max-width: 700px) { .deck-cards-grid { grid-template-columns: 1fr; } }
     .deck-pile h3 { margin: .2rem 0 .4rem; font-size: 1rem; }
@@ -1071,6 +1497,58 @@ def _render_index(
     #config-toggle { font-size: .85rem; color: var(--accent); cursor: pointer; }
     #config-fields { display: none; margin-top: .5rem; }
     #config-fields.open { display: block; }
+
+    /* New Deck Builder Form */
+    .deck-builder-form { max-width: 560px; margin-top: .5rem; }
+    .deck-builder-row { margin-bottom: .8rem; }
+    .deck-builder-row > label { display: block; font-size: .9rem; color: var(--muted); margin-bottom: .25rem; }
+    .deck-builder-row select, .deck-builder-row input[type="text"], .deck-builder-row input[type="number"] {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-size: .9rem; font-family: inherit; background: var(--panel); color: var(--ink);
+    }
+    .deck-builder-row select:focus, .deck-builder-row input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+    .color-pickers { display: flex; flex-wrap: wrap; gap: .8rem; }
+    .color-pickers label { display: inline-flex; gap: .3rem; align-items: center; font-size: .85rem; cursor: pointer; color: var(--ink); }
+    .deck-builder-actions { display: flex; align-items: center; gap: .8rem; margin-top: .5rem; }
+    #builder-status.error { color: var(--danger); }
+    #builder-status.success { color: var(--green); }
+    .builder-result-block { margin: .5rem 0; padding: .6rem .8rem; background: rgba(255,250,240,.7); border: 1px solid var(--line); border-radius: 10px; }
+    .builder-result-block h4 { margin: .2rem 0 .3rem; font-size: .95rem; color: var(--accent); }
+    .builder-result-block .meta { font-size: .82rem; }
+    /* Collection Browser */
+    .collection-browser-controls { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: .8rem; margin-bottom: .8rem; }
+    .collection-browser-row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .5rem; }
+    .collection-browser-row:last-child { margin-bottom: 0; }
+    .collection-browser-row label { font-size: .85rem; color: var(--muted); }
+    .collection-browser-row select, .collection-browser-row input[type="number"] {
+      border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; font-size: .85rem; font-family: inherit; background: var(--bg); color: var(--fg);
+    }
+    .collection-browser-row select:focus, .collection-browser-row input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+    .cb-search-input { flex: 1 1 24rem; min-width: 12rem; border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-size: .9rem; background: var(--bg); color: var(--fg); }
+    .cb-search-input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+    .btn-cb-reset { background: var(--panel); color: var(--accent); border: 1px solid var(--accent); border-radius: 8px; padding: .3rem .8rem; cursor: pointer; font-size: .85rem; }
+    .btn-cb-reset:hover { background: var(--accent); color: #fff; }
+    .collection-browser-results { max-height: 600px; overflow-y: auto; }
+    .cb-card { display: flex; gap: .8rem; padding: .5rem .8rem; border-bottom: 1px solid var(--line); align-items: flex-start; }
+    .cb-card:hover { background: rgba(255,250,240,.5); }
+    .cb-card-img { flex: 0 0 100px; }
+    .cb-card-img img { width: 100px; height: auto; border-radius: 6px; }
+    .cb-card-info { flex: 1; min-width: 0; }
+    .cb-card-name { font-weight: bold; font-size: .95rem; color: var(--ink); }
+    .cb-card-meta { font-size: .82rem; color: var(--muted); margin-top: .15rem; }
+    .cb-card-text { font-size: .82rem; color: var(--fg); margin-top: .2rem; white-space: pre-wrap; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+    .cb-mana-badge { display: inline-block; padding: .1rem .4rem; border-radius: 4px; font-size: .75rem; font-weight: bold; margin-right: .3rem; }
+    .cb-mana-W { background: #f8f6e8; color: #333; border: 1px solid #e0dcc0; }
+    .cb-mana-U { background: #aed4e6; color: #0d3b66; border: 1px solid #7eb8d4; }
+    .cb-mana-B { background: #c9c1c1; color: #1a1a1a; border: 1px solid #999; }
+    .cb-mana-R { background: #e6a4a4; color: #8b0000; border: 1px solid #cc7777; }
+    .cb-mana-G { background: #b8d4a8; color: #1a4d1a; border: 1px solid #8bb87b; }
+    .cb-mana-C { background: #d0d0d0; color: #333; border: 1px solid #aaa; }
+    .cb-rarity-common { color: #333; }
+    .cb-rarity-uncommon { color: #777; font-weight: bold; }
+    .cb-rarity-rare { color: #b8860b; font-weight: bold; }
+    .cb-rarity-mythic { color: #c45a18; font-weight: bold; }
+    .cb-rarity-special { color: #6a0dad; font-weight: bold; }
+    .cb-no-results { padding: 1rem; text-align: center; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -1122,6 +1600,9 @@ def _render_index(
     <h2>Decks <span class="badge">Phase 1.2</span></h2>
     <div class="deck-toolbar">
       <label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>
+      <div class="deck-search">
+        <input id="deck-search" type="text" placeholder="Deck suchen..." autocomplete="off" aria-label="Deck nach Namen suchen">
+      </div>
       <span id="deck-visibility" class="meta">Klick auf eine Zeile für Details, Chat-Button für Advisor.</span>
     </div>
     $decks_table
@@ -1133,6 +1614,14 @@ def _render_index(
             <h3 id="deck-detail-name">Deck</h3>
             <p class="meta" id="deck-detail-meta"></p>
             <div id="deck-detail-badges"></div>
+            <div class="deck-detail-actions" id="deck-detail-actions">
+              <button class="action-btn export" id="btn-export-arena" type="button">Export (Arena)</button>
+              <button class="action-btn analyze" id="btn-analyze" type="button">Analyze</button>
+              <button class="action-btn improve" id="btn-improve" type="button">Improve</button>
+              <span class="action-status" id="deck-action-status"></span>
+            </div>
+            <div id="deck-analyze-result" style="display:none;"></div>
+            <div id="deck-improve-result" style="display:none;"></div>
             <h4>Summary</h4>
             <pre id="deck-detail-json"></pre>
           </div>
@@ -1155,6 +1644,66 @@ def _render_index(
     </div>
   </div>
 
+  <div class="section" id="deck-builder-section">
+    <h2>New Deck Builder <span class="badge badge-green">Phase 2</span></h2>
+    <p class="meta">Neues Deck konstruieren — Format, Farben, Constraints festlegen und LLM-Entwurf anfordern.</p>
+    <div class="deck-builder-form">
+      <div class="deck-builder-row">
+        <label for="builder-format">Format</label>
+        <select id="builder-format">
+          <option value="standard">Standard</option>
+          <option value="historic">Historic</option>
+          <option value="explorer">Explorer</option>
+          <option value="alchemy">Alchemy</option>
+          <option value="brawl">Brawl</option>
+          <option value="historicbrawl">Historic Brawl</option>
+          <option value="pioneer">Pioneer</option>
+          <option value="modern">Modern</option>
+          <option value="legacy">Legacy</option>
+        </select>
+      </div>
+      <div class="deck-builder-row">
+        <label>Farben</label>
+        <div class="color-pickers" id="builder-colors">
+          <label><input type="checkbox" value="w"> W (White)</label>
+          <label><input type="checkbox" value="u"> U (Blue)</label>
+          <label><input type="checkbox" value="b"> B (Black)</label>
+          <label><input type="checkbox" value="r"> R (Red)</label>
+          <label><input type="checkbox" value="g"> G (Green)</label>
+          <label><input type="checkbox" value="c"> C (Colorless)</label>
+        </div>
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-archetype">Archetyp / Spielstil</label>
+        <input id="builder-archetype" type="text" placeholder="z.B. Etali, Aggro, Control, Ramp...">
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-max-rares">Max Rares</label>
+        <input id="builder-max-rares" type="number" min="0" max="60" value="8">
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-max-mythics">Max Mythics (optional)</label>
+        <input id="builder-max-mythics" type="number" min="0" max="20" placeholder="z.B. 2">
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-budget">Budget-Modus</label>
+        <select id="builder-budget">
+          <option value="owned-first">Owned-first (nur eigene Karten)</option>
+          <option value="budget">Budget</option>
+          <option value="no-limit">No limit</option>
+        </select>
+      </div>
+      <div class="deck-builder-row">
+        <label><input type="checkbox" id="builder-use-meta" checked> Meta-Daten einbeziehen</label>
+      </div>
+      <div class="deck-builder-actions">
+        <button id="builder-submit" class="btn-select-deck" style="padding:.5rem 1.2rem;font-size:.95rem;">Deck-Entwurf anfordern</button>
+        <span id="builder-status" class="meta"></span>
+      </div>
+    </div>
+    <div id="builder-result" class="deck-details" style="margin-top:1rem;"></div>
+  </div>
+
   <div class="section">
     <h2>LLM Advisor <span class="badge badge-green">Phase 2</span></h2>
     <div class="warning">
@@ -1167,6 +1716,58 @@ def _render_index(
     $deck_optimizations
     <h3>Meta Notes</h3>
     $meta_notes
+  </div>
+
+  <div class="section" id="collection-browser-section">
+    <h2>Collection-Browser <span class="badge badge-green">Phase 2</span></h2>
+    <p class="meta">Durchsuche deine Collection nach Name, Kartentext, Typ, Farbe, Seltenheit und CMC. Client-seitige Filterung der /api/collection/enriched-Daten.</p>
+    <div id="collection-browser-controls" class="collection-browser-controls">
+      <div class="collection-browser-row">
+        <input id="cb-search" type="text" placeholder="Name oder Kartentext suchen..." autocomplete="off" aria-label="Suche nach Name oder Kartentext" class="cb-search-input">
+      </div>
+      <div class="collection-browser-row">
+        <label for="cb-type">Typ:</label>
+        <select id="cb-type" aria-label="Nach Kartentyp filtern">
+          <option value="">Alle</option>
+          <option value="creature">Creature</option>
+          <option value="instant">Instant</option>
+          <option value="sorcery">Sorcery</option>
+          <option value="enchantment">Enchantment</option>
+          <option value="artifact">Artifact</option>
+          <option value="planeswalker">Planeswalker</option>
+          <option value="land">Land</option>
+          <option value="battle">Battle</option>
+        </select>
+        <label for="cb-color">Farbe:</label>
+        <select id="cb-color" aria-label="Nach Farbe filtern">
+          <option value="">Alle</option>
+          <option value="W">Weiß (W)</option>
+          <option value="U">Blau (U)</option>
+          <option value="B">Schwarz (B)</option>
+          <option value="R">Rot (R)</option>
+          <option value="G">Grün (G)</option>
+          <option value="C">Farblos (C)</option>
+        </select>
+        <label for="cb-rarity">Seltenheit:</label>
+        <select id="cb-rarity" aria-label="Nach Seltenheit filtern">
+          <option value="">Alle</option>
+          <option value="common">Common</option>
+          <option value="uncommon">Uncommon</option>
+          <option value="rare">Rare</option>
+          <option value="mythic">Mythic</option>
+          <option value="special">Special</option>
+        </select>
+        <label for="cb-cmc">CMC max:</label>
+        <input id="cb-cmc" type="number" min="0" max="20" placeholder="z.B. 3" aria-label="Maximale Manakosten">
+      </div>
+      <div class="collection-browser-row">
+        <button id="cb-reset" class="btn-cb-reset">Filter zurücksetzen</button>
+        <span id="cb-status" class="meta">Lade Collection-Daten...</span>
+      </div>
+    </div>
+    <div id="collection-browser-results" class="collection-browser-results">
+      <p class="meta" id="cb-loading">Lade Collection-Daten...</p>
+    </div>
   </div>
 
   <div class="section">
@@ -1234,6 +1835,131 @@ def _render_index(
     )
 
 
+# ---------------------------------------------------------------------------
+# Enriched collection — joins collection.json grpIds with Scryfall metadata.
+# ---------------------------------------------------------------------------
+
+# Module-level cache for the enriched card database (loaded once per process).
+_ENRICHED_CARD_DB: dict[int, dict[str, Any]] | None = None
+_ENRICHED_CARD_DB_LOCK = threading.Lock()
+
+
+def _get_enriched_card_db() -> dict[int, dict[str, Any]]:
+    """Load and cache the enriched Scryfall card database (process-wide)."""
+    global _ENRICHED_CARD_DB
+    with _ENRICHED_CARD_DB_LOCK:
+        if _ENRICHED_CARD_DB is not None:
+            return _ENRICHED_CARD_DB
+        from scanner.card_database import load_enriched_card_database
+        _ENRICHED_CARD_DB = load_enriched_card_database()
+        return _ENRICHED_CARD_DB
+
+
+def _build_enriched_collection(output_dir: Path) -> dict[str, Any]:
+    """Join collection.json grpIds with enriched Scryfall metadata.
+
+    Returns a dict:
+      {
+        "cards": [ {grp_id, count, name, set, rarity, cmc, type_line, colors, oracle_text, image_uri}, ... ],
+        "total_unique": N,
+        "total_copies": M,
+        "enriched_count": K,     # how many cards got full metadata
+        "source": "scryfall" | "basic"
+      }
+
+    If collection.json is missing, returns {"error": "not_found", ...}.
+    If the enriched DB is empty (no Scryfall data), falls back to basic
+    lookup (name, set, collector_number only).
+    """
+    collection = _read_json(output_dir / "collection.json")
+    if collection is None:
+        return {"error": "not_found", "message": "collection.json fehlt."}
+
+    raw_cards = collection.get("cards", {})
+    if not isinstance(raw_cards, dict):
+        raw_cards = {}
+
+    enriched_db = _get_enriched_card_db()
+
+    # Fallback: load basic lookup if enriched DB is empty
+    basic_db: dict[int, dict[str, Any]] = {}
+    if not enriched_db:
+        from scanner.card_database import load_card_database
+        basic_db = load_card_database()
+
+    cards_out: list[dict[str, Any]] = []
+    total_copies = 0
+    enriched_count = 0
+
+    for grp_id_str, count in raw_cards.items():
+        try:
+            grp_id = int(grp_id_str)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(count, int):
+            try:
+                count = int(count)
+            except (ValueError, TypeError):
+                continue
+
+        total_copies += count
+
+        entry: dict[str, Any] = {"grp_id": grp_id, "count": count}
+
+        if enriched_db and grp_id in enriched_db:
+            meta = enriched_db[grp_id]
+            entry.update({
+                "name": meta.get("name", "Unknown"),
+                "set": meta.get("set", ""),
+                "collector_number": meta.get("collector_number", ""),
+                "rarity": meta.get("rarity", "unknown"),
+                "cmc": meta.get("cmc", 0),
+                "type_line": meta.get("type_line", ""),
+                "colors": meta.get("colors", []),
+                "oracle_text": meta.get("oracle_text", ""),
+                "image_uri": meta.get("image_uri"),
+            })
+            enriched_count += 1
+        elif basic_db and grp_id in basic_db:
+            meta = basic_db[grp_id]
+            entry.update({
+                "name": meta.get("name", "Unknown"),
+                "set": meta.get("set", ""),
+                "collector_number": meta.get("collector_number", ""),
+                "rarity": "unknown",
+                "cmc": 0,
+                "type_line": "",
+                "colors": [],
+                "oracle_text": "",
+                "image_uri": None,
+            })
+        else:
+            entry.update({
+                "name": f"Card {grp_id}",
+                "set": "",
+                "collector_number": "",
+                "rarity": "unknown",
+                "cmc": 0,
+                "type_line": "",
+                "colors": [],
+                "oracle_text": "",
+                "image_uri": None,
+            })
+
+        cards_out.append(entry)
+
+    # Sort by name for stable output
+    cards_out.sort(key=lambda c: c.get("name", ""))
+
+    return {
+        "cards": cards_out,
+        "total_unique": len(cards_out),
+        "total_copies": total_copies,
+        "enriched_count": enriched_count,
+        "source": "scryfall" if enriched_db else ("basic" if basic_db else "none"),
+    }
+
+
 class MtgaAdvisorHandler(BaseHTTPRequestHandler):
     server_version = "mtga-advisor/0.3"
 
@@ -1267,6 +1993,14 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 _json_response(self, {"error": "not_found", "message": "collection.json fehlt."}, status=HTTPStatus.NOT_FOUND)
                 return
             _json_response(self, payload, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/collection/enriched":
+            result = _build_enriched_collection(output_dir)
+            if "error" in result:
+                _json_response(self, result, status=HTTPStatus.NOT_FOUND)
+            else:
+                _json_response(self, result, status=HTTPStatus.OK)
             return
 
         if self.path == "/api/decks":
@@ -1521,6 +2255,302 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 "snapshotCount": len(snapshots),
                 "latest": snapshots[-1] if snapshots else None,
             }, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/export":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_id = data.get("deckId")
+            deck_key = data.get("deckKey")
+            if not deck_id and not deck_key:
+                _json_response(self, {"error": "missing_field", "message": "deckId or deckKey is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # Try to find the deck payload
+            deck_payload = None
+            search_key = deck_key or deck_id
+            deck_payload = _find_deck_payload(output_dir, str(search_key))
+
+            if deck_payload is None:
+                # Try decks.json lookup by deckId
+                decks = _read_json(output_dir / "decks.json")
+                if decks:
+                    for d in decks.get("decks", []):
+                        if str(d.get("deckId", "")) == str(deck_id):
+                            deck_payload = d
+                            break
+
+            if deck_payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {search_key!r} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            # Use advisor.deck_export to convert to Arena text
+            from advisor.deck_export import export_deck_to_arena_text, DeckExportError
+
+            # Ensure schema is set for export
+            if "schema" not in deck_payload:
+                deck_payload["schema"] = "deck.v1"
+
+            try:
+                arena_text = export_deck_to_arena_text(deck_payload)
+            except DeckExportError as exc:
+                _json_response(self, {"error": "export_failed", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            _json_response(self, {
+                "schema": "advisor-export.v1",
+                "deckName": deck_payload.get("name", "Unnamed"),
+                "format": "arena",
+                "arenaText": arena_text,
+                "lineCount": len(arena_text.strip().split("\n")) if arena_text.strip() else 0,
+            }, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/analyze":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_id = data.get("deckId")
+            deck_key = data.get("deckKey")
+            if not deck_id and not deck_key:
+                _json_response(self, {"error": "missing_field", "message": "deckId or deckKey is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # Find deck payload
+            search_key = deck_key or deck_id
+            deck_payload = _find_deck_payload(output_dir, str(search_key))
+            if deck_payload is None:
+                decks = _read_json(output_dir / "decks.json")
+                if decks:
+                    for d in decks.get("decks", []):
+                        if str(d.get("deckId", "")) == str(deck_id):
+                            deck_payload = d
+                            break
+
+            if deck_payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {search_key!r} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            # Load collection for analysis context
+            collection = _read_json(output_dir / "collection.json")
+
+            # T7: Compute missing cards deterministically (deck vs collection)
+            computed_missing = _compute_missing_cards(deck_payload, collection)
+
+            # T7: Build dedicated analysis prompt (not generic chat prompt)
+            # The analysis prompt requests structured JSON output matching
+            # the advisor-analyze.v2 schema and includes pre-computed missing
+            # cards so the LLM can focus on reasoning.
+            prompt = _build_analysis_prompt(deck_payload, collection, computed_missing)
+
+            # Load LLM config
+            cli_overrides = {}
+            if data.get("endpoint"):
+                cli_overrides["endpoint"] = data["endpoint"]
+            if data.get("model"):
+                cli_overrides["model_name"] = data["model"]
+            if data.get("temperature") is not None:
+                cli_overrides["temperature"] = float(data["temperature"])
+            if data.get("max_tokens") is not None:
+                cli_overrides["max_tokens"] = int(data["max_tokens"])
+            config = load_config(cli_overrides=cli_overrides)
+
+            # Call LLM
+            result = _call_llm_chat(config, prompt)
+            if "error" in result:
+                # Even on LLM error, return computed missing cards
+                _json_response(self, {
+                    **result,
+                    "schema": "advisor-analyze.v1",
+                    "deckName": deck_payload.get("name", "Unnamed"),
+                    "computedMissingCards": computed_missing,
+                }, status=HTTPStatus.OK)
+                return
+
+            # Try to parse structured blocks from LLM response (T8)
+            analysis_text = result.get("response", "")
+            structured = _parse_structured_analysis(analysis_text)
+
+            response_payload: dict[str, Any] = {
+                "schema": "advisor-analyze.v1",
+                "deckName": deck_payload.get("name", "Unnamed"),
+                "analysis": analysis_text,
+                "model": result.get("model", config.model_name),
+                "warnings": [],
+                "computedMissingCards": computed_missing,
+            }
+            if structured:
+                response_payload["structured"] = structured
+            _json_response(self, response_payload, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/improve":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_id = data.get("deckId")
+            deck_key = data.get("deckKey")
+            if not deck_id and not deck_key:
+                _json_response(self, {"error": "missing_field", "message": "deckId or deckKey is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # Find deck payload
+            search_key = deck_key or deck_id
+            deck_payload = _find_deck_payload(output_dir, str(search_key))
+            if deck_payload is None:
+                decks = _read_json(output_dir / "decks.json")
+                if decks:
+                    for d in decks.get("decks", []):
+                        if str(d.get("deckId", "")) == str(deck_id):
+                            deck_payload = d
+                            break
+
+            if deck_payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {search_key!r} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            # Load collection for improvement context
+            collection = _read_json(output_dir / "collection.json")
+
+            # Build improvement prompt
+            improve_question = data.get("question", "Optimiere dieses Deck: Welche Karten sollten getauscht werden? Verbessere Mana-Kurve, Synergien und Sideboard. Berücksichtige die verfügbare Collection.")
+            prompt = _build_chat_prompt(deck_payload, collection, improve_question)
+
+            # Load LLM config
+            cli_overrides = {}
+            if data.get("endpoint"):
+                cli_overrides["endpoint"] = data["endpoint"]
+            if data.get("model"):
+                cli_overrides["model_name"] = data["model"]
+            if data.get("temperature") is not None:
+                cli_overrides["temperature"] = float(data["temperature"])
+            if data.get("max_tokens") is not None:
+                cli_overrides["max_tokens"] = int(data["max_tokens"])
+            config = load_config(cli_overrides=cli_overrides)
+
+            # Call LLM
+            result = _call_llm_chat(config, prompt)
+            if "error" in result:
+                _json_response(self, result, status=HTTPStatus.OK)
+                return
+
+            _json_response(self, {
+                "schema": "advisor-improve.v1",
+                "deckName": deck_payload.get("name", "Unnamed"),
+                "improvements": result.get("response", ""),
+                "model": result.get("model", config.model_name),
+                "warnings": [],
+            }, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/build":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # --- Validate request fields ---
+            valid_formats = {"standard", "historic", "explorer", "alchemy", "brawl", "historicbrawl", "legacy", "modern", "pioneer"}
+            fmt = data.get("format")
+            if not fmt:
+                _json_response(self, {"error": "missing_field", "message": "format is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if fmt not in valid_formats:
+                _json_response(self, {"error": "invalid_format", "message": f"format must be one of: {', '.join(sorted(valid_formats))}."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            colors = data.get("colors")
+            if colors is not None:
+                if not isinstance(colors, list):
+                    _json_response(self, {"error": "invalid_colors", "message": "colors must be a list of single-letter codes (w/u/b/r/g/c)."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                valid_color_codes = {"w", "u", "b", "r", "g", "c"}
+                for c in colors:
+                    if not isinstance(c, str) or c.lower() not in valid_color_codes:
+                        _json_response(self, {"error": "invalid_colors", "message": f"Invalid color code: {c}. Must be one of w/u/b/r/g/c."}, status=HTTPStatus.BAD_REQUEST)
+                        return
+            else:
+                colors = []
+
+            archetype = data.get("archetype")
+            if archetype is not None and not isinstance(archetype, str):
+                _json_response(self, {"error": "invalid_archetype", "message": "archetype must be a string."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            max_rares = data.get("maxRares")
+            if max_rares is not None:
+                if not isinstance(max_rares, int) or max_rares < 0:
+                    _json_response(self, {"error": "invalid_maxRares", "message": "maxRares must be a non-negative integer."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+            max_mythics = data.get("maxMythics")
+            if max_mythics is not None:
+                if not isinstance(max_mythics, int) or max_mythics < 0:
+                    _json_response(self, {"error": "invalid_maxMythics", "message": "maxMythics must be a non-negative integer."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+            valid_budget_modes = {"owned-first", "budget", "no-limit"}
+            budget_mode = data.get("budgetMode")
+            if budget_mode is not None and budget_mode not in valid_budget_modes:
+                _json_response(self, {"error": "invalid_budgetMode", "message": f"budgetMode must be one of: {', '.join(sorted(valid_budget_modes))}."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            use_meta = data.get("useMeta")
+            if use_meta is not None and not isinstance(use_meta, bool):
+                _json_response(self, {"error": "invalid_useMeta", "message": "useMeta must be a boolean."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # --- Build stub response (advisor-build.v1 schema) ---
+            constraints = [fmt]
+            if max_rares is not None:
+                constraints.append(f"maxRares={max_rares}")
+            if max_mythics is not None:
+                constraints.append(f"maxMythics={max_mythics}")
+            if budget_mode:
+                constraints.append(f"budgetMode={budget_mode}")
+            if colors:
+                constraints.append(f"colors={''.join(sorted(colors))}")
+
+            concept = archetype or f"{''.join(colors).upper() or 'C'} {fmt} deck"
+            response = {
+                "schema": "advisor-build.v1",
+                "summary": {
+                    "deckConcept": concept,
+                    "confidence": "low",
+                    "constraints": constraints,
+                    "note": "Stub response — no LLM logic yet. Field structure is final.",
+                },
+                "deckDraft": {
+                    "mainboard": [],
+                    "sideboard": [],
+                    "commandZone": [],
+                },
+                "suggestions": [],
+                "warnings": [
+                    "stub_mode: This is a placeholder response without LLM analysis.",
+                ],
+            }
+
+            _json_response(self, response, status=HTTPStatus.OK)
             return
 
         _json_response(self, {"error": "not_found", "message": "Pfad nicht gefunden."}, status=HTTPStatus.NOT_FOUND)

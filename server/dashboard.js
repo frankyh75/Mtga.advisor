@@ -12,6 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const chatLoading = document.getElementById("chat-loading");
   const chatDeckCards = document.getElementById("chat-deck-cards");
   const hidePrecons = document.getElementById("hide-precons");
+  const deckSearch = document.getElementById("deck-search");
   const deckVisibility = document.getElementById("deck-visibility");
   const deckDetailsSection = document.getElementById("deck-details");
   const deckDetailEmpty = document.getElementById("deck-detail-empty");
@@ -21,6 +22,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const deckDetailBadges = document.getElementById("deck-detail-badges");
   const deckDetailJson = document.getElementById("deck-detail-json");
   const deckDetailCards = document.getElementById("deck-detail-cards");
+  const btnExportArena = document.getElementById("btn-export-arena");
+  const btnAnalyze = document.getElementById("btn-analyze");
+  const btnImprove = document.getElementById("btn-improve");
+  const deckActionStatus = document.getElementById("deck-action-status");
+  const deckAnalyzeResult = document.getElementById("deck-analyze-result");
+  const deckImproveResult = document.getElementById("deck-improve-result");
   const deckRows = Array.from(document.querySelectorAll(".deck-row"));
 
   const PILE_LABELS = [
@@ -31,6 +38,79 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
 
   let selectedDeck = null;
+  let currentDeckPayload = null;  // Full payload for action buttons (T10)
+
+  // --- DOM helper utilities (safe rendering via createElement/textContent) ---
+  // Creates an element, applies attributes, and optionally appends children/text.
+  function el(tag, opts) {
+    const node = document.createElement(tag);
+    if (opts) {
+      if (opts.className) node.className = opts.className;
+      if (opts.text != null) node.textContent = opts.text;
+      if (opts.style) node.setAttribute("style", opts.style);
+      if (opts.children) {
+        for (const c of opts.children) {
+          if (c) node.appendChild(c);
+        }
+      }
+    }
+    return node;
+  }
+
+  // Creates a <p class="meta"> with the given text.
+  function metaP(text) {
+    return el("p", { className: "meta", text: String(text) });
+  }
+
+  // Creates an <ul> from an array of <li> text strings or nodes.
+  function ulFrom(items) {
+    const list = el("ul");
+    for (const item of items) {
+      if (typeof item === "string") {
+        list.appendChild(el("li", { text: item }));
+      } else {
+        list.appendChild(item);
+      }
+    }
+    return list;
+  }
+
+  // Creates a <li> with mixed text + inline elements.
+  function li(...children) {
+    const item = el("li");
+    for (const c of children) {
+      if (typeof c === "string") {
+        item.appendChild(document.createTextNode(c));
+      } else {
+        item.appendChild(c);
+      }
+    }
+    return item;
+  }
+
+  // Creates a <strong> element.
+  function strong(text) {
+    return el("strong", { text: String(text) });
+  }
+
+  // Creates a <code> element.
+  function code(text) {
+    return el("code", { text: String(text) });
+  }
+
+  // Removes all children from a DOM node.
+  function clearChildren(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+
+  // Appends all children to a node.
+  function appendAll(node, children) {
+    for (const c of children) {
+      if (c) node.appendChild(c);
+    }
+  }
 
   // Lazy-loads card thumbnails as they scroll into view (single shared
   // observer for all card lists, restored from a WIP fix whose merge
@@ -254,6 +334,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    currentDeckPayload = payload;  // Store for action buttons (T10)
     deckDetailEmpty.style.display = "none";
     deckDetailContent.style.display = "block";
 
@@ -395,13 +476,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const applyDeckFilter = () => {
     const hide = Boolean(hidePrecons?.checked);
+    const query = (deckSearch?.value ?? "").trim().toLowerCase();
     let visibleCount = 0;
     let hiddenCount = 0;
 
     deckRows.forEach((row) => {
       const isPrecon = row.dataset.isPrecon === "true";
-      const shouldHide = hide && isPrecon;
-      row.classList.toggle("hidden-by-filter", shouldHide);
+      const deckName = (row.dataset.deckName ?? "").toLowerCase();
+      const hiddenByPrecon = hide && isPrecon;
+      const hiddenBySearch = query !== "" && !deckName.includes(query);
+      const shouldHide = hiddenByPrecon || hiddenBySearch;
+      row.classList.toggle("hidden-by-filter", hiddenByPrecon);
+      row.classList.toggle("hidden-by-search", hiddenBySearch && !hiddenByPrecon);
       if (shouldHide) {
         hiddenCount += 1;
       } else {
@@ -410,9 +496,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     if (deckVisibility) {
-      deckVisibility.textContent = hide
-        ? `${visibleCount} Decks sichtbar, ${hiddenCount} Precons ausgeblendet.`
-        : `${visibleCount} Decks sichtbar.`;
+      const parts = [`${visibleCount} Decks sichtbar`];
+      if (hiddenCount > 0) {
+        parts.push(`${hiddenCount} ausgeblendet`);
+      }
+      deckVisibility.textContent = parts.join(", ") + ".";
     }
   };
 
@@ -476,6 +564,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (hidePrecons) {
     hidePrecons.addEventListener("change", applyDeckFilter);
+  }
+
+  if (deckSearch) {
+    deckSearch.addEventListener("input", applyDeckFilter);
   }
 
   if (chatClose && chatPanel) {
@@ -575,88 +667,84 @@ document.addEventListener("DOMContentLoaded", () => {
       historyDiffBtn.disabled = true;
       historyDiffBtn.textContent = "Lade Diff...";
       historyDiffResult.style.display = "block";
+      clearChildren(historyDiffContent);
       try {
         const resp = await fetch("/api/history/diff");
         const data = await resp.json();
         if (data.error) {
-          historyDiffContent.innerHTML = `<p class="meta">${data.error}</p>`;
+          historyDiffContent.appendChild(metaP(data.error));
         } else {
-          let html = "";
+          const fragment = document.createDocumentFragment();
           const cd = data.collectionDiff;
           if (cd && !cd.error) {
             const s = cd.summary;
-            html += `<h4>Collection</h4>`;
-            html += `<p class="meta">+${s.added} neu, +${s.increased} erhöht, -${s.removed} entfernt, -${s.decreased} reduziert, ${s.unchanged} unverändert</p>`;
-            html += `<p class="meta">Netto: ${s.netChange >= 0 ? "+" : ""}${s.netChange} Karten</p>`;
+            fragment.appendChild(el("h4", { text: "Collection" }));
+            fragment.appendChild(metaP(
+              "+" + s.added + " neu, +" + s.increased + " erhöht, " +
+              "-" + s.removed + " entfernt, -" + s.decreased + " reduziert, " +
+              s.unchanged + " unverändert"
+            ));
+            fragment.appendChild(metaP(
+              "Netto: " + (s.netChange >= 0 ? "+" : "") + s.netChange + " Karten"
+            ));
             if (cd.added && cd.added.length > 0) {
-              html += "<ul>";
-              for (const c of cd.added.slice(0, 20)) {
-                html += `<li>+${c.count}x Card ${c.cardId} (neu)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.added.slice(0, 20).map(c => "+" + c.count + "x Card " + c.cardId + " (neu)")
+              ));
             }
             if (cd.increased && cd.increased.length > 0) {
-              html += "<ul>";
-              for (const c of cd.increased.slice(0, 20)) {
-                html += `<li>+${c.delta}x Card ${c.cardId} (jetzt ${c.newCount}x, war ${c.oldCount}x)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.increased.slice(0, 20).map(c =>
+                  "+" + c.delta + "x Card " + c.cardId + " (jetzt " + c.newCount + "x, war " + c.oldCount + "x)"
+                )
+              ));
             }
             if (cd.removed && cd.removed.length > 0) {
-              html += "<ul>";
-              for (const c of cd.removed.slice(0, 20)) {
-                html += `<li>-${c.oldCount}x Card ${c.cardId} (entfernt)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.removed.slice(0, 20).map(c => "-" + c.oldCount + "x Card " + c.cardId + " (entfernt)")
+              ));
             }
             if (cd.decreased && cd.decreased.length > 0) {
-              html += "<ul>";
-              for (const c of cd.decreased.slice(0, 20)) {
-                html += `<li>-${c.delta}x Card ${c.cardId} (jetzt ${c.newCount}x, war ${c.oldCount}x)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.decreased.slice(0, 20).map(c =>
+                  "-" + c.delta + "x Card " + c.cardId + " (jetzt " + c.newCount + "x, war " + c.oldCount + "x)"
+                )
+              ));
             }
             if (cd.wildcardDiff) {
-              html += "<h5>Wildcards</h5><ul>";
+              fragment.appendChild(el("h5", { text: "Wildcards" }));
+              const wcItems = [];
               for (const [key, change] of Object.entries(cd.wildcardDiff)) {
-                html += `<li>${key}: ${change.old} → ${change.new} (${change.delta >= 0 ? "+" : ""}${change.delta})</li>`;
+                wcItems.push(key + ": " + change.old + " → " + change.new + " (" + (change.delta >= 0 ? "+" : "") + change.delta + ")");
               }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(wcItems));
             }
           }
 
           const dd = data.decksDiff;
           if (dd) {
             const s = dd.summary;
-            html += `<h4>Decks</h4>`;
-            html += `<p class="meta">+${s.added} neu, -${s.removed} entfernt, ~${s.modified} verändert</p>`;
+            fragment.appendChild(el("h4", { text: "Decks" }));
+            fragment.appendChild(metaP("+" + s.added + " neu, -" + s.removed + " entfernt, ~" + s.modified + " verändert"));
             if (dd.added && dd.added.length > 0) {
-              html += "<ul>";
-              for (const d of dd.added) {
-                html += `<li>+ ${d.name} (${d.deckId})</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(dd.added.map(d => "+ " + d.name + " (" + d.deckId + ")")));
             }
             if (dd.removed && dd.removed.length > 0) {
-              html += "<ul>";
-              for (const d of dd.removed) {
-                html += `<li>- ${d.name} (${d.deckId})</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(dd.removed.map(d => "- " + d.name + " (" + d.deckId + ")")));
             }
             if (dd.modified && dd.modified.length > 0) {
-              html += "<ul>";
-              for (const d of dd.modified) {
-                html += `<li>~ ${d.name} (${d.deckId})</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(dd.modified.map(d => "~ " + d.name + " (" + d.deckId + ")")));
             }
           }
 
-          historyDiffContent.innerHTML = html || "<p class='meta'>Keine Änderungen.</p>";
+          if (!fragment.hasChildNodes()) {
+            fragment.appendChild(metaP("Keine Änderungen."));
+          }
+          historyDiffContent.appendChild(fragment);
         }
       } catch (err) {
-        historyDiffContent.innerHTML = `<p class="meta">Fehler: ${err.message}</p>`;
+        clearChildren(historyDiffContent);
+        historyDiffContent.appendChild(metaP("Fehler: " + err.message));
       }
       historyDiffBtn.disabled = false;
       historyDiffBtn.textContent = "Diff anzeigen";
@@ -678,67 +766,87 @@ document.addEventListener("DOMContentLoaded", () => {
         const limited = ranks.limited || {};
         const warnings = data.warnings || [];
 
-        let html = "";
+        clearChildren(ranksContent);
+        const fragment = document.createDocumentFragment();
 
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">';
-        html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;">';
-        html += '<h3 style="margin:0 0 .5rem;">Constructed</h3>';
-        if (constructed.class && constructed.class !== "None") {
-          html += `<p style="font-size:1.4rem;font-weight:bold;margin:.25rem 0;">${constructed.class}</p>`;
-          if (constructed.level) html += `<p class="meta">Level ${constructed.level}, Step ${constructed.step || 0}</p>`;
-          html += `<p class="meta">Saison ${constructed.seasonOrdinal || "?"}: ${constructed.wins || 0}-${constructed.losses || 0}${constructed.draws ? `-${constructed.draws}` : ""}</p>`;
-          if (constructed.leaderboardPlace) html += `<p class="meta">Leaderboard #${constructed.leaderboardPlace}</p>`;
-          if (constructed.percentile) html += `<p class="meta">Percentile: ${constructed.percentile}</p>`;
-        } else {
-          html += '<p class="meta">Unranked</p>';
+        // Two-column grid for Constructed / Limited
+        const grid = el("div", {
+          style: "display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;",
+        });
+
+        function rankColumn(title, rank) {
+          const col = el("div", {
+            style: "padding:1rem;border:1px solid var(--border);border-radius:8px;",
+          });
+          col.appendChild(el("h3", { style: "margin:0 0 .5rem;", text: title }));
+          if (rank.class && rank.class !== "None") {
+            col.appendChild(el("p", {
+              style: "font-size:1.4rem;font-weight:bold;margin:.25rem 0;",
+              text: rank.class,
+            }));
+            if (rank.level) {
+              col.appendChild(metaP("Level " + rank.level + ", Step " + (rank.step || 0)));
+            }
+            const seasonText = "Saison " + (rank.seasonOrdinal || "?") + ": " +
+              (rank.wins || 0) + "-" + (rank.losses || 0) +
+              (rank.draws ? "-" + rank.draws : "");
+            col.appendChild(metaP(seasonText));
+            if (rank.leaderboardPlace) {
+              col.appendChild(metaP("Leaderboard #" + rank.leaderboardPlace));
+            }
+            if (rank.percentile) {
+              col.appendChild(metaP("Percentile: " + rank.percentile));
+            }
+          } else {
+            col.appendChild(metaP("Unranked"));
+          }
+          return col;
         }
-        html += "</div>";
 
-        html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;">';
-        html += '<h3 style="margin:0 0 .5rem;">Limited</h3>';
-        if (limited.class && limited.class !== "None") {
-          html += `<p style="font-size:1.4rem;font-weight:bold;margin:.25rem 0;">${limited.class}</p>`;
-          if (limited.level) html += `<p class="meta">Level ${limited.level}, Step ${limited.step || 0}</p>`;
-          html += `<p class="meta">Saison ${limited.seasonOrdinal || "?"}: ${limited.wins || 0}-${limited.losses || 0}${limited.draws ? `-${limited.draws}` : ""}</p>`;
-          if (limited.leaderboardPlace) html += `<p class="meta">Leaderboard #${limited.leaderboardPlace}</p>`;
-          if (limited.percentile) html += `<p class="meta">Percentile: ${limited.percentile}</p>`;
-        } else {
-          html += '<p class="meta">Unranked</p>';
-        }
-        html += "</div>";
-        html += "</div>";
+        grid.appendChild(rankColumn("Constructed", constructed));
+        grid.appendChild(rankColumn("Limited", limited));
+        fragment.appendChild(grid);
 
+        // Account section
         if (account.displayName || account.accountId) {
-          html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;margin-bottom:1rem;">';
-          html += '<h3 style="margin:0 0 .5rem;">Account</h3>';
-          if (account.displayName) html += `<p class="meta">Name: <strong>${account.displayName}</strong></p>`;
-          if (account.countryCode) html += `<p class="meta">Land: ${account.countryCode}</p>`;
-          if (account.accountId) html += `<p class="meta">Account ID: ${account.accountId}</p>`;
-          if (account.personaId) html += `<p class="meta">Persona ID: ${account.personaId}</p>`;
-          if (account.gameId) html += `<p class="meta">Game ID: ${account.gameId}</p>`;
-          html += "</div>";
+          const acctDiv = el("div", {
+            style: "padding:1rem;border:1px solid var(--border);border-radius:8px;margin-bottom:1rem;",
+          });
+          acctDiv.appendChild(el("h3", { style: "margin:0 0 .5rem;", text: "Account" }));
+          if (account.displayName) {
+            const p = metaP("Name: ");
+            p.appendChild(strong(account.displayName));
+            acctDiv.appendChild(p);
+          }
+          if (account.countryCode) acctDiv.appendChild(metaP("Land: " + account.countryCode));
+          if (account.accountId) acctDiv.appendChild(metaP("Account ID: " + account.accountId));
+          if (account.personaId) acctDiv.appendChild(metaP("Persona ID: " + account.personaId));
+          if (account.gameId) acctDiv.appendChild(metaP("Game ID: " + account.gameId));
+          fragment.appendChild(acctDiv);
         }
 
         if (ranks.playerId) {
-          html += `<p class="meta">Player ID: ${ranks.playerId}</p>`;
+          fragment.appendChild(metaP("Player ID: " + ranks.playerId));
         }
 
         if (warnings.length > 0) {
-          html += '<div class="warning"><h3>Warnings</h3><ul>';
-          for (const w of warnings) {
-            html += `<li>${w}</li>`;
-          }
-          html += "</ul></div>";
+          const warnDiv = el("div", { className: "warning" });
+          warnDiv.appendChild(el("h3", { text: "Warnings" }));
+          warnDiv.appendChild(ulFrom(warnings));
+          fragment.appendChild(warnDiv);
         }
 
-        if (!html) {
-          html = '<p class="meta">Keine Rang-Daten verfügbar.</p>';
+        if (!fragment.hasChildNodes()) {
+          fragment.appendChild(metaP("Keine Rang-Daten verfügbar."));
         }
-
-        ranksContent.innerHTML = html;
+        ranksContent.appendChild(fragment);
       })
       .catch((err) => {
-        ranksContent.innerHTML = `<p class="meta">Rang-Daten nicht verfügbar — ${err.message}. Führe <code>mtga-export ranks --output out/ranks.json</code> aus.</p>`;
+        clearChildren(ranksContent);
+        const p = metaP("Rang-Daten nicht verfügbar — " + err.message + ". Führe ");
+        p.appendChild(code("mtga-export ranks --output out/ranks.json"));
+        p.appendChild(document.createTextNode(" aus."));
+        ranksContent.appendChild(p);
       });
   }
 
@@ -757,60 +865,875 @@ document.addEventListener("DOMContentLoaded", () => {
         const fmt = (data.format || "standard").charAt(0).toUpperCase() + (data.format || "standard").slice(1);
         const fetchedAt = data.fetchedAt || "?";
 
-        let html = "";
-        html += `<p class="meta">Format: <strong>${fmt}</strong> · Quelle: MTGGoldfish · Abgerufen: ${fetchedAt}</p>`;
+        clearChildren(metaContent);
+        const fragment = document.createDocumentFragment();
+
+        // Format info line: "Format: **Standard** · Quelle: MTGGoldfish · Abgerufen: ..."
+        const fmtP = metaP("Format: ");
+        fmtP.appendChild(strong(fmt));
+        fmtP.appendChild(document.createTextNode(" · Quelle: MTGGoldfish · Abgerufen: " + fetchedAt));
+        fragment.appendChild(fmtP);
 
         if (warnings.length > 0) {
-          html += '<div class="warning"><h3>Warnings</h3><ul>';
-          for (const w of warnings) {
-            html += `<li>${w}</li>`;
-          }
-          html += "</ul></div>";
+          const warnDiv = el("div", { className: "warning" });
+          warnDiv.appendChild(el("h3", { text: "Warnings" }));
+          warnDiv.appendChild(ulFrom(warnings));
+          fragment.appendChild(warnDiv);
         }
 
         if (topDecks.length > 0) {
-          html += '<h3>Top-Decks</h3>';
-          html += '<table style="width:100%;border-collapse:collapse;">';
-          html += '<thead><tr style="text-align:left;border-bottom:1px solid var(--border);">';
-          html += '<th style="padding:.3rem;">#</th>';
-          html += '<th style="padding:.3rem;">Deck</th>';
-          html += '<th style="padding:.3rem;">Meta%</th>';
-          html += '<th style="padding:.3rem;">Decks</th>';
-          html += '<th style="padding:.3rem;">Top-Karten</th>';
-          html += "</tr></thead><tbody>";
+          fragment.appendChild(el("h3", { text: "Top-Decks" }));
+          const table = el("table", { style: "width:100%;border-collapse:collapse;" });
+
+          // thead
+          const thead = el("thead");
+          const headRow = el("tr", { style: "text-align:left;border-bottom:1px solid var(--border);" });
+          for (const hdr of ["#", "Deck", "Meta%", "Decks", "Top-Karten"]) {
+            headRow.appendChild(el("th", { style: "padding:.3rem;", text: hdr }));
+          }
+          thead.appendChild(headRow);
+          table.appendChild(thead);
+
+          // tbody
+          const tbody = el("tbody");
           topDecks.forEach((deck, i) => {
             const cards = (deck.topCards || []).slice(0, 3).join(", ");
-            const colors = deck.colors ? ` <span style="font-size:.8rem;color:var(--text-dim);">(${deck.colors})</span>` : "";
-            html += '<tr style="border-bottom:1px solid var(--border);">';
-            html += `<td style="padding:.3rem;">${i + 1}</td>`;
-            html += `<td style="padding:.3rem;"><strong>${deck.name}</strong>${colors}</td>`;
-            html += `<td style="padding:.3rem;">${deck.metaShare.toFixed(1)}%</td>`;
-            html += `<td style="padding:.3rem;">${deck.deckCount}</td>`;
-            html += `<td style="padding:.3rem;font-size:.85rem;">${cards}</td>`;
-            html += "</tr>";
+            const row = el("tr", { style: "border-bottom:1px solid var(--border);" });
+
+            row.appendChild(el("td", { style: "padding:.3rem;", text: String(i + 1) }));
+
+            const deckTd = el("td", { style: "padding:.3rem;" });
+            deckTd.appendChild(strong(deck.name));
+            if (deck.colors) {
+              deckTd.appendChild(document.createTextNode(" "));
+              deckTd.appendChild(el("span", {
+                style: "font-size:.8rem;color:var(--text-dim);",
+                text: "(" + deck.colors + ")",
+              }));
+            }
+            row.appendChild(deckTd);
+
+            row.appendChild(el("td", { style: "padding:.3rem;", text: deck.metaShare.toFixed(1) + "%" }));
+            row.appendChild(el("td", { style: "padding:.3rem;", text: String(deck.deckCount) }));
+            row.appendChild(el("td", { style: "padding:.3rem;font-size:.85rem;", text: cards }));
+
+            tbody.appendChild(row);
           });
-          html += "</tbody></table>";
+          table.appendChild(tbody);
+          fragment.appendChild(table);
         }
 
         if (topCards.length > 0) {
-          html += '<h3>Häufigste Karten</h3>';
-          html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">';
+          fragment.appendChild(el("h3", { text: "Häufigste Karten" }));
+          const grid = el("div", {
+            style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;",
+          });
           for (const card of topCards.slice(0, 15)) {
-            html += `<div style="padding:.5rem;border:1px solid var(--border);border-radius:6px;">`;
-            html += `<strong>${card.name}</strong><br><span class="meta">${card.decks} Decks</span>`;
-            html += "</div>";
+            const cardDiv = el("div", {
+              style: "padding:.5rem;border:1px solid var(--border);border-radius:6px;",
+            });
+            cardDiv.appendChild(strong(card.name));
+            cardDiv.appendChild(el("br"));
+            cardDiv.appendChild(el("span", { className: "meta", text: card.decks + " Decks" }));
+            grid.appendChild(cardDiv);
           }
-          html += "</div>";
+          fragment.appendChild(grid);
         }
 
-        if (!html) {
-          html = '<p class="meta">Keine Meta-Daten verfügbar.</p>';
+        if (!fragment.hasChildNodes()) {
+          fragment.appendChild(metaP("Keine Meta-Daten verfügbar."));
         }
-
-        metaContent.innerHTML = html;
+        metaContent.appendChild(fragment);
       })
       .catch((err) => {
-        metaContent.innerHTML = `<p class="meta">Meta-Daten nicht verfügbar — ${err.message}.</p>`;
+        clearChildren(metaContent);
+        metaContent.appendChild(metaP("Meta-Daten nicht verfügbar — " + err.message + "."));
       });
   }
+
+  // --- New Deck Builder Form ---
+  const builderSubmit = document.getElementById("builder-submit");
+  const builderFormat = document.getElementById("builder-format");
+  const builderColorsContainer = document.getElementById("builder-colors");
+  const builderArchetype = document.getElementById("builder-archetype");
+  const builderMaxRares = document.getElementById("builder-max-rares");
+  const builderMaxMythics = document.getElementById("builder-max-mythics");
+  const builderBudget = document.getElementById("builder-budget");
+  const builderUseMeta = document.getElementById("builder-use-meta");
+  const builderStatus = document.getElementById("builder-status");
+  const builderResult = document.getElementById("builder-result");
+
+  function builderSetStatus(text, isError) {
+    if (!builderStatus) {
+      return;
+    }
+    builderStatus.textContent = text;
+    builderStatus.className = "meta" + (isError ? " error" : (text ? " success" : ""));
+  }
+
+  function renderBuilderResult(data) {
+    if (!builderResult) {
+      return;
+    }
+    clearChildren(builderResult);
+
+    // Summary block
+    const summaryBlock = el("div", { className: "builder-result-block" });
+    summaryBlock.appendChild(el("h4", { text: "Summary" }));
+    const summary = data.summary || {};
+    if (summary.deckConcept) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: "Concept: " + summary.deckConcept }));
+    }
+    if (summary.confidence) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: "Confidence: " + summary.confidence }));
+    }
+    if (Array.isArray(summary.constraints) && summary.constraints.length) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: "Constraints: " + summary.constraints.join(", ") }));
+    }
+    if (summary.note) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: summary.note }));
+    }
+    builderResult.appendChild(summaryBlock);
+
+    // Deck draft block
+    const draft = data.deckDraft || {};
+    const draftBlock = el("div", { className: "builder-result-block" });
+    draftBlock.appendChild(el("h4", { text: "Deck Draft" }));
+    const piles = [["mainboard", "Mainboard"], ["sideboard", "Sideboard"], ["commandZone", "Command Zone"]];
+    let hasCards = false;
+    for (const [key, label] of piles) {
+      const cards = draft[key];
+      if (Array.isArray(cards) && cards.length) {
+        hasCards = true;
+        draftBlock.appendChild(renderCardSection(label, cards));
+      }
+    }
+    if (!hasCards) {
+      draftBlock.appendChild(metaP("No cards in draft yet (stub mode)."));
+    }
+    builderResult.appendChild(draftBlock);
+
+    // Suggestions block
+    if (Array.isArray(data.suggestions) && data.suggestions.length) {
+      const sugBlock = el("div", { className: "builder-result-block" });
+      sugBlock.appendChild(el("h4", { text: "Suggestions" }));
+      const items = data.suggestions.map((s) => {
+        if (typeof s === "string") {
+          return s;
+        }
+        return s.text || s.description || JSON.stringify(s);
+      });
+      sugBlock.appendChild(ulFrom(items));
+      builderResult.appendChild(sugBlock);
+    }
+
+    // Warnings block
+    if (Array.isArray(data.warnings) && data.warnings.length) {
+      const warnBlock = el("div", { className: "builder-result-block" });
+      warnBlock.appendChild(el("h4", { text: "Warnings" }));
+      warnBlock.appendChild(ulFrom(data.warnings));
+      builderResult.appendChild(warnBlock);
+    }
+
+    // Schema badge
+    if (data.schema) {
+      builderResult.appendChild(el("p", { className: "meta", text: "Schema: " + data.schema }));
+    }
+  }
+
+  if (builderSubmit) {
+    builderSubmit.addEventListener("click", () => {
+      if (!builderFormat || !builderFormat.value) {
+        builderSetStatus("Bitte Format wählen.", true);
+        return;
+      }
+
+      // Collect checked colors
+      const colors = [];
+      if (builderColorsContainer) {
+        const checkboxes = builderColorsContainer.querySelectorAll('input[type="checkbox"]:checked');
+        for (const cb of checkboxes) {
+          colors.push(cb.value);
+        }
+      }
+
+      // Build request body
+      const requestBody = {
+        format: builderFormat.value,
+        colors: colors,
+        archetype: builderArchetype ? builderArchetype.value.trim() : "",
+        maxRares: builderMaxRares ? parseInt(builderMaxRares.value, 10) : undefined,
+        budgetMode: builderBudget ? builderBudget.value : "owned-first",
+        useMeta: builderUseMeta ? builderUseMeta.checked : true,
+      };
+
+      // Optional maxMythics — only send if filled
+      if (builderMaxMythics && builderMaxMythics.value.trim()) {
+        const mm = parseInt(builderMaxMythics.value, 10);
+        if (!isNaN(mm)) {
+          requestBody.maxMythics = mm;
+        }
+      }
+
+      // Remove undefined fields
+      if (requestBody.maxRares === undefined || isNaN(requestBody.maxRares)) {
+        delete requestBody.maxRares;
+      }
+      if (!requestBody.archetype) {
+        delete requestBody.archetype;
+      }
+
+      builderSetStatus("Sende Anfrage...", false);
+      builderSubmit.disabled = true;
+
+      fetch("/api/advisor/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          builderSubmit.disabled = false;
+          if (status !== 200) {
+            const errMsg = data.message || data.error || "Unknown error";
+            builderSetStatus("Fehler: " + errMsg, true);
+            return;
+          }
+          builderSetStatus("Entwurf erhalten.", false);
+          renderBuilderResult(data);
+        })
+        .catch((err) => {
+          builderSubmit.disabled = false;
+          builderSetStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
+
+  // --- Collection Browser (T9) ---
+  // Fetches /api/collection/enriched and applies client-side filters:
+  // name/text search, type, color, rarity, max CMC.
+
+  const cbSearch = document.getElementById("cb-search");
+  const cbType = document.getElementById("cb-type");
+  const cbColor = document.getElementById("cb-color");
+  const cbRarity = document.getElementById("cb-rarity");
+  const cbCmc = document.getElementById("cb-cmc");
+  const cbReset = document.getElementById("cb-reset");
+  const cbStatus = document.getElementById("cb-status");
+  const cbResults = document.getElementById("collection-browser-results");
+  const cbLoading = document.getElementById("cb-loading");
+
+  let cbAllCards = [];       // full enriched collection array
+  let cbDataLoaded = false;
+
+  // Color display map: Scryfall color codes → display labels
+  const CB_COLOR_LABELS = { W: "W", U: "U", B: "B", R: "R", G: "G", C: "C" };
+
+  function cbLoadData() {
+    if (cbDataLoaded) return;
+    fetch("/api/collection/enriched")
+      .then((resp) => resp.json())
+      .then((data) => {
+        if (data.error) {
+          if (cbLoading) cbLoading.textContent = data.message || data.error;
+          if (cbStatus) cbStatus.textContent = "Fehler: " + (data.message || data.error);
+          return;
+        }
+        cbAllCards = data.cards || [];
+        cbDataLoaded = true;
+        if (cbLoading) cbLoading.remove();
+        if (cbStatus) {
+          const enriched = data.enriched_count || 0;
+          const total = data.total_unique || cbAllCards.length;
+          cbStatus.textContent = `${total} Karten (${enriched} mit Metadaten), ${data.total_copies || 0} Exemplare.`;
+        }
+        cbApplyFilter();
+      })
+      .catch((err) => {
+        if (cbLoading) cbLoading.textContent = "Fehler beim Laden: " + err.message;
+        if (cbStatus) cbStatus.textContent = "Fehler: " + err.message;
+      });
+  }
+
+  function cbApplyFilter() {
+    if (!cbDataLoaded || !cbResults) return;
+
+    const query = (cbSearch?.value ?? "").trim().toLowerCase();
+    const typeFilter = (cbType?.value ?? "").toLowerCase();
+    const colorFilter = (cbColor?.value ?? "").toUpperCase();
+    const rarityFilter = (cbRarity?.value ?? "").toLowerCase();
+    const cmcMax = cbCmc?.value ? parseInt(cbCmc.value, 10) : null;
+
+    const filtered = cbAllCards.filter((card) => {
+      // Name / oracle_text search (case-insensitive substring)
+      if (query) {
+        const name = (card.name || "").toLowerCase();
+        const text = (card.oracle_text || "").toLowerCase();
+        if (!name.includes(query) && !text.includes(query)) return false;
+      }
+
+      // Type filter (substring match in type_line, case-insensitive)
+      if (typeFilter) {
+        const typeLine = (card.type_line || "").toLowerCase();
+        if (!typeLine.includes(typeFilter)) return false;
+      }
+
+      // Color filter: card must include the selected color
+      // C = colorless → colors array is empty or ["C"]
+      if (colorFilter) {
+        const colors = card.colors || [];
+        if (colorFilter === "C") {
+          if (colors.length > 0 && colors[0] !== "C") return false;
+        } else {
+          if (!colors.includes(colorFilter)) return false;
+        }
+      }
+
+      // Rarity filter (exact match)
+      if (rarityFilter) {
+        if ((card.rarity || "unknown") !== rarityFilter) return false;
+      }
+
+      // CMC max filter
+      if (cmcMax !== null && !isNaN(cmcMax)) {
+        const cmc = card.cmc || 0;
+        if (cmc > cmcMax) return false;
+      }
+
+      return true;
+    });
+
+    cbRenderResults(filtered);
+  }
+
+  function cbRenderResults(cards) {
+    if (!cbResults) return;
+    // Clear previous results
+    cbResults.textContent = "";
+
+    if (cards.length === 0) {
+      const noResults = el("p", { className: "cb-no-results", text: "Keine Karten entsprechen den Filtern." });
+      cbResults.appendChild(noResults);
+      if (cbStatus) {
+        cbStatus.textContent = "0 Karten sichtbar.";
+      }
+      return;
+    }
+
+    // Limit to first 200 results for performance
+    const displayCards = cards.slice(0, 200);
+    if (cards.length > 200) {
+      const note = el("p", {
+        className: "meta",
+        text: `Zeige 200 von ${cards.length} Treffern. Verfeinere die Filter für mehr.`,
+      });
+      cbResults.appendChild(note);
+    }
+
+    displayCards.forEach((card) => {
+      const cardDiv = el("div", { className: "cb-card" });
+
+      // Card image (thumbnail)
+      if (card.image_uri) {
+        const imgWrap = el("div", { className: "cb-card-img" });
+        const img = el("img");
+        img.src = card.image_uri;
+        img.alt = card.name || "Card";
+        img.loading = "lazy";
+        imgWrap.appendChild(img);
+        cardDiv.appendChild(imgWrap);
+      }
+
+      // Card info
+      const infoDiv = el("div", { className: "cb-card-info" });
+
+      // Name
+      infoDiv.appendChild(el("div", { className: "cb-card-name", text: card.name || "Unknown" }));
+
+      // Meta line: count, set, rarity, cmc, colors
+      const metaParts = [];
+
+      // Count
+      metaParts.push(`${card.count}×`);
+
+      // Colors (badges)
+      const colors = card.colors || [];
+      if (colors.length > 0) {
+        const colorsSpan = el("span");
+        colors.forEach((c) => {
+          const badge = el("span", {
+            className: `cb-mana-badge cb-mana-${c}`,
+            text: CB_COLOR_LABELS[c] || c,
+          });
+          colorsSpan.appendChild(badge);
+        });
+        metaParts.push(colorsSpan);
+      } else {
+        const badge = el("span", { className: "cb-mana-badge cb-mana-C", text: "C" });
+        metaParts.push(badge);
+      }
+
+      // CMC
+      if (card.cmc !== undefined && card.cmc !== 0) {
+        metaParts.push(`CMC ${card.cmc}`);
+      }
+
+      // Type line
+      if (card.type_line) {
+        metaParts.push(card.type_line);
+      }
+
+      // Rarity
+      if (card.rarity && card.rarity !== "unknown") {
+        const raritySpan = el("span", {
+          className: `cb-rarity-${card.rarity}`,
+          text: card.rarity,
+        });
+        metaParts.push(raritySpan);
+      }
+
+      // Set
+      if (card.set) {
+        metaParts.push(card.set);
+      }
+
+      const metaDiv = el("div", { className: "cb-card-meta" });
+      metaParts.forEach((part) => {
+        if (typeof part === "string") {
+          metaDiv.appendChild(document.createTextNode(part + " · "));
+        } else {
+          metaDiv.appendChild(part);
+          metaDiv.appendChild(document.createTextNode(" · "));
+        }
+      });
+      // Remove trailing separator
+      if (metaDiv.lastChild && metaDiv.lastChild.nodeType === Node.TEXT_NODE) {
+        metaDiv.removeChild(metaDiv.lastChild);
+      }
+      infoDiv.appendChild(metaDiv);
+
+      // Oracle text (truncated)
+      if (card.oracle_text) {
+        infoDiv.appendChild(el("div", { className: "cb-card-text", text: card.oracle_text }));
+      }
+
+      cardDiv.appendChild(infoDiv);
+      cbResults.appendChild(cardDiv);
+    });
+
+    if (cbStatus) {
+      const shown = Math.min(cards.length, 200);
+      cbStatus.textContent = `${shown} von ${cbAllCards.length} Karten sichtbar.`;
+    }
+  }
+
+  function cbResetFilters() {
+    if (cbSearch) cbSearch.value = "";
+    if (cbType) cbType.value = "";
+    if (cbColor) cbColor.value = "";
+    if (cbRarity) cbRarity.value = "";
+    if (cbCmc) cbCmc.value = "";
+    cbApplyFilter();
+  }
+
+  // Event listeners
+  if (cbSearch) cbSearch.addEventListener("input", cbApplyFilter);
+  if (cbType) cbType.addEventListener("change", cbApplyFilter);
+  if (cbColor) cbColor.addEventListener("change", cbApplyFilter);
+  if (cbRarity) cbRarity.addEventListener("change", cbApplyFilter);
+  if (cbCmc) cbCmc.addEventListener("input", cbApplyFilter);
+  if (cbReset) cbReset.addEventListener("click", cbResetFilters);
+
+  // --- Advisor Result View (T8): structured analysis renderer ---
+
+  /**
+   * Renders a structured advisor analysis response into blocks.
+   * Blocks: Summary, Core Cards, Missing Cards, Craft Priorities, Cuts,
+   *         Mana Curve, Risk Assessment.
+   * Falls back to a <pre> with raw text if no structured data is present.
+   *
+   * @param {Object} data — the JSON response from /api/advisor/analyze
+   * @param {HTMLElement} container — the DOM element to render into
+   */
+  function renderAdvisorResult(data, container) {
+    if (!container) return;
+    container.replaceChildren();
+    container.style.display = "block";
+
+    var structured = data.structured;
+    var hasStructured = structured && Object.keys(structured).length > 0;
+
+    if (!hasStructured) {
+      // Fallback: raw text in <pre>
+      var heading = el("h4", { text: "Analyse" });
+      var pre = document.createElement("pre");
+      pre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:30rem;overflow-y:auto;";
+      pre.textContent = data.analysis || "";
+      container.appendChild(heading);
+      container.appendChild(pre);
+      return;
+    }
+
+    var wrapper = el("div", { className: "advisor-result" });
+
+    // --- Summary ---
+    if (structured.summary) {
+      var s = structured.summary;
+      var block = el("div", { className: "advisor-result-block" });
+      block.appendChild(el("h4", { text: "Summary" }));
+      var sumDiv = el("div", { className: "advisor-result-summary" });
+
+      if (s.topPriority) {
+        sumDiv.appendChild(el("span", { className: "top-priority", text: s.topPriority }));
+      }
+      if (s.confidence) {
+        var conf = s.confidence.toLowerCase();
+        var confClass = "confidence-badge " + (["high", "medium", "low"].includes(conf) ? conf : "low");
+        sumDiv.appendChild(el("span", { className: confClass, text: s.confidence }));
+      }
+      if (s.notes) {
+        sumDiv.appendChild(el("p", { text: s.notes }));
+      }
+      block.appendChild(sumDiv);
+      wrapper.appendChild(block);
+    }
+
+    // --- Core Cards ---
+    if (structured.coreCards && structured.coreCards.length > 0) {
+      var coreBlock = el("div", { className: "advisor-result-block" });
+      coreBlock.appendChild(el("h4", { text: "Core Cards" }));
+      var coreList = el("ul", { className: "advisor-result-card-list" });
+      structured.coreCards.forEach(function (card) {
+        var li = el("li");
+        li.appendChild(el("span", { className: "card-count", text: card.count + "x" }));
+        li.appendChild(el("span", { className: "card-name", text: card.name }));
+        if (card.role) {
+          li.appendChild(el("span", { className: "card-role", text: "— " + card.role }));
+        }
+        coreList.appendChild(li);
+      });
+      coreBlock.appendChild(coreList);
+      wrapper.appendChild(coreBlock);
+    }
+
+    // --- Missing Cards ---
+    if (structured.missingCards && structured.missingCards.length > 0) {
+      var missBlock = el("div", { className: "advisor-result-block" });
+      missBlock.appendChild(el("h4", { text: "Missing Cards" }));
+      var missList = el("ul", { className: "advisor-result-card-list" });
+      structured.missingCards.forEach(function (card) {
+        var li = el("li");
+        li.appendChild(el("span", { className: "card-count", text: card.count + "x" }));
+        li.appendChild(el("span", { className: "card-name", text: card.name }));
+        if (card.rarity && card.rarity !== "?") {
+          var rarityClass = "card-rarity " + card.rarity.toLowerCase();
+          li.appendChild(el("span", { className: rarityClass, text: card.rarity }));
+        }
+        if (card.reason) {
+          li.appendChild(el("span", { className: "card-reason", text: "— " + card.reason }));
+        }
+        missList.appendChild(li);
+      });
+      missBlock.appendChild(missList);
+      wrapper.appendChild(missBlock);
+    }
+
+    // --- Craft Priorities ---
+    if (structured.craftPriorities && structured.craftPriorities.length > 0) {
+      var craftBlock = el("div", { className: "advisor-result-block" });
+      craftBlock.appendChild(el("h4", { text: "Craft Priorities" }));
+      structured.craftPriorities.forEach(function (group) {
+        var groupDiv = el("div", { className: "advisor-craft-group" });
+        groupDiv.appendChild(el("h5", { text: group.reason }));
+        if (group.cards && group.cards.length > 0) {
+          var cardList = el("ul", { className: "advisor-result-card-list" });
+          group.cards.forEach(function (card) {
+            var li = el("li");
+            li.appendChild(el("span", { className: "card-count", text: card.count + "x" }));
+            li.appendChild(el("span", { className: "card-name", text: card.name }));
+            if (card.rarity && card.rarity !== "?") {
+              var rarityClass = "card-rarity " + card.rarity.toLowerCase();
+              li.appendChild(el("span", { className: rarityClass, text: card.rarity }));
+            }
+            if (card.forDecks && card.forDecks.length > 0) {
+              li.appendChild(el("span", { className: "for-decks", text: "für " + card.forDecks.join(", ") }));
+            }
+            cardList.appendChild(li);
+          });
+          groupDiv.appendChild(cardList);
+        }
+        craftBlock.appendChild(groupDiv);
+      });
+      wrapper.appendChild(craftBlock);
+    }
+
+    // --- Cuts ---
+    if (structured.cuts && structured.cuts.length > 0) {
+      var cutsBlock = el("div", { className: "advisor-result-block" });
+      cutsBlock.appendChild(el("h4", { text: "Cuts" }));
+      var cutsList = el("ul", { className: "advisor-result-card-list advisor-cuts-list" });
+      structured.cuts.forEach(function (card) {
+        var li = el("li");
+        li.appendChild(el("span", { className: "card-count", text: "-" + card.count }));
+        li.appendChild(el("span", { className: "card-name", text: card.name }));
+        if (card.reason) {
+          li.appendChild(el("span", { className: "card-reason", text: "— " + card.reason }));
+        }
+        cutsList.appendChild(li);
+      });
+      cutsBlock.appendChild(cutsList);
+      wrapper.appendChild(cutsBlock);
+    }
+
+    // --- Mana Curve ---
+    if (structured.manaCurve) {
+      var curve = structured.manaCurve;
+      var curveBlock = el("div", { className: "advisor-result-block" });
+      curveBlock.appendChild(el("h4", { text: "Mana Curve" }));
+      var curveBars = el("div", { className: "advisor-mana-curve" });
+
+      var maxCount = 0;
+      var cmcKeys = ["cmc0", "cmc1", "cmc2", "cmc3", "cmc4", "cmc5", "cmc6plus"];
+      var cmcLabels = ["0", "1", "2", "3", "4", "5", "6+"];
+      for (var i = 0; i < cmcKeys.length; i++) {
+        maxCount = Math.max(maxCount, curve[cmcKeys[i]] || 0);
+      }
+      if (maxCount === 0) maxCount = 1;
+
+      for (var j = 0; j < cmcKeys.length; j++) {
+        var count = curve[cmcKeys[j]] || 0;
+        var heightPct = Math.round((count / maxCount) * 100);
+        var barDiv = el("div", { className: "advisor-mana-curve-bar" });
+        var bar = el("div", { className: "bar" });
+        bar.style.height = heightPct + "%";
+        barDiv.appendChild(bar);
+        barDiv.appendChild(el("span", { className: "count", text: String(count) }));
+        barDiv.appendChild(el("span", { className: "label", text: cmcLabels[j] }));
+        curveBars.appendChild(barDiv);
+      }
+      curveBlock.appendChild(curveBars);
+      wrapper.appendChild(curveBlock);
+    }
+
+    // --- Risk Assessment ---
+    if (structured.riskAssessment) {
+      var risk = structured.riskAssessment;
+      var riskBlock = el("div", { className: "advisor-result-block" });
+      riskBlock.appendChild(el("h4", { text: "Risk Assessment" }));
+      var riskGrid = el("div", { className: "advisor-risk-grid" });
+
+      var riskLabels = {
+        lands: "Lands",
+        curve: "Mana Curve",
+        synergy: "Synergy",
+        sideboard: "Sideboard",
+      };
+      Object.keys(riskLabels).forEach(function (key) {
+        if (!risk[key]) return;
+        var item = el("div", { className: "advisor-risk-item" });
+        item.appendChild(el("div", { className: "risk-label", text: riskLabels[key] }));
+        var valueText = risk[key];
+        var valueClass = "risk-value";
+        var lower = valueText.toLowerCase();
+        if (lower.indexOf("good") >= 0 || lower.indexOf("ok") >= 0 || lower.indexOf("solid") >= 0) {
+          valueClass += " good";
+        } else if (lower.indexOf("risk") >= 0 || lower.indexOf("low") >= 0 || lower.indexOf("issue") >= 0) {
+          valueClass += " warning";
+        } else if (lower.indexOf("critical") >= 0 || lower.indexOf("bad") >= 0 || lower.indexOf("problem") >= 0) {
+          valueClass += " critical";
+        }
+        item.appendChild(el("div", { className: valueClass, text: valueText }));
+        riskGrid.appendChild(item);
+      });
+      riskBlock.appendChild(riskGrid);
+      wrapper.appendChild(riskBlock);
+    }
+
+    // --- Raw text (collapsible, always present as fallback) ---
+    if (data.analysis && data.analysis.trim()) {
+      var rawBlock = el("div", { className: "advisor-result-block" });
+      var rawHeading = el("h4", { text: "Raw Analysis Text" });
+      rawBlock.appendChild(rawHeading);
+      var rawPre = document.createElement("pre");
+      rawPre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:20rem;overflow-y:auto;font-size:.82rem;";
+      rawPre.textContent = data.analysis;
+      rawBlock.appendChild(rawPre);
+      wrapper.appendChild(rawBlock);
+    }
+
+    container.appendChild(wrapper);
+  }
+
+  // --- Quick Actions (T10): Export, Analyze, Improve ---
+
+  function setActionStatus(msg, isError) {
+    if (!deckActionStatus) return;
+    deckActionStatus.textContent = msg;
+    deckActionStatus.className = "action-status" + (isError ? " error" : " ok");
+  }
+
+  function getDeckIdentifier() {
+    if (!currentDeckPayload) return null;
+    const deckKey = currentDeckPayload.deckKey || currentDeckPayload.deckId || "";
+    const deckId = currentDeckPayload.deckId || "";
+    return { deckKey: String(deckKey), deckId: String(deckId) };
+  }
+
+  function disableActions(disabled) {
+    if (btnExportArena) btnExportArena.disabled = disabled;
+    if (btnAnalyze) btnAnalyze.disabled = disabled;
+    if (btnImprove) btnImprove.disabled = disabled;
+  }
+
+  // Export: POST /api/advisor/export → download Arena text file
+  if (btnExportArena) {
+    btnExportArena.addEventListener("click", () => {
+      if (!currentDeckPayload) {
+        setActionStatus("Kein Deck ausgewählt.", true);
+        return;
+      }
+      const id = getDeckIdentifier();
+      if (!id) {
+        setActionStatus("Kein Deck-Identifier verfügbar.", true);
+        return;
+      }
+      disableActions(true);
+      setActionStatus("Exportiere...", false);
+
+      fetch("/api/advisor/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckKey: id.deckKey, deckId: id.deckId }),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          disableActions(false);
+          if (status !== 200) {
+            setActionStatus("Fehler: " + (data.message || data.error || "Unknown"), true);
+            return;
+          }
+          // Download as .txt file
+          const text = data.arenaText || "";
+          const deckName = (data.deckName || "deck").replace(/[^a-zA-Z0-9_-]/g, "_");
+          const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = deckName + "_arena.txt";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setActionStatus("Exportiert (" + (data.lineCount || 0) + " Zeilen).", false);
+        })
+        .catch((err) => {
+          disableActions(false);
+          setActionStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
+
+  // Analyze: POST /api/advisor/analyze → render analysis in panel
+  if (btnAnalyze) {
+    btnAnalyze.addEventListener("click", () => {
+      if (!currentDeckPayload) {
+        setActionStatus("Kein Deck ausgewählt.", true);
+        return;
+      }
+      const id = getDeckIdentifier();
+      if (!id) {
+        setActionStatus("Kein Deck-Identifier verfügbar.", true);
+        return;
+      }
+      disableActions(true);
+      setActionStatus("Analysiere (LLM)...", false);
+      if (deckAnalyzeResult) {
+        deckAnalyzeResult.style.display = "none";
+        deckAnalyzeResult.replaceChildren();
+      }
+
+      fetch("/api/advisor/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckKey: id.deckKey, deckId: id.deckId }),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          disableActions(false);
+          if (status !== 200) {
+            setActionStatus("Fehler: " + (data.message || data.error || "Unknown"), true);
+            return;
+          }
+          if (data.error) {
+            setActionStatus("LLM-Fehler: " + data.error, true);
+            return;
+          }
+          setActionStatus("Analyse fertig (" + (data.model || "?") + ").", false);
+          if (deckAnalyzeResult) {
+            renderAdvisorResult(data, deckAnalyzeResult);
+          }
+        })
+        .catch((err) => {
+          disableActions(false);
+          setActionStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
+
+  // Improve: POST /api/advisor/improve → render improvement suggestions
+  if (btnImprove) {
+    btnImprove.addEventListener("click", () => {
+      if (!currentDeckPayload) {
+        setActionStatus("Kein Deck ausgewählt.", true);
+        return;
+      }
+      const id = getDeckIdentifier();
+      if (!id) {
+        setActionStatus("Kein Deck-Identifier verfügbar.", true);
+        return;
+      }
+      disableActions(true);
+      setActionStatus("Optimiere (LLM)...", false);
+      if (deckImproveResult) {
+        deckImproveResult.style.display = "none";
+        deckImproveResult.replaceChildren();
+      }
+
+      fetch("/api/advisor/improve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckKey: id.deckKey, deckId: id.deckId }),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          disableActions(false);
+          if (status !== 200) {
+            setActionStatus("Fehler: " + (data.message || data.error || "Unknown"), true);
+            return;
+          }
+          if (data.error) {
+            setActionStatus("LLM-Fehler: " + data.error, true);
+            return;
+          }
+          setActionStatus("Verbesserungen fertig (" + (data.model || "?") + ").", false);
+          if (deckImproveResult) {
+            deckImproveResult.style.display = "block";
+            deckImproveResult.replaceChildren();
+            const heading = el("h4", { text: "Verbesserungsvorschläge" });
+            const pre = document.createElement("pre");
+            pre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:30rem;overflow-y:auto;";
+            pre.textContent = data.improvements || "";
+            deckImproveResult.appendChild(heading);
+            deckImproveResult.appendChild(pre);
+          }
+        })
+        .catch((err) => {
+          disableActions(false);
+          setActionStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
+
+  // Auto-load on page ready
+  cbLoadData();
 });

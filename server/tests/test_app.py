@@ -113,6 +113,40 @@ def test_dashboard_script_is_loaded_from_asset() -> None:
     assert "innerHTML" not in js
 
 
+def test_dashboard_js_has_deck_search_filter() -> None:
+    """dashboard.js must wire up client-side deck-name search."""
+    js = _dashboard_js()
+
+    assert "deck-search" in js
+    assert "deckSearch" in js
+    assert "hidden-by-search" in js
+    assert 'addEventListener("input"' in js
+
+
+def test_render_index_includes_deck_search_input() -> None:
+    """The rendered HTML must contain the deck search text field."""
+    collection = {
+        "source": "memory-scan",
+        "cards": {"100": 2, "200": 1},
+        "diagnostics": {"completeness": {"cards": "complete"}, "warnings": []},
+    }
+    run_report = {"diagnostics": {"completeness": {"cards": "complete"}, "warnings": []}}
+    deck = {"name": "Test", "mainboard": [{"count": 4}], "sideboard": [], "diagnostics": {"warnings": []}}
+    advisor_result = {"summary": {}, "recommendations": [], "warnings": []}
+    decks = {
+        "schema": "decks.v1",
+        "decks": [
+            {"name": "Control", "deckId": "1", "deckKey": "1", "isPrecon": False},
+            {"name": "Aggro Red", "deckId": "2", "deckKey": "2", "isPrecon": True},
+        ],
+    }
+    html = _render_index(collection, run_report, deck, advisor_result, decks, LLMConfig())
+
+    assert 'id="deck-search"' in html
+    assert "Deck suchen" in html
+    assert "deck-search" in html
+
+
 def test_dashboard_js_has_intersection_observer() -> None:
     """Card thumbnails are lazy-loaded via IntersectionObserver."""
     js = _dashboard_js()
@@ -602,5 +636,370 @@ def test_no_auth_allows_all_requests() -> None:
         try:
             resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/collection", timeout=5)
             assert resp.status == 200
+        finally:
+            server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# T4: POST /api/advisor/build Stub tests
+# ---------------------------------------------------------------------------
+
+def _post_json(port: int, path: str, body: dict) -> tuple[int, dict]:
+    """Helper: POST JSON to the test server, return (status_code, response_json)."""
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+        return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def test_advisor_build_stub_returns_v1_schema() -> None:
+    """POST /api/advisor/build with valid request returns advisor-build.v1 schema."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "standard",
+                "colors": ["r", "g"],
+                "archetype": "etali",
+                "maxRares": 8,
+                "maxMythics": 2,
+                "budgetMode": "owned-first",
+                "useMeta": True,
+            })
+            assert status == 200
+            assert data["schema"] == "advisor-build.v1"
+            assert "summary" in data
+            assert "deckDraft" in data
+            assert "suggestions" in data
+            assert "warnings" in data
+            assert data["summary"]["deckConcept"] == "etali"
+            assert data["summary"]["confidence"] == "low"
+            assert "standard" in data["summary"]["constraints"]
+            assert "maxRares=8" in data["summary"]["constraints"]
+            assert "maxMythics=2" in data["summary"]["constraints"]
+            assert data["deckDraft"]["mainboard"] == []
+            assert data["deckDraft"]["sideboard"] == []
+            assert data["deckDraft"]["commandZone"] == []
+            assert len(data["warnings"]) > 0
+            assert any("stub" in w.lower() for w in data["warnings"])
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_minimal_request() -> None:
+    """POST /api/advisor/build with only format succeeds."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "historic",
+            })
+            assert status == 200
+            assert data["schema"] == "advisor-build.v1"
+            assert "historic" in data["summary"]["constraints"]
+            # No colors → concept is derived from format
+            assert "historic" in data["summary"]["deckConcept"].lower()
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_missing_format_returns_400() -> None:
+    """POST /api/advisor/build without format returns 400."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "colors": ["r"],
+            })
+            assert status == 400
+            assert data["error"] == "missing_field"
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_invalid_format_returns_400() -> None:
+    """POST /api/advisor/build with invalid format returns 400."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "kitchen-sink",
+            })
+            assert status == 400
+            assert data["error"] == "invalid_format"
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_invalid_colors_returns_400() -> None:
+    """POST /api/advisor/build with invalid color code returns 400."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "standard",
+                "colors": ["x"],
+            })
+            assert status == 400
+            assert data["error"] == "invalid_colors"
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_negative_max_rares_returns_400() -> None:
+    """POST /api/advisor/build with negative maxRares returns 400."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "standard",
+                "maxRares": -1,
+            })
+            assert status == 400
+            assert data["error"] == "invalid_maxRares"
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_invalid_budget_mode_returns_400() -> None:
+    """POST /api/advisor/build with invalid budgetMode returns 400."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "standard",
+                "budgetMode": "free-money",
+            })
+            assert status == 400
+            assert data["error"] == "invalid_budgetMode"
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_invalid_json_returns_400() -> None:
+    """POST /api/advisor/build with invalid JSON body returns 400."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/advisor/build",
+                data=b"not-json{",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                assert False, "Should have raised 400"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+                body = json.loads(e.read().decode("utf-8"))
+                assert body["error"] == "invalid_json"
+        finally:
+            server.shutdown()
+
+
+def test_advisor_build_stub_colors_in_constraints() -> None:
+    """POST /api/advisor/build includes color constraint in summary."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "standard",
+                "colors": ["r", "g", "b"],
+            })
+            assert status == 200
+            constraints = data["summary"]["constraints"]
+            color_constraint = [c for c in constraints if c.startswith("colors=")]
+            assert len(color_constraint) == 1
+            # Colors should be sorted
+            assert color_constraint[0] == "colors=bgr"
+        finally:
+            server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# T5: New-Deck-Builder-Formular tests (HTML + JS)
+# ---------------------------------------------------------------------------
+
+def test_render_index_includes_deck_builder_section() -> None:
+    """The rendered HTML must contain the New Deck Builder section."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="deck-builder-section"' in html
+    assert "New Deck Builder" in html
+
+
+def test_render_index_includes_builder_format_dropdown() -> None:
+    """HTML must contain the format dropdown with all format options."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-format"' in html
+    assert '<option value="standard">Standard</option>' in html
+    assert '<option value="historic">Historic</option>' in html
+    assert '<option value="explorer">Explorer</option>' in html
+    assert '<option value="alchemy">Alchemy</option>' in html
+
+
+def test_render_index_includes_builder_color_checkboxes() -> None:
+    """HTML must contain color checkboxes for all six colors."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-colors"' in html
+    assert 'value="w"' in html
+    assert 'value="u"' in html
+    assert 'value="b"' in html
+    assert 'value="r"' in html
+    assert 'value="g"' in html
+    assert 'value="c"' in html
+
+
+def test_render_index_includes_builder_archetype_input() -> None:
+    """HTML must contain the archetype text input."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-archetype"' in html
+
+
+def test_render_index_includes_builder_max_rares_input() -> None:
+    """HTML must contain the maxRares number input."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-max-rares"' in html
+    assert 'type="number"' in html
+    assert 'min="0"' in html
+
+
+def test_render_index_includes_builder_max_mythics_input() -> None:
+    """HTML must contain the optional maxMythics number input."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-max-mythics"' in html
+
+
+def test_render_index_includes_builder_budget_dropdown() -> None:
+    """HTML must contain the budget mode dropdown."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-budget"' in html
+    assert 'value="owned-first"' in html
+    assert 'value="budget"' in html
+    assert 'value="no-limit"' in html
+
+
+def test_render_index_includes_builder_use_meta_checkbox() -> None:
+    """HTML must contain the useMeta checkbox."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-use-meta"' in html
+
+
+def test_render_index_includes_builder_submit_button() -> None:
+    """HTML must contain the submit button for the builder form."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-submit"' in html
+    assert "Deck-Entwurf anfordern" in html
+
+
+def test_render_index_includes_builder_result_container() -> None:
+    """HTML must contain a result container for the builder response."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'id="builder-result"' in html
+
+
+def test_dashboard_js_has_builder_form_handler() -> None:
+    """dashboard.js must wire up the builder form submit handler."""
+    js = _dashboard_js()
+    assert "builder-submit" in js
+    assert 'getElementById("builder-submit")' in js
+    assert "addEventListener(\"click\"" in js
+    assert "/api/advisor/build" in js
+
+
+def test_dashboard_js_has_builder_result_renderer() -> None:
+    """dashboard.js must have a function to render builder results."""
+    js = _dashboard_js()
+    assert "renderBuilderResult" in js
+    assert "advisor-build.v1" not in js  # Schema name comes from server
+    assert "builder-result-block" in js
+    assert "deckDraft" in js
+
+
+def test_dashboard_js_no_innerhtml_in_builder() -> None:
+    """dashboard.js must not use innerHTML anywhere (XSS hardening)."""
+    js = _dashboard_js()
+    assert "innerHTML" not in js
+
+
+def test_dashboard_js_builder_collects_colors() -> None:
+    """dashboard.js must collect checked colors from the checkbox group."""
+    js = _dashboard_js()
+    assert "builder-colors" in js
+    assert 'checkbox' in js.lower()
+    assert "colors" in js
+
+
+def test_dashboard_js_builder_sends_post_request() -> None:
+    """dashboard.js must send a POST request with JSON body to /api/advisor/build."""
+    js = _dashboard_js()
+    assert "fetch" in js
+    assert "POST" in js
+    assert "application/json" in js
+    assert "JSON.stringify" in js
+
+
+def test_advisor_build_via_http_end_to_end() -> None:
+    """Full E2E: HTML has form → JS sends POST → server returns stub response."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create minimal data files so _render_index doesn't crash
+        (Path(tmpdir) / "collection.json").write_text('{"cards": {}}', encoding="utf-8")
+        (Path(tmpdir) / "decks.json").write_text('{"decks": []}', encoding="utf-8")
+
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            # 1. Verify HTML contains the builder form
+            resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5)
+            html_content = resp.read().decode("utf-8")
+            assert 'id="deck-builder-section"' in html_content
+            assert 'id="builder-submit"' in html_content
+
+            # 2. Verify dashboard.js contains builder logic
+            resp_js = urllib.request.urlopen(f"http://127.0.0.1:{port}/dashboard.js", timeout=5)
+            js_content = resp_js.read().decode("utf-8")
+            assert "builder-submit" in js_content
+            assert "/api/advisor/build" in js_content
+
+            # 3. POST to the build endpoint and verify response
+            status, data = _post_json(port, "/api/advisor/build", {
+                "format": "standard",
+                "colors": ["u", "b"],
+                "archetype": "control",
+                "maxRares": 4,
+                "budgetMode": "owned-first",
+                "useMeta": False,
+            })
+            assert status == 200
+            assert data["schema"] == "advisor-build.v1"
+            assert data["summary"]["deckConcept"] == "control"
+            assert data["deckDraft"]["mainboard"] == []
         finally:
             server.shutdown()
