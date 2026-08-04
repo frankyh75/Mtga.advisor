@@ -19,19 +19,18 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from scanner.helper_client import (  # noqa: E402
     DEFAULT_SOCK_PATH,
+    HelperBackend,
     HelperConnectionError,
     HelperError,
     HelperProtocolError,
     HelperStatus,
+    RemoteMemoryAdapter,
     _send_request,
     get_status,
-    helper_scan_collection,
-    helper_scan_collection_detailed,
     is_helper_available,
     ping,
     request_list_regions,
     request_read_memory,
-    request_scan,
 )
 
 
@@ -161,114 +160,9 @@ def test_get_status_not_running_when_socket_missing(tmp_path):
     assert status.running is False
 
 
-def test_request_scan_success(mock_sock_path):
-    scan_response = {
-        "status": "ok",
-        "cards": {"100": 4, "200": 1},
-        "anchor_matches": {"100": 3},
-    }
-    with MockHelperServer(mock_sock_path, {"scan": scan_response}):
-        result = request_scan(mock_sock_path, process_names=["MTGA"])
-        assert result["cards"] == {"100": 4, "200": 1}
-        assert result["status"] == "ok"
-
-
-def test_request_scan_raises_helper_error(mock_sock_path):
-    scan_response = {"error": "MTGA process not found"}
-    with MockHelperServer(mock_sock_path, {"scan": scan_response}):
-        with pytest.raises(HelperError, match="MTGA process not found"):
-            request_scan(mock_sock_path)
-
-
-def test_request_scan_raises_protocol_error_when_no_cards(mock_sock_path):
-    scan_response = {"status": "ok"}
-    with MockHelperServer(mock_sock_path, {"scan": scan_response}):
-        with pytest.raises(HelperProtocolError, match="cards"):
-            request_scan(mock_sock_path)
-
-
 def test_send_request_raises_connection_error_when_socket_missing(tmp_path):
     with pytest.raises(HelperConnectionError):
         _send_request({"action": "ping"}, str(tmp_path / "no.sock"))
-
-
-def test_helper_scan_collection_returns_dict(mock_sock_path, monkeypatch):
-    """helper_scan_collection konvertiert JSON-String-Keys zu int."""
-    scan_response = {
-        "status": "ok",
-        "cards": {"100": 4, "200": 1, "300": 3},
-    }
-    with MockHelperServer(mock_sock_path, {"ping": {"status": "ok"}, "scan": scan_response}):
-        result = helper_scan_collection(mock_sock_path, print_fn=lambda *a: None)
-        assert result is not None
-        assert result == {100: 4, 200: 1, 300: 3}
-
-
-def test_helper_scan_collection_returns_none_when_no_helper(tmp_path):
-    result = helper_scan_collection(
-        str(tmp_path / "no.sock"),
-        print_fn=lambda *a: None,
-    )
-    assert result is None
-
-
-def test_helper_scan_collection_returns_none_on_error(mock_sock_path):
-    with MockHelperServer(mock_sock_path, {"ping": {"status": "ok"}, "scan": {"error": "scan failed"}}):
-        result = helper_scan_collection(mock_sock_path, print_fn=lambda *a: None)
-        assert result is None
-
-
-def test_helper_scan_collection_returns_none_on_empty_cards(mock_sock_path):
-    with MockHelperServer(mock_sock_path, {"ping": {"status": "ok"}, "scan": {"status": "ok", "cards": {}}}):
-        result = helper_scan_collection(mock_sock_path, print_fn=lambda *a: None)
-        assert result is None
-
-
-def test_helper_scan_collection_detailed_returns_result(mock_sock_path, monkeypatch):
-    """helper_scan_collection_detailed baut ein MemoryScanResult mit Validierung."""
-    scan_response = {
-        "status": "ok",
-        "cards": {"100": 4, "200": 1},
-        "anchor_matches": {"100": 3, "200": 2},
-    }
-    # Mock card_database und validate_collection
-    import scanner.helper_client as hc_module
-
-    monkeypatch.setattr(
-        "scanner.card_database.load_card_database",
-        lambda: {100: {"name": "Lightning Bolt"}, 200: {"name": "Giant Growth"}},
-    )
-    monkeypatch.setattr(
-        "scanner.memory_scanner.validate_collection",
-        lambda cards, db=None, anchors=None: {
-            "valid": True,
-            "errors": [],
-            "warnings": [],
-            "cardsCount": len(cards),
-            "totalCards": sum(cards.values()),
-            "unknownCardIdsCount": 0,
-            "unknownCardIdsTruncated": False,
-        },
-    )
-
-    with MockHelperServer(mock_sock_path, {"ping": {"status": "ok"}, "scan": scan_response}):
-        result = helper_scan_collection_detailed(
-            mock_sock_path,
-            anchors=[(100, 4, "Lightning Bolt")],
-            print_fn=lambda *a: None,
-        )
-        assert result is not None
-        assert result.collection == {100: 4, 200: 1}
-        assert result.validation["valid"] is True
-        assert result.anchor_matches == {100: 3, 200: 2}
-
-
-def test_helper_scan_collection_detailed_returns_none_when_no_helper(tmp_path):
-    result = helper_scan_collection_detailed(
-        str(tmp_path / "no.sock"),
-        print_fn=lambda *a: None,
-    )
-    assert result is None
 
 
 def test_send_request_sends_correct_json(mock_sock_path):
@@ -277,6 +171,97 @@ def test_send_request_sends_correct_json(mock_sock_path):
         ping(mock_sock_path)
         assert len(server.received_requests) == 1
         assert server.received_requests[0]["action"] == "ping"
+
+
+# --- Tests für HelperBackend ---
+
+
+def test_helper_backend_read_bytes_success(mock_sock_path):
+    import base64
+    raw = b"\xde\xad\xbe\xef"
+    b64 = base64.b64encode(raw).decode("utf-8")
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 4}}):
+        backend = HelperBackend(mock_sock_path)
+        result = backend.read_bytes(0x1000, 4)
+        assert result == raw
+
+
+def test_helper_backend_read_bytes_returns_none_on_error(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"read_memory": {"error": "failed"}}):
+        backend = HelperBackend(mock_sock_path)
+        result = backend.read_bytes(0x1000, 4)
+        assert result is None
+
+
+def test_helper_backend_iterate_readable_regions(mock_sock_path):
+    regions_response = {
+        "status": "ok",
+        "regions": [
+            {"address": 4294967296, "size": 1048576},
+            {"address": 4296015872, "size": 2097152},
+        ],
+    }
+    with MockHelperServer(mock_sock_path, {"list_regions": regions_response}):
+        backend = HelperBackend(mock_sock_path)
+        regions, err = backend.iterate_readable_regions()
+        assert err is None
+        assert len(regions) == 2
+        assert regions[0] == (4294967296, 1048576)
+        assert regions[1] == (4296015872, 2097152)
+
+
+# --- Tests für RemoteMemoryAdapter ---
+
+
+def test_remote_memory_adapter_read_bytes(mock_sock_path):
+    import base64
+    raw = b"\x00\x01\x02\x03"
+    b64 = base64.b64encode(raw).decode("utf-8")
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 4}}):
+        adapter = RemoteMemoryAdapter(mock_sock_path)
+        result = adapter.read_bytes(0x1000, 4)
+        assert result == raw
+
+
+def test_remote_memory_adapter_read_bytes_fallback_on_error(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"read_memory": {"error": "failed"}}):
+        adapter = RemoteMemoryAdapter(mock_sock_path)
+        result = adapter.read_bytes(0x1000, 4)
+        assert result == b"\x00" * 4
+
+
+def test_remote_memory_adapter_read_ptr(mock_sock_path):
+    import base64
+    import struct
+    raw = struct.pack("<Q", 0xDEADBEEF)
+    b64 = base64.b64encode(raw).decode("utf-8")
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 8}}):
+        adapter = RemoteMemoryAdapter(mock_sock_path)
+        assert adapter.read_ptr(0x1000) == 0xDEADBEEF
+
+
+def test_remote_memory_adapter_read_u32(mock_sock_path):
+    import base64
+    import struct
+    raw = struct.pack("<I", 42)
+    b64 = base64.b64encode(raw).decode("utf-8")
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 4}}):
+        adapter = RemoteMemoryAdapter(mock_sock_path)
+        assert adapter.read_u32(0x1000) == 42
+
+
+def test_remote_memory_adapter_read_string(mock_sock_path):
+    import base64
+    raw = b"Hello\x00world"
+    b64 = base64.b64encode(raw).decode("utf-8")
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 11}}):
+        adapter = RemoteMemoryAdapter(mock_sock_path)
+        assert adapter.read_string(0x1000) == "Hello"
+
+
+def test_remote_memory_adapter_read_string_zero_addr():
+    adapter = RemoteMemoryAdapter("/tmp/no.sock")
+    assert adapter.read_string(0) == ""
 
 
 # --- Tests für Low-Level Primitives (neues Protokoll) ---

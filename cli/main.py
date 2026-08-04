@@ -720,9 +720,9 @@ def _is_helper_available() -> bool:
 
 def _run_scan_via_helper(args: argparse.Namespace) -> int:
     """Führt den Memory-Scan über den Helper-Daemon aus (sudo-frei)."""
-    from scanner.helper_client import helper_scan_collection_detailed
+    from .memory_scanner import scan_collection_detailed
 
-    result = helper_scan_collection_detailed(debug=args.debug)
+    result = scan_collection_detailed(debug=args.debug, use_helper=True)
     if result is None:
         return 1
     collection_path, run_report_path = write_collection_artifacts(

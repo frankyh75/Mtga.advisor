@@ -174,6 +174,34 @@ def request_read_memory(sock_path: str = DEFAULT_SOCK_PATH, *,
     return base64.b64decode(data_b64)
 
 
+# --- HelperBackend (MemoryBackend-kompatibel) ---
+
+class HelperBackend:
+    """MemoryBackend-Implementierung über den Helper-Daemon.
+
+    Implementiert das MemoryBackend-Protocol aus pattern_scanner.py,
+    sodass scan_process_memory_many_with_stats() und find_blocks()
+    ohne Änderungen über den Helper funktionieren.
+    """
+
+    def __init__(self, sock_path: str = DEFAULT_SOCK_PATH) -> None:
+        self._sock_path = sock_path
+
+    def read_bytes(self, addr: int, size: int) -> bytes | None:
+        try:
+            return request_read_memory(self._sock_path, address=addr, size=size)
+        except (HelperConnectionError, HelperProtocolError, HelperError):
+            return None
+
+    def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+        regions = request_list_regions(self._sock_path)
+        return [(r["address"], r["size"]) for r in regions]
+
+    def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+        regions = request_list_regions(self._sock_path)
+        return ([(r["address"], r["size"]) for r in regions], None)
+
+
 # --- RemoteMemoryAdapter (IL2CPP-kompatibel) ---
 
 class RemoteMemoryAdapter:
