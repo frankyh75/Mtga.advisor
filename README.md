@@ -15,6 +15,27 @@ Mtga.advisor is an early-stage, private project focused on MTG Arena deck advisi
 - **Explizit:** Keine Advisor-Logik in Phase 0/1.
 - **Nicht in Scope:** Live-Tracking, Hintergrunddienste, externe Accounts oder Meta-basierte Empfehlungen.
 
+## Sudo-Helper (optional, macOS)
+
+Der Memory-Scanner benötigt `task_for_pid()` → root. Statt jedes Mal `sudo` aufzurufen, kann ein SMJobBless-Helper installiert werden, der als LaunchDaemon unter root läuft.
+
+**Einmalige Installation:**
+```bash
+make -C helper
+sudo ./helper/install.sh
+```
+
+**Danach CLI ohne sudo:**
+```bash
+.venv/bin/python -m cli.main run --output out
+```
+
+Die CLI erkennt automatisch, ob der Helper läuft (Socket `/tmp/mtga-helper.sock`). Fallback: sudo-Weg mit Warnung.
+
+**Detaillierte Anleitung:** [docs/helper-installation.md](docs/helper-installation.md)
+
+**End-to-End Test:** `bash helper/tests/test_e2e.sh`
+
 ## CLI-Kommandos
 - `mtga-export run`: Kanonischer Phase-1-Export. Nutzt auf macOS den Memory-Scan, sonst den Log-Export.
 - `mtga-export collection`: Exportiert die lokale MTGA-Sammlung aus Logs in die definierten Output-Artefakte.
