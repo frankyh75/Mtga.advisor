@@ -942,4 +942,162 @@ document.addEventListener("DOMContentLoaded", () => {
         metaContent.appendChild(metaP("Meta-Daten nicht verfügbar — " + err.message + "."));
       });
   }
+
+  // --- New Deck Builder Form ---
+  const builderSubmit = document.getElementById("builder-submit");
+  const builderFormat = document.getElementById("builder-format");
+  const builderColorsContainer = document.getElementById("builder-colors");
+  const builderArchetype = document.getElementById("builder-archetype");
+  const builderMaxRares = document.getElementById("builder-max-rares");
+  const builderMaxMythics = document.getElementById("builder-max-mythics");
+  const builderBudget = document.getElementById("builder-budget");
+  const builderUseMeta = document.getElementById("builder-use-meta");
+  const builderStatus = document.getElementById("builder-status");
+  const builderResult = document.getElementById("builder-result");
+
+  function builderSetStatus(text, isError) {
+    if (!builderStatus) {
+      return;
+    }
+    builderStatus.textContent = text;
+    builderStatus.className = "meta" + (isError ? " error" : (text ? " success" : ""));
+  }
+
+  function renderBuilderResult(data) {
+    if (!builderResult) {
+      return;
+    }
+    clearChildren(builderResult);
+
+    // Summary block
+    const summaryBlock = el("div", { className: "builder-result-block" });
+    summaryBlock.appendChild(el("h4", { text: "Summary" }));
+    const summary = data.summary || {};
+    if (summary.deckConcept) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: "Concept: " + summary.deckConcept }));
+    }
+    if (summary.confidence) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: "Confidence: " + summary.confidence }));
+    }
+    if (Array.isArray(summary.constraints) && summary.constraints.length) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: "Constraints: " + summary.constraints.join(", ") }));
+    }
+    if (summary.note) {
+      summaryBlock.appendChild(el("p", { className: "meta", text: summary.note }));
+    }
+    builderResult.appendChild(summaryBlock);
+
+    // Deck draft block
+    const draft = data.deckDraft || {};
+    const draftBlock = el("div", { className: "builder-result-block" });
+    draftBlock.appendChild(el("h4", { text: "Deck Draft" }));
+    const piles = [["mainboard", "Mainboard"], ["sideboard", "Sideboard"], ["commandZone", "Command Zone"]];
+    let hasCards = false;
+    for (const [key, label] of piles) {
+      const cards = draft[key];
+      if (Array.isArray(cards) && cards.length) {
+        hasCards = true;
+        draftBlock.appendChild(renderCardSection(label, cards));
+      }
+    }
+    if (!hasCards) {
+      draftBlock.appendChild(metaP("No cards in draft yet (stub mode)."));
+    }
+    builderResult.appendChild(draftBlock);
+
+    // Suggestions block
+    if (Array.isArray(data.suggestions) && data.suggestions.length) {
+      const sugBlock = el("div", { className: "builder-result-block" });
+      sugBlock.appendChild(el("h4", { text: "Suggestions" }));
+      const items = data.suggestions.map((s) => {
+        if (typeof s === "string") {
+          return s;
+        }
+        return s.text || s.description || JSON.stringify(s);
+      });
+      sugBlock.appendChild(ulFrom(items));
+      builderResult.appendChild(sugBlock);
+    }
+
+    // Warnings block
+    if (Array.isArray(data.warnings) && data.warnings.length) {
+      const warnBlock = el("div", { className: "builder-result-block" });
+      warnBlock.appendChild(el("h4", { text: "Warnings" }));
+      warnBlock.appendChild(ulFrom(data.warnings));
+      builderResult.appendChild(warnBlock);
+    }
+
+    // Schema badge
+    if (data.schema) {
+      builderResult.appendChild(el("p", { className: "meta", text: "Schema: " + data.schema }));
+    }
+  }
+
+  if (builderSubmit) {
+    builderSubmit.addEventListener("click", () => {
+      if (!builderFormat || !builderFormat.value) {
+        builderSetStatus("Bitte Format wählen.", true);
+        return;
+      }
+
+      // Collect checked colors
+      const colors = [];
+      if (builderColorsContainer) {
+        const checkboxes = builderColorsContainer.querySelectorAll('input[type="checkbox"]:checked');
+        for (const cb of checkboxes) {
+          colors.push(cb.value);
+        }
+      }
+
+      // Build request body
+      const requestBody = {
+        format: builderFormat.value,
+        colors: colors,
+        archetype: builderArchetype ? builderArchetype.value.trim() : "",
+        maxRares: builderMaxRares ? parseInt(builderMaxRares.value, 10) : undefined,
+        budgetMode: builderBudget ? builderBudget.value : "owned-first",
+        useMeta: builderUseMeta ? builderUseMeta.checked : true,
+      };
+
+      // Optional maxMythics — only send if filled
+      if (builderMaxMythics && builderMaxMythics.value.trim()) {
+        const mm = parseInt(builderMaxMythics.value, 10);
+        if (!isNaN(mm)) {
+          requestBody.maxMythics = mm;
+        }
+      }
+
+      // Remove undefined fields
+      if (requestBody.maxRares === undefined || isNaN(requestBody.maxRares)) {
+        delete requestBody.maxRares;
+      }
+      if (!requestBody.archetype) {
+        delete requestBody.archetype;
+      }
+
+      builderSetStatus("Sende Anfrage...", false);
+      builderSubmit.disabled = true;
+
+      fetch("/api/advisor/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          builderSubmit.disabled = false;
+          if (status !== 200) {
+            const errMsg = data.message || data.error || "Unknown error";
+            builderSetStatus("Fehler: " + errMsg, true);
+            return;
+          }
+          builderSetStatus("Entwurf erhalten.", false);
+          renderBuilderResult(data);
+        })
+        .catch((err) => {
+          builderSubmit.disabled = false;
+          builderSetStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
 });

@@ -1074,6 +1074,23 @@ def _render_index(
     #config-toggle { font-size: .85rem; color: var(--accent); cursor: pointer; }
     #config-fields { display: none; margin-top: .5rem; }
     #config-fields.open { display: block; }
+
+    /* New Deck Builder Form */
+    .deck-builder-form { max-width: 560px; margin-top: .5rem; }
+    .deck-builder-row { margin-bottom: .8rem; }
+    .deck-builder-row > label { display: block; font-size: .9rem; color: var(--muted); margin-bottom: .25rem; }
+    .deck-builder-row select, .deck-builder-row input[type="text"], .deck-builder-row input[type="number"] {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-size: .9rem; font-family: inherit; background: var(--panel); color: var(--ink);
+    }
+    .deck-builder-row select:focus, .deck-builder-row input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+    .color-pickers { display: flex; flex-wrap: wrap; gap: .8rem; }
+    .color-pickers label { display: inline-flex; gap: .3rem; align-items: center; font-size: .85rem; cursor: pointer; color: var(--ink); }
+    .deck-builder-actions { display: flex; align-items: center; gap: .8rem; margin-top: .5rem; }
+    #builder-status.error { color: var(--danger); }
+    #builder-status.success { color: var(--green); }
+    .builder-result-block { margin: .5rem 0; padding: .6rem .8rem; background: rgba(255,250,240,.7); border: 1px solid var(--line); border-radius: 10px; }
+    .builder-result-block h4 { margin: .2rem 0 .3rem; font-size: .95rem; color: var(--accent); }
+    .builder-result-block .meta { font-size: .82rem; }
   </style>
 </head>
 <body>
@@ -1159,6 +1176,66 @@ def _render_index(
     <div id="meta-content">
       <p class="meta" id="meta-loading">Lade Meta-Daten...</p>
     </div>
+  </div>
+
+  <div class="section" id="deck-builder-section">
+    <h2>New Deck Builder <span class="badge badge-green">Phase 2</span></h2>
+    <p class="meta">Neues Deck konstruieren — Format, Farben, Constraints festlegen und LLM-Entwurf anfordern.</p>
+    <div class="deck-builder-form">
+      <div class="deck-builder-row">
+        <label for="builder-format">Format</label>
+        <select id="builder-format">
+          <option value="standard">Standard</option>
+          <option value="historic">Historic</option>
+          <option value="explorer">Explorer</option>
+          <option value="alchemy">Alchemy</option>
+          <option value="brawl">Brawl</option>
+          <option value="historicbrawl">Historic Brawl</option>
+          <option value="pioneer">Pioneer</option>
+          <option value="modern">Modern</option>
+          <option value="legacy">Legacy</option>
+        </select>
+      </div>
+      <div class="deck-builder-row">
+        <label>Farben</label>
+        <div class="color-pickers" id="builder-colors">
+          <label><input type="checkbox" value="w"> W (White)</label>
+          <label><input type="checkbox" value="u"> U (Blue)</label>
+          <label><input type="checkbox" value="b"> B (Black)</label>
+          <label><input type="checkbox" value="r"> R (Red)</label>
+          <label><input type="checkbox" value="g"> G (Green)</label>
+          <label><input type="checkbox" value="c"> C (Colorless)</label>
+        </div>
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-archetype">Archetyp / Spielstil</label>
+        <input id="builder-archetype" type="text" placeholder="z.B. Etali, Aggro, Control, Ramp...">
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-max-rares">Max Rares</label>
+        <input id="builder-max-rares" type="number" min="0" max="60" value="8">
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-max-mythics">Max Mythics (optional)</label>
+        <input id="builder-max-mythics" type="number" min="0" max="20" placeholder="z.B. 2">
+      </div>
+      <div class="deck-builder-row">
+        <label for="builder-budget">Budget-Modus</label>
+        <select id="builder-budget">
+          <option value="owned-first">Owned-first (nur eigene Karten)</option>
+          <option value="budget">Budget</option>
+          <option value="no-limit">No limit</option>
+        </select>
+      </div>
+      <div class="deck-builder-row">
+        <label><input type="checkbox" id="builder-use-meta" checked> Meta-Daten einbeziehen</label>
+      </div>
+      <div class="deck-builder-actions">
+        <button id="builder-submit" class="btn-select-deck" style="padding:.5rem 1.2rem;font-size:.95rem;">Deck-Entwurf anfordern</button>
+        <span id="builder-status" class="meta"></span>
+      </div>
+    </div>
+    <div id="builder-result" class="deck-details" style="margin-top:1rem;"></div>
   </div>
 
   <div class="section">
@@ -1527,6 +1604,100 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 "snapshotCount": len(snapshots),
                 "latest": snapshots[-1] if snapshots else None,
             }, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/build":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # --- Validate request fields ---
+            valid_formats = {"standard", "historic", "explorer", "alchemy", "brawl", "historicbrawl", "legacy", "modern", "pioneer"}
+            fmt = data.get("format")
+            if not fmt:
+                _json_response(self, {"error": "missing_field", "message": "format is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if fmt not in valid_formats:
+                _json_response(self, {"error": "invalid_format", "message": f"format must be one of: {', '.join(sorted(valid_formats))}."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            colors = data.get("colors")
+            if colors is not None:
+                if not isinstance(colors, list):
+                    _json_response(self, {"error": "invalid_colors", "message": "colors must be a list of single-letter codes (w/u/b/r/g/c)."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                valid_color_codes = {"w", "u", "b", "r", "g", "c"}
+                for c in colors:
+                    if not isinstance(c, str) or c.lower() not in valid_color_codes:
+                        _json_response(self, {"error": "invalid_colors", "message": f"Invalid color code: {c}. Must be one of w/u/b/r/g/c."}, status=HTTPStatus.BAD_REQUEST)
+                        return
+            else:
+                colors = []
+
+            archetype = data.get("archetype")
+            if archetype is not None and not isinstance(archetype, str):
+                _json_response(self, {"error": "invalid_archetype", "message": "archetype must be a string."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            max_rares = data.get("maxRares")
+            if max_rares is not None:
+                if not isinstance(max_rares, int) or max_rares < 0:
+                    _json_response(self, {"error": "invalid_maxRares", "message": "maxRares must be a non-negative integer."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+            max_mythics = data.get("maxMythics")
+            if max_mythics is not None:
+                if not isinstance(max_mythics, int) or max_mythics < 0:
+                    _json_response(self, {"error": "invalid_maxMythics", "message": "maxMythics must be a non-negative integer."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+            valid_budget_modes = {"owned-first", "budget", "no-limit"}
+            budget_mode = data.get("budgetMode")
+            if budget_mode is not None and budget_mode not in valid_budget_modes:
+                _json_response(self, {"error": "invalid_budgetMode", "message": f"budgetMode must be one of: {', '.join(sorted(valid_budget_modes))}."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            use_meta = data.get("useMeta")
+            if use_meta is not None and not isinstance(use_meta, bool):
+                _json_response(self, {"error": "invalid_useMeta", "message": "useMeta must be a boolean."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # --- Build stub response (advisor-build.v1 schema) ---
+            constraints = [fmt]
+            if max_rares is not None:
+                constraints.append(f"maxRares={max_rares}")
+            if max_mythics is not None:
+                constraints.append(f"maxMythics={max_mythics}")
+            if budget_mode:
+                constraints.append(f"budgetMode={budget_mode}")
+            if colors:
+                constraints.append(f"colors={''.join(sorted(colors))}")
+
+            concept = archetype or f"{''.join(colors).upper() or 'C'} {fmt} deck"
+            response = {
+                "schema": "advisor-build.v1",
+                "summary": {
+                    "deckConcept": concept,
+                    "confidence": "low",
+                    "constraints": constraints,
+                    "note": "Stub response — no LLM logic yet. Field structure is final.",
+                },
+                "deckDraft": {
+                    "mainboard": [],
+                    "sideboard": [],
+                    "commandZone": [],
+                },
+                "suggestions": [],
+                "warnings": [
+                    "stub_mode: This is a placeholder response without LLM analysis.",
+                ],
+            }
+
+            _json_response(self, response, status=HTTPStatus.OK)
             return
 
         _json_response(self, {"error": "not_found", "message": "Pfad nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
