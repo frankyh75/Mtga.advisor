@@ -22,6 +22,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const deckDetailBadges = document.getElementById("deck-detail-badges");
   const deckDetailJson = document.getElementById("deck-detail-json");
   const deckDetailCards = document.getElementById("deck-detail-cards");
+  const btnExportArena = document.getElementById("btn-export-arena");
+  const btnAnalyze = document.getElementById("btn-analyze");
+  const btnImprove = document.getElementById("btn-improve");
+  const deckActionStatus = document.getElementById("deck-action-status");
+  const deckAnalyzeResult = document.getElementById("deck-analyze-result");
+  const deckImproveResult = document.getElementById("deck-improve-result");
   const deckRows = Array.from(document.querySelectorAll(".deck-row"));
 
   const PILE_LABELS = [
@@ -32,6 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
 
   let selectedDeck = null;
+  let currentDeckPayload = null;  // Full payload for action buttons (T10)
 
   // --- DOM helper utilities (safe rendering via createElement/textContent) ---
   // Creates an element, applies attributes, and optionally appends children/text.
@@ -327,6 +334,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    currentDeckPayload = payload;  // Store for action buttons (T10)
     deckDetailEmpty.style.display = "none";
     deckDetailContent.style.display = "block";
 
@@ -1335,6 +1343,183 @@ document.addEventListener("DOMContentLoaded", () => {
   if (cbRarity) cbRarity.addEventListener("change", cbApplyFilter);
   if (cbCmc) cbCmc.addEventListener("input", cbApplyFilter);
   if (cbReset) cbReset.addEventListener("click", cbResetFilters);
+
+  // --- Quick Actions (T10): Export, Analyze, Improve ---
+
+  function setActionStatus(msg, isError) {
+    if (!deckActionStatus) return;
+    deckActionStatus.textContent = msg;
+    deckActionStatus.className = "action-status" + (isError ? " error" : " ok");
+  }
+
+  function getDeckIdentifier() {
+    if (!currentDeckPayload) return null;
+    const deckKey = currentDeckPayload.deckKey || currentDeckPayload.deckId || "";
+    const deckId = currentDeckPayload.deckId || "";
+    return { deckKey: String(deckKey), deckId: String(deckId) };
+  }
+
+  function disableActions(disabled) {
+    if (btnExportArena) btnExportArena.disabled = disabled;
+    if (btnAnalyze) btnAnalyze.disabled = disabled;
+    if (btnImprove) btnImprove.disabled = disabled;
+  }
+
+  // Export: POST /api/advisor/export → download Arena text file
+  if (btnExportArena) {
+    btnExportArena.addEventListener("click", () => {
+      if (!currentDeckPayload) {
+        setActionStatus("Kein Deck ausgewählt.", true);
+        return;
+      }
+      const id = getDeckIdentifier();
+      if (!id) {
+        setActionStatus("Kein Deck-Identifier verfügbar.", true);
+        return;
+      }
+      disableActions(true);
+      setActionStatus("Exportiere...", false);
+
+      fetch("/api/advisor/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckKey: id.deckKey, deckId: id.deckId }),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          disableActions(false);
+          if (status !== 200) {
+            setActionStatus("Fehler: " + (data.message || data.error || "Unknown"), true);
+            return;
+          }
+          // Download as .txt file
+          const text = data.arenaText || "";
+          const deckName = (data.deckName || "deck").replace(/[^a-zA-Z0-9_-]/g, "_");
+          const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = deckName + "_arena.txt";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setActionStatus("Exportiert (" + (data.lineCount || 0) + " Zeilen).", false);
+        })
+        .catch((err) => {
+          disableActions(false);
+          setActionStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
+
+  // Analyze: POST /api/advisor/analyze → render analysis in panel
+  if (btnAnalyze) {
+    btnAnalyze.addEventListener("click", () => {
+      if (!currentDeckPayload) {
+        setActionStatus("Kein Deck ausgewählt.", true);
+        return;
+      }
+      const id = getDeckIdentifier();
+      if (!id) {
+        setActionStatus("Kein Deck-Identifier verfügbar.", true);
+        return;
+      }
+      disableActions(true);
+      setActionStatus("Analysiere (LLM)...", false);
+      if (deckAnalyzeResult) {
+        deckAnalyzeResult.style.display = "none";
+        deckAnalyzeResult.replaceChildren();
+      }
+
+      fetch("/api/advisor/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckKey: id.deckKey, deckId: id.deckId }),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          disableActions(false);
+          if (status !== 200) {
+            setActionStatus("Fehler: " + (data.message || data.error || "Unknown"), true);
+            return;
+          }
+          if (data.error) {
+            setActionStatus("LLM-Fehler: " + data.error, true);
+            return;
+          }
+          setActionStatus("Analyse fertig (" + (data.model || "?") + ").", false);
+          if (deckAnalyzeResult) {
+            deckAnalyzeResult.style.display = "block";
+            deckAnalyzeResult.replaceChildren();
+            const heading = el("h4", { text: "Analyse" });
+            const pre = document.createElement("pre");
+            pre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:30rem;overflow-y:auto;";
+            pre.textContent = data.analysis || "";
+            deckAnalyzeResult.appendChild(heading);
+            deckAnalyzeResult.appendChild(pre);
+          }
+        })
+        .catch((err) => {
+          disableActions(false);
+          setActionStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
+
+  // Improve: POST /api/advisor/improve → render improvement suggestions
+  if (btnImprove) {
+    btnImprove.addEventListener("click", () => {
+      if (!currentDeckPayload) {
+        setActionStatus("Kein Deck ausgewählt.", true);
+        return;
+      }
+      const id = getDeckIdentifier();
+      if (!id) {
+        setActionStatus("Kein Deck-Identifier verfügbar.", true);
+        return;
+      }
+      disableActions(true);
+      setActionStatus("Optimiere (LLM)...", false);
+      if (deckImproveResult) {
+        deckImproveResult.style.display = "none";
+        deckImproveResult.replaceChildren();
+      }
+
+      fetch("/api/advisor/improve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckKey: id.deckKey, deckId: id.deckId }),
+      })
+        .then((resp) => resp.json().then((data) => ({ status: resp.status, data })))
+        .then(({ status, data }) => {
+          disableActions(false);
+          if (status !== 200) {
+            setActionStatus("Fehler: " + (data.message || data.error || "Unknown"), true);
+            return;
+          }
+          if (data.error) {
+            setActionStatus("LLM-Fehler: " + data.error, true);
+            return;
+          }
+          setActionStatus("Verbesserungen fertig (" + (data.model || "?") + ").", false);
+          if (deckImproveResult) {
+            deckImproveResult.style.display = "block";
+            deckImproveResult.replaceChildren();
+            const heading = el("h4", { text: "Verbesserungsvorschläge" });
+            const pre = document.createElement("pre");
+            pre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:30rem;overflow-y:auto;";
+            pre.textContent = data.improvements || "";
+            deckImproveResult.appendChild(heading);
+            deckImproveResult.appendChild(pre);
+          }
+        })
+        .catch((err) => {
+          disableActions(false);
+          setActionStatus("Netzwerkfehler: " + err.message, true);
+        });
+    });
+  }
 
   // Auto-load on page ready
   cbLoadData();

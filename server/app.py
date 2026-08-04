@@ -1845,6 +1845,189 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             }, status=HTTPStatus.OK)
             return
 
+        if self.path == "/api/advisor/export":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_id = data.get("deckId")
+            deck_key = data.get("deckKey")
+            if not deck_id and not deck_key:
+                _json_response(self, {"error": "missing_field", "message": "deckId or deckKey is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # Try to find the deck payload
+            deck_payload = None
+            search_key = deck_key or deck_id
+            deck_payload = _find_deck_payload(output_dir, str(search_key))
+
+            if deck_payload is None:
+                # Try decks.json lookup by deckId
+                decks = _read_json(output_dir / "decks.json")
+                if decks:
+                    for d in decks.get("decks", []):
+                        if str(d.get("deckId", "")) == str(deck_id):
+                            deck_payload = d
+                            break
+
+            if deck_payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {search_key!r} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            # Use advisor.deck_export to convert to Arena text
+            from advisor.deck_export import export_deck_to_arena_text, DeckExportError
+
+            # Ensure schema is set for export
+            if "schema" not in deck_payload:
+                deck_payload["schema"] = "deck.v1"
+
+            try:
+                arena_text = export_deck_to_arena_text(deck_payload)
+            except DeckExportError as exc:
+                _json_response(self, {"error": "export_failed", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            _json_response(self, {
+                "schema": "advisor-export.v1",
+                "deckName": deck_payload.get("name", "Unnamed"),
+                "format": "arena",
+                "arenaText": arena_text,
+                "lineCount": len(arena_text.strip().split("\n")) if arena_text.strip() else 0,
+            }, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/analyze":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_id = data.get("deckId")
+            deck_key = data.get("deckKey")
+            if not deck_id and not deck_key:
+                _json_response(self, {"error": "missing_field", "message": "deckId or deckKey is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # Find deck payload
+            search_key = deck_key or deck_id
+            deck_payload = _find_deck_payload(output_dir, str(search_key))
+            if deck_payload is None:
+                decks = _read_json(output_dir / "decks.json")
+                if decks:
+                    for d in decks.get("decks", []):
+                        if str(d.get("deckId", "")) == str(deck_id):
+                            deck_payload = d
+                            break
+
+            if deck_payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {search_key!r} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            # Load collection for analysis context
+            collection = _read_json(output_dir / "collection.json")
+
+            # Build analysis prompt using the existing chat prompt builder
+            analysis_question = data.get("question", "Analysiere dieses Deck: Crafting-Prioritäten, fehlende Karten, Verbesserungsvorschläge, Mana-Kurve.")
+            prompt = _build_chat_prompt(deck_payload, collection, analysis_question)
+
+            # Load LLM config
+            cli_overrides = {}
+            if data.get("endpoint"):
+                cli_overrides["endpoint"] = data["endpoint"]
+            if data.get("model"):
+                cli_overrides["model_name"] = data["model"]
+            if data.get("temperature") is not None:
+                cli_overrides["temperature"] = float(data["temperature"])
+            if data.get("max_tokens") is not None:
+                cli_overrides["max_tokens"] = int(data["max_tokens"])
+            config = load_config(cli_overrides=cli_overrides)
+
+            # Call LLM
+            result = _call_llm_chat(config, prompt)
+            if "error" in result:
+                _json_response(self, result, status=HTTPStatus.OK)
+                return
+
+            _json_response(self, {
+                "schema": "advisor-analyze.v1",
+                "deckName": deck_payload.get("name", "Unnamed"),
+                "analysis": result.get("response", ""),
+                "model": result.get("model", config.model_name),
+                "warnings": [],
+            }, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/advisor/improve":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid_json", "message": "Request body is not valid JSON."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_id = data.get("deckId")
+            deck_key = data.get("deckKey")
+            if not deck_id and not deck_key:
+                _json_response(self, {"error": "missing_field", "message": "deckId or deckKey is required."}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            # Find deck payload
+            search_key = deck_key or deck_id
+            deck_payload = _find_deck_payload(output_dir, str(search_key))
+            if deck_payload is None:
+                decks = _read_json(output_dir / "decks.json")
+                if decks:
+                    for d in decks.get("decks", []):
+                        if str(d.get("deckId", "")) == str(deck_id):
+                            deck_payload = d
+                            break
+
+            if deck_payload is None:
+                _json_response(self, {"error": "not_found", "message": f"Deck {search_key!r} nicht gefunden."}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            # Load collection for improvement context
+            collection = _read_json(output_dir / "collection.json")
+
+            # Build improvement prompt
+            improve_question = data.get("question", "Optimiere dieses Deck: Welche Karten sollten getauscht werden? Verbessere Mana-Kurve, Synergien und Sideboard. Berücksichtige die verfügbare Collection.")
+            prompt = _build_chat_prompt(deck_payload, collection, improve_question)
+
+            # Load LLM config
+            cli_overrides = {}
+            if data.get("endpoint"):
+                cli_overrides["endpoint"] = data["endpoint"]
+            if data.get("model"):
+                cli_overrides["model_name"] = data["model"]
+            if data.get("temperature") is not None:
+                cli_overrides["temperature"] = float(data["temperature"])
+            if data.get("max_tokens") is not None:
+                cli_overrides["max_tokens"] = int(data["max_tokens"])
+            config = load_config(cli_overrides=cli_overrides)
+
+            # Call LLM
+            result = _call_llm_chat(config, prompt)
+            if "error" in result:
+                _json_response(self, result, status=HTTPStatus.OK)
+                return
+
+            _json_response(self, {
+                "schema": "advisor-improve.v1",
+                "deckName": deck_payload.get("name", "Unnamed"),
+                "improvements": result.get("response", ""),
+                "model": result.get("model", config.model_name),
+                "warnings": [],
+            }, status=HTTPStatus.OK)
+            return
+
         if self.path == "/api/advisor/build":
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len)
