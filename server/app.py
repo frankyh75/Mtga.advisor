@@ -797,6 +797,237 @@ def _render_history_section(output_dir: Path) -> str:
     )
 
 
+def _compute_missing_cards(
+    deck: dict[str, Any],
+    collection: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Deterministically compute which deck cards are missing from the collection.
+
+    Compares each mainboard/sideboard card's required count against the
+    player's collection inventory.  Returns a list of missing-card dicts:
+      [{"name": ..., "cardId": ..., "needed": N, "owned": M, "missing": N-M}]
+
+    Cards with missing == 0 are excluded.  Cards whose grpId is not in
+    the collection at all are treated as owned=0.
+
+    Supports both deck card formats:
+      - Named card list:  [{"cardId": 123, "name": "Bolt", "count": 4}, ...]
+      - grpId->qty dict:  {"123": 4, "456": 2}
+    """
+    if not collection:
+        return []
+
+    coll_cards = collection.get("cards", {})
+    if not isinstance(coll_cards, dict):
+        return []
+
+    deck_cards = deck.get("cards", deck.get("mainDeck", []))
+    if not deck_cards:
+        return []
+
+    # Gather all card entries from all piles
+    entries: list[tuple[str | int, str, int]] = []  # (cardId, name, needed)
+
+    if isinstance(deck_cards, dict):
+        for pile_key in ("mainboard", "sideboard", "commandZone", "companions"):
+            pile = deck_cards.get(pile_key)
+            if not pile:
+                continue
+            if isinstance(pile, list):
+                for card in pile:
+                    if isinstance(card, dict):
+                        cid = card.get("cardId", card.get("id", "?"))
+                        name = card.get("name", f"ID:{cid}")
+                        count = int(card.get("count", card.get("quantity", 1)))
+                        entries.append((cid, name, count))
+            elif isinstance(pile, dict):
+                for cid, count in pile.items():
+                    entries.append((cid, f"ID:{cid}", int(count)))
+    elif isinstance(deck_cards, list):
+        for card in deck_cards:
+            if isinstance(card, dict):
+                cid = card.get("cardId", card.get("id", "?"))
+                name = card.get("name", f"ID:{cid}")
+                count = int(card.get("count", card.get("quantity", 1)))
+                entries.append((cid, name, count))
+
+    missing_cards: list[dict[str, Any]] = []
+    for cid, name, needed in entries:
+        owned = int(coll_cards.get(str(cid), 0))
+        missing = needed - owned
+        if missing > 0:
+            missing_cards.append({
+                "name": name,
+                "cardId": cid,
+                "needed": needed,
+                "owned": owned,
+                "missing": missing,
+            })
+
+    return missing_cards
+
+
+def _build_analysis_prompt(
+    deck: dict[str, Any],
+    collection: dict[str, Any] | None,
+    computed_missing: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build a dedicated deck-analysis prompt requesting structured JSON output.
+
+    Inspired by advisor/llm_advisor.py _build_prompt(), but focused on a
+    single deck rather than the whole collection.  Requests the exact JSON
+    schema that _parse_structured_analysis() can extract.
+
+    Args:
+        deck: Deck payload (deck.v1 or arena-deck.v1 format).
+        collection: Player's collection.json (optional).
+        computed_missing: Pre-computed missing-cards list from
+            _compute_missing_cards().  If provided, the prompt tells the
+            LLM which cards are already known to be missing, so it can
+            focus on reasoning/priorities rather than raw computation.
+    """
+    lines = [
+        "Du bist ein MTG Arena Deck-Building Advisor.",
+        "Analysiere das folgende Deck gegen die Collection des Spielers.",
+        "",
+        "## Deck",
+    ]
+
+    name = deck.get("name", "Unnamed")
+    fmt = deck.get("attributes", {}).get("Format", "unknown")
+    deck_id = deck.get("deckId", "?")
+    lines.append(f"Name: {name}")
+    lines.append(f"Format: {fmt}")
+    lines.append(f"DeckId: {deck_id}")
+
+    # Deck cards — supports deck-scan format and log-export format
+    deck_cards = deck.get("cards", deck.get("mainDeck", []))
+    if deck_cards:
+        lines.append("\nKarten:")
+        if isinstance(deck_cards, dict):
+            for pile_key, label in [
+                ("mainboard", "Mainboard"),
+                ("sideboard", "Sideboard"),
+                ("commandZone", "Command Zone"),
+                ("companions", "Companions"),
+            ]:
+                pile = deck_cards.get(pile_key, [])
+                if not pile:
+                    continue
+                lines.append(f"  {label}:")
+                if isinstance(pile, list):
+                    for card in pile[:60]:
+                        if isinstance(card, dict):
+                            lines.append(
+                                f"    {card.get('name', '?')} x{card.get('count', card.get('quantity', 1))}"
+                            )
+                        elif isinstance(card, str):
+                            lines.append(f"    {card}")
+                elif isinstance(pile, dict):
+                    for card_id, count in list(pile.items())[:60]:
+                        lines.append(f"    ID:{card_id} x{count}")
+        elif isinstance(deck_cards, list):
+            for card in deck_cards[:60]:
+                if isinstance(card, dict):
+                    lines.append(
+                        f"  {card.get('name', '?')} x{card.get('count', card.get('quantity', 1))}"
+                    )
+                elif isinstance(card, str):
+                    lines.append(f"  {card}")
+
+    # Collection context
+    if collection:
+        cards = collection.get("cards", {})
+        wildcards = collection.get("wildcards", {})
+        total = sum(int(v) for v in cards.values()) if isinstance(cards, dict) else 0
+        unique = len(cards) if isinstance(cards, dict) else 0
+        lines.append(f"\n## Collection ({unique} unique, {total} total)")
+        if wildcards:
+            lines.append("Wildcards:")
+            # Support both wcXxx and plain key formats, show each rarity once
+            wc_keys = [
+                ("wcCommon", "common", "Common"),
+                ("wcUncommon", "uncommon", "Uncommon"),
+                ("wcRare", "rare", "Rare"),
+                ("wcMythic", "mythic", "Mythic"),
+            ]
+            shown = set()
+            for wc_key, plain_key, label in wc_keys:
+                if wc_key in wildcards and label not in shown:
+                    lines.append(f"  {label}: {wildcards[wc_key]}")
+                    shown.add(label)
+                elif plain_key in wildcards and label not in shown:
+                    lines.append(f"  {label}: {wildcards[plain_key]}")
+                    shown.add(label)
+    else:
+        lines.append("\n## Collection: nicht verfuegbar")
+
+    # Pre-computed missing cards (deterministic)
+    if computed_missing:
+        lines.append(f"\n## Fehlende Karten (berechnet, {len(computed_missing)} Karten)")
+        for mc in computed_missing:
+            lines.append(
+                f"  - {mc['name']}: braucht {mc['needed']}, hat {mc['owned']}, fehlt {mc['missing']}"
+            )
+    else:
+        lines.append("\n## Fehlende Karten: nicht berechenbar (Collection nicht verfuegbar)")
+
+    # JSON schema instructions — matching _parse_structured_analysis fields
+    lines.extend([
+        "",
+        "## Aufgabe",
+        "",
+        "Analysiere das Deck und gib eine strukturierte Bewertung im folgenden JSON-Format.",
+        "Antworte NUR mit JSON (kein Markdown drumherum):",
+        "",
+        """{
+  "summary": {
+    "topPriority": "<hoechste Prioritaet: was zuerst tun?>",
+    "confidence": "high|medium|low",
+    "notes": "<kurze Zusammenfassung>"
+  },
+  "coreCards": [
+    {"name": "<Kartenname>", "count": <Anzahl>, "role": "<Rolle im Deck>"}
+  ],
+  "missingCards": [
+    {"name": "<Kartenname>", "count": <Anzahl die fehlt>, "rarity": "common|uncommon|rare|mythic", "reason": "<warum braucht man die?>"}
+  ],
+  "craftPriorities": [
+    {
+      "reason": "<warum diese Prioritaet>",
+      "cards": [
+        {"name": "<Kartenname>", "count": <Anzahl>, "rarity": "<rarity>", "forDecks": ["<Deckname>"]}
+      ]
+    }
+  ],
+  "cuts": [
+    {"name": "<Kartenname>", "count": <Anzahl>, "reason": "<warum cutten?>"}
+  ],
+  "manaCurve": {
+    "cmc0": <Anzahl>, "cmc1": <Anzahl>, "cmc2": <Anzahl>,
+    "cmc3": <Anzahl>, "cmc4": <Anzahl>, "cmc5": <Anzahl>, "cmc6plus": <Anzahl>
+  },
+  "riskAssessment": {
+    "lands": "<Einschaetzung: good|warning|critical + Begründung>",
+    "curve": "<Einschaetzung>",
+    "synergy": "<Einschaetzung>",
+    "sideboard": "<Einschaetzung>"
+  }
+}""",
+        "",
+        "Wichtig:",
+        "- Nutze die berechneten fehlenden Karten als Basis fuer missingCards und craftPriorities",
+        "- Priorisiere Rares und Mythics (teuerste Wildcards zuerst)",
+        "- Nenne konkrete Kartennamen, keine Platzhalter",
+        "- Bei cuts: welche Karten sollten aus dem Deck entfernt werden?",
+        "- manaCurve: zaehle die Karten pro CMC-Wert im Mainboard",
+        "- Maximal 10 craftPriorities, maximal 10 cuts",
+        "- Sei praezise und hilfreich",
+    ])
+
+    return "\n".join(lines)
+
+
 def _build_chat_prompt(deck: dict[str, Any], collection: dict[str, Any] | None, question: str) -> str:
     """Baue einen Chat-Prompt für eine spezifische Deck-Frage."""
     lines = [
@@ -2114,9 +2345,14 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             # Load collection for analysis context
             collection = _read_json(output_dir / "collection.json")
 
-            # Build analysis prompt using the existing chat prompt builder
-            analysis_question = data.get("question", "Analysiere dieses Deck: Crafting-Prioritäten, fehlende Karten, Verbesserungsvorschläge, Mana-Kurve.")
-            prompt = _build_chat_prompt(deck_payload, collection, analysis_question)
+            # T7: Compute missing cards deterministically (deck vs collection)
+            computed_missing = _compute_missing_cards(deck_payload, collection)
+
+            # T7: Build dedicated analysis prompt (not generic chat prompt)
+            # The analysis prompt requests structured JSON output matching
+            # the advisor-analyze.v2 schema and includes pre-computed missing
+            # cards so the LLM can focus on reasoning.
+            prompt = _build_analysis_prompt(deck_payload, collection, computed_missing)
 
             # Load LLM config
             cli_overrides = {}
@@ -2133,7 +2369,13 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             # Call LLM
             result = _call_llm_chat(config, prompt)
             if "error" in result:
-                _json_response(self, result, status=HTTPStatus.OK)
+                # Even on LLM error, return computed missing cards
+                _json_response(self, {
+                    **result,
+                    "schema": "advisor-analyze.v1",
+                    "deckName": deck_payload.get("name", "Unnamed"),
+                    "computedMissingCards": computed_missing,
+                }, status=HTTPStatus.OK)
                 return
 
             # Try to parse structured blocks from LLM response (T8)
@@ -2146,6 +2388,7 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 "analysis": analysis_text,
                 "model": result.get("model", config.model_name),
                 "warnings": [],
+                "computedMissingCards": computed_missing,
             }
             if structured:
                 response_payload["structured"] = structured

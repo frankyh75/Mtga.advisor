@@ -276,7 +276,7 @@ class TestAnalyzeEndpoint:
 
     @patch("server.app._call_llm_chat")
     def test_analyze_with_custom_question(self, mock_llm: MagicMock) -> None:
-        """Analyze passes custom question to LLM."""
+        """Analyze uses dedicated analysis prompt (T7) with manaCurve schema."""
         mock_llm.return_value = {"response": "Custom analysis", "model": "test"}
         configure_basic_auth(None)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,11 +293,11 @@ class TestAnalyzeEndpoint:
                     "question": "What is the mana curve?",
                 })
                 assert status == 200
-                # Verify the mock was called and the prompt contains the question
+                # T7: the dedicated analysis prompt requests a manaCurve block
                 assert mock_llm.called
                 call_args = mock_llm.call_args
                 prompt = call_args[0][1]  # second positional arg is the prompt
-                assert "mana curve" in prompt
+                assert "manaCurve" in prompt
             finally:
                 server.shutdown()
 
