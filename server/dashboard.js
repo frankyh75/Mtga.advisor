@@ -1100,4 +1100,242 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
   }
+
+  // --- Collection Browser (T9) ---
+  // Fetches /api/collection/enriched and applies client-side filters:
+  // name/text search, type, color, rarity, max CMC.
+
+  const cbSearch = document.getElementById("cb-search");
+  const cbType = document.getElementById("cb-type");
+  const cbColor = document.getElementById("cb-color");
+  const cbRarity = document.getElementById("cb-rarity");
+  const cbCmc = document.getElementById("cb-cmc");
+  const cbReset = document.getElementById("cb-reset");
+  const cbStatus = document.getElementById("cb-status");
+  const cbResults = document.getElementById("collection-browser-results");
+  const cbLoading = document.getElementById("cb-loading");
+
+  let cbAllCards = [];       // full enriched collection array
+  let cbDataLoaded = false;
+
+  // Color display map: Scryfall color codes → display labels
+  const CB_COLOR_LABELS = { W: "W", U: "U", B: "B", R: "R", G: "G", C: "C" };
+
+  function cbLoadData() {
+    if (cbDataLoaded) return;
+    fetch("/api/collection/enriched")
+      .then((resp) => resp.json())
+      .then((data) => {
+        if (data.error) {
+          if (cbLoading) cbLoading.textContent = data.message || data.error;
+          if (cbStatus) cbStatus.textContent = "Fehler: " + (data.message || data.error);
+          return;
+        }
+        cbAllCards = data.cards || [];
+        cbDataLoaded = true;
+        if (cbLoading) cbLoading.remove();
+        if (cbStatus) {
+          const enriched = data.enriched_count || 0;
+          const total = data.total_unique || cbAllCards.length;
+          cbStatus.textContent = `${total} Karten (${enriched} mit Metadaten), ${data.total_copies || 0} Exemplare.`;
+        }
+        cbApplyFilter();
+      })
+      .catch((err) => {
+        if (cbLoading) cbLoading.textContent = "Fehler beim Laden: " + err.message;
+        if (cbStatus) cbStatus.textContent = "Fehler: " + err.message;
+      });
+  }
+
+  function cbApplyFilter() {
+    if (!cbDataLoaded || !cbResults) return;
+
+    const query = (cbSearch?.value ?? "").trim().toLowerCase();
+    const typeFilter = (cbType?.value ?? "").toLowerCase();
+    const colorFilter = (cbColor?.value ?? "").toUpperCase();
+    const rarityFilter = (cbRarity?.value ?? "").toLowerCase();
+    const cmcMax = cbCmc?.value ? parseInt(cbCmc.value, 10) : null;
+
+    const filtered = cbAllCards.filter((card) => {
+      // Name / oracle_text search (case-insensitive substring)
+      if (query) {
+        const name = (card.name || "").toLowerCase();
+        const text = (card.oracle_text || "").toLowerCase();
+        if (!name.includes(query) && !text.includes(query)) return false;
+      }
+
+      // Type filter (substring match in type_line, case-insensitive)
+      if (typeFilter) {
+        const typeLine = (card.type_line || "").toLowerCase();
+        if (!typeLine.includes(typeFilter)) return false;
+      }
+
+      // Color filter: card must include the selected color
+      // C = colorless → colors array is empty or ["C"]
+      if (colorFilter) {
+        const colors = card.colors || [];
+        if (colorFilter === "C") {
+          if (colors.length > 0 && colors[0] !== "C") return false;
+        } else {
+          if (!colors.includes(colorFilter)) return false;
+        }
+      }
+
+      // Rarity filter (exact match)
+      if (rarityFilter) {
+        if ((card.rarity || "unknown") !== rarityFilter) return false;
+      }
+
+      // CMC max filter
+      if (cmcMax !== null && !isNaN(cmcMax)) {
+        const cmc = card.cmc || 0;
+        if (cmc > cmcMax) return false;
+      }
+
+      return true;
+    });
+
+    cbRenderResults(filtered);
+  }
+
+  function cbRenderResults(cards) {
+    if (!cbResults) return;
+    // Clear previous results
+    cbResults.textContent = "";
+
+    if (cards.length === 0) {
+      const noResults = el("p", { className: "cb-no-results", text: "Keine Karten entsprechen den Filtern." });
+      cbResults.appendChild(noResults);
+      if (cbStatus) {
+        cbStatus.textContent = "0 Karten sichtbar.";
+      }
+      return;
+    }
+
+    // Limit to first 200 results for performance
+    const displayCards = cards.slice(0, 200);
+    if (cards.length > 200) {
+      const note = el("p", {
+        className: "meta",
+        text: `Zeige 200 von ${cards.length} Treffern. Verfeinere die Filter für mehr.`,
+      });
+      cbResults.appendChild(note);
+    }
+
+    displayCards.forEach((card) => {
+      const cardDiv = el("div", { className: "cb-card" });
+
+      // Card image (thumbnail)
+      if (card.image_uri) {
+        const imgWrap = el("div", { className: "cb-card-img" });
+        const img = el("img");
+        img.src = card.image_uri;
+        img.alt = card.name || "Card";
+        img.loading = "lazy";
+        imgWrap.appendChild(img);
+        cardDiv.appendChild(imgWrap);
+      }
+
+      // Card info
+      const infoDiv = el("div", { className: "cb-card-info" });
+
+      // Name
+      infoDiv.appendChild(el("div", { className: "cb-card-name", text: card.name || "Unknown" }));
+
+      // Meta line: count, set, rarity, cmc, colors
+      const metaParts = [];
+
+      // Count
+      metaParts.push(`${card.count}×`);
+
+      // Colors (badges)
+      const colors = card.colors || [];
+      if (colors.length > 0) {
+        const colorsSpan = el("span");
+        colors.forEach((c) => {
+          const badge = el("span", {
+            className: `cb-mana-badge cb-mana-${c}`,
+            text: CB_COLOR_LABELS[c] || c,
+          });
+          colorsSpan.appendChild(badge);
+        });
+        metaParts.push(colorsSpan);
+      } else {
+        const badge = el("span", { className: "cb-mana-badge cb-mana-C", text: "C" });
+        metaParts.push(badge);
+      }
+
+      // CMC
+      if (card.cmc !== undefined && card.cmc !== 0) {
+        metaParts.push(`CMC ${card.cmc}`);
+      }
+
+      // Type line
+      if (card.type_line) {
+        metaParts.push(card.type_line);
+      }
+
+      // Rarity
+      if (card.rarity && card.rarity !== "unknown") {
+        const raritySpan = el("span", {
+          className: `cb-rarity-${card.rarity}`,
+          text: card.rarity,
+        });
+        metaParts.push(raritySpan);
+      }
+
+      // Set
+      if (card.set) {
+        metaParts.push(card.set);
+      }
+
+      const metaDiv = el("div", { className: "cb-card-meta" });
+      metaParts.forEach((part) => {
+        if (typeof part === "string") {
+          metaDiv.appendChild(document.createTextNode(part + " · "));
+        } else {
+          metaDiv.appendChild(part);
+          metaDiv.appendChild(document.createTextNode(" · "));
+        }
+      });
+      // Remove trailing separator
+      if (metaDiv.lastChild && metaDiv.lastChild.nodeType === Node.TEXT_NODE) {
+        metaDiv.removeChild(metaDiv.lastChild);
+      }
+      infoDiv.appendChild(metaDiv);
+
+      // Oracle text (truncated)
+      if (card.oracle_text) {
+        infoDiv.appendChild(el("div", { className: "cb-card-text", text: card.oracle_text }));
+      }
+
+      cardDiv.appendChild(infoDiv);
+      cbResults.appendChild(cardDiv);
+    });
+
+    if (cbStatus) {
+      const shown = Math.min(cards.length, 200);
+      cbStatus.textContent = `${shown} von ${cbAllCards.length} Karten sichtbar.`;
+    }
+  }
+
+  function cbResetFilters() {
+    if (cbSearch) cbSearch.value = "";
+    if (cbType) cbType.value = "";
+    if (cbColor) cbColor.value = "";
+    if (cbRarity) cbRarity.value = "";
+    if (cbCmc) cbCmc.value = "";
+    cbApplyFilter();
+  }
+
+  // Event listeners
+  if (cbSearch) cbSearch.addEventListener("input", cbApplyFilter);
+  if (cbType) cbType.addEventListener("change", cbApplyFilter);
+  if (cbColor) cbColor.addEventListener("change", cbApplyFilter);
+  if (cbRarity) cbRarity.addEventListener("change", cbApplyFilter);
+  if (cbCmc) cbCmc.addEventListener("input", cbApplyFilter);
+  if (cbReset) cbReset.addEventListener("click", cbResetFilters);
+
+  // Auto-load on page ready
+  cbLoadData();
 });

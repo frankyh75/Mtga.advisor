@@ -988,6 +988,17 @@ def _render_index(
     .deck-detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
     .deck-detail-header h2 { margin: 0; }
     .deck-detail-close { background: none; border: 1px solid var(--line); border-radius: 8px; padding: .3rem .8rem; cursor: pointer; font-size: .85rem; color: var(--muted); }
+    /* Quick-Action Bar (T10) */
+    .deck-detail-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin: .6rem 0; }
+    .action-btn { padding: .4rem .9rem; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: .85rem; font-weight: 600; transition: opacity .15s; }
+    .action-btn:hover { opacity: .82; }
+    .action-btn:disabled { opacity: .5; cursor: wait; }
+    .action-btn.export { background: var(--green); color: #fff; border-color: var(--green); }
+    .action-btn.analyze { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .action-btn.improve { background: #6b46c1; color: #fff; border-color: #6b46c1; }
+    .action-status { font-size: .82rem; color: var(--muted); margin-left: .4rem; }
+    .action-status.error { color: #b91c1c; }
+    .action-status.ok { color: var(--green); }
     .deck-cards-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .5rem; }
     @media (max-width: 700px) { .deck-cards-grid { grid-template-columns: 1fr; } }
     .deck-pile h3 { margin: .2rem 0 .4rem; font-size: 1rem; }
@@ -1091,6 +1102,41 @@ def _render_index(
     .builder-result-block { margin: .5rem 0; padding: .6rem .8rem; background: rgba(255,250,240,.7); border: 1px solid var(--line); border-radius: 10px; }
     .builder-result-block h4 { margin: .2rem 0 .3rem; font-size: .95rem; color: var(--accent); }
     .builder-result-block .meta { font-size: .82rem; }
+    /* Collection Browser */
+    .collection-browser-controls { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: .8rem; margin-bottom: .8rem; }
+    .collection-browser-row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .5rem; }
+    .collection-browser-row:last-child { margin-bottom: 0; }
+    .collection-browser-row label { font-size: .85rem; color: var(--muted); }
+    .collection-browser-row select, .collection-browser-row input[type="number"] {
+      border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; font-size: .85rem; font-family: inherit; background: var(--bg); color: var(--fg);
+    }
+    .collection-browser-row select:focus, .collection-browser-row input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+    .cb-search-input { flex: 1 1 24rem; min-width: 12rem; border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-size: .9rem; background: var(--bg); color: var(--fg); }
+    .cb-search-input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+    .btn-cb-reset { background: var(--panel); color: var(--accent); border: 1px solid var(--accent); border-radius: 8px; padding: .3rem .8rem; cursor: pointer; font-size: .85rem; }
+    .btn-cb-reset:hover { background: var(--accent); color: #fff; }
+    .collection-browser-results { max-height: 600px; overflow-y: auto; }
+    .cb-card { display: flex; gap: .8rem; padding: .5rem .8rem; border-bottom: 1px solid var(--line); align-items: flex-start; }
+    .cb-card:hover { background: rgba(255,250,240,.5); }
+    .cb-card-img { flex: 0 0 100px; }
+    .cb-card-img img { width: 100px; height: auto; border-radius: 6px; }
+    .cb-card-info { flex: 1; min-width: 0; }
+    .cb-card-name { font-weight: bold; font-size: .95rem; color: var(--ink); }
+    .cb-card-meta { font-size: .82rem; color: var(--muted); margin-top: .15rem; }
+    .cb-card-text { font-size: .82rem; color: var(--fg); margin-top: .2rem; white-space: pre-wrap; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+    .cb-mana-badge { display: inline-block; padding: .1rem .4rem; border-radius: 4px; font-size: .75rem; font-weight: bold; margin-right: .3rem; }
+    .cb-mana-W { background: #f8f6e8; color: #333; border: 1px solid #e0dcc0; }
+    .cb-mana-U { background: #aed4e6; color: #0d3b66; border: 1px solid #7eb8d4; }
+    .cb-mana-B { background: #c9c1c1; color: #1a1a1a; border: 1px solid #999; }
+    .cb-mana-R { background: #e6a4a4; color: #8b0000; border: 1px solid #cc7777; }
+    .cb-mana-G { background: #b8d4a8; color: #1a4d1a; border: 1px solid #8bb87b; }
+    .cb-mana-C { background: #d0d0d0; color: #333; border: 1px solid #aaa; }
+    .cb-rarity-common { color: #333; }
+    .cb-rarity-uncommon { color: #777; font-weight: bold; }
+    .cb-rarity-rare { color: #b8860b; font-weight: bold; }
+    .cb-rarity-mythic { color: #c45a18; font-weight: bold; }
+    .cb-rarity-special { color: #6a0dad; font-weight: bold; }
+    .cb-no-results { padding: 1rem; text-align: center; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -1156,6 +1202,14 @@ def _render_index(
             <h3 id="deck-detail-name">Deck</h3>
             <p class="meta" id="deck-detail-meta"></p>
             <div id="deck-detail-badges"></div>
+            <div class="deck-detail-actions" id="deck-detail-actions">
+              <button class="action-btn export" id="btn-export-arena" type="button">Export (Arena)</button>
+              <button class="action-btn analyze" id="btn-analyze" type="button">Analyze</button>
+              <button class="action-btn improve" id="btn-improve" type="button">Improve</button>
+              <span class="action-status" id="deck-action-status"></span>
+            </div>
+            <div id="deck-analyze-result" style="display:none;"></div>
+            <div id="deck-improve-result" style="display:none;"></div>
             <h4>Summary</h4>
             <pre id="deck-detail-json"></pre>
           </div>
@@ -1252,6 +1306,58 @@ def _render_index(
     $meta_notes
   </div>
 
+  <div class="section" id="collection-browser-section">
+    <h2>Collection-Browser <span class="badge badge-green">Phase 2</span></h2>
+    <p class="meta">Durchsuche deine Collection nach Name, Kartentext, Typ, Farbe, Seltenheit und CMC. Client-seitige Filterung der /api/collection/enriched-Daten.</p>
+    <div id="collection-browser-controls" class="collection-browser-controls">
+      <div class="collection-browser-row">
+        <input id="cb-search" type="text" placeholder="Name oder Kartentext suchen..." autocomplete="off" aria-label="Suche nach Name oder Kartentext" class="cb-search-input">
+      </div>
+      <div class="collection-browser-row">
+        <label for="cb-type">Typ:</label>
+        <select id="cb-type" aria-label="Nach Kartentyp filtern">
+          <option value="">Alle</option>
+          <option value="creature">Creature</option>
+          <option value="instant">Instant</option>
+          <option value="sorcery">Sorcery</option>
+          <option value="enchantment">Enchantment</option>
+          <option value="artifact">Artifact</option>
+          <option value="planeswalker">Planeswalker</option>
+          <option value="land">Land</option>
+          <option value="battle">Battle</option>
+        </select>
+        <label for="cb-color">Farbe:</label>
+        <select id="cb-color" aria-label="Nach Farbe filtern">
+          <option value="">Alle</option>
+          <option value="W">Weiß (W)</option>
+          <option value="U">Blau (U)</option>
+          <option value="B">Schwarz (B)</option>
+          <option value="R">Rot (R)</option>
+          <option value="G">Grün (G)</option>
+          <option value="C">Farblos (C)</option>
+        </select>
+        <label for="cb-rarity">Seltenheit:</label>
+        <select id="cb-rarity" aria-label="Nach Seltenheit filtern">
+          <option value="">Alle</option>
+          <option value="common">Common</option>
+          <option value="uncommon">Uncommon</option>
+          <option value="rare">Rare</option>
+          <option value="mythic">Mythic</option>
+          <option value="special">Special</option>
+        </select>
+        <label for="cb-cmc">CMC max:</label>
+        <input id="cb-cmc" type="number" min="0" max="20" placeholder="z.B. 3" aria-label="Maximale Manakosten">
+      </div>
+      <div class="collection-browser-row">
+        <button id="cb-reset" class="btn-cb-reset">Filter zurücksetzen</button>
+        <span id="cb-status" class="meta">Lade Collection-Daten...</span>
+      </div>
+    </div>
+    <div id="collection-browser-results" class="collection-browser-results">
+      <p class="meta" id="cb-loading">Lade Collection-Daten...</p>
+    </div>
+  </div>
+
   <div class="section">
     <h2>Collection</h2>
     <p>Completeness: <strong>$collection_completeness</strong></p>
@@ -1317,6 +1423,131 @@ def _render_index(
     )
 
 
+# ---------------------------------------------------------------------------
+# Enriched collection — joins collection.json grpIds with Scryfall metadata.
+# ---------------------------------------------------------------------------
+
+# Module-level cache for the enriched card database (loaded once per process).
+_ENRICHED_CARD_DB: dict[int, dict[str, Any]] | None = None
+_ENRICHED_CARD_DB_LOCK = threading.Lock()
+
+
+def _get_enriched_card_db() -> dict[int, dict[str, Any]]:
+    """Load and cache the enriched Scryfall card database (process-wide)."""
+    global _ENRICHED_CARD_DB
+    with _ENRICHED_CARD_DB_LOCK:
+        if _ENRICHED_CARD_DB is not None:
+            return _ENRICHED_CARD_DB
+        from scanner.card_database import load_enriched_card_database
+        _ENRICHED_CARD_DB = load_enriched_card_database()
+        return _ENRICHED_CARD_DB
+
+
+def _build_enriched_collection(output_dir: Path) -> dict[str, Any]:
+    """Join collection.json grpIds with enriched Scryfall metadata.
+
+    Returns a dict:
+      {
+        "cards": [ {grp_id, count, name, set, rarity, cmc, type_line, colors, oracle_text, image_uri}, ... ],
+        "total_unique": N,
+        "total_copies": M,
+        "enriched_count": K,     # how many cards got full metadata
+        "source": "scryfall" | "basic"
+      }
+
+    If collection.json is missing, returns {"error": "not_found", ...}.
+    If the enriched DB is empty (no Scryfall data), falls back to basic
+    lookup (name, set, collector_number only).
+    """
+    collection = _read_json(output_dir / "collection.json")
+    if collection is None:
+        return {"error": "not_found", "message": "collection.json fehlt."}
+
+    raw_cards = collection.get("cards", {})
+    if not isinstance(raw_cards, dict):
+        raw_cards = {}
+
+    enriched_db = _get_enriched_card_db()
+
+    # Fallback: load basic lookup if enriched DB is empty
+    basic_db: dict[int, dict[str, Any]] = {}
+    if not enriched_db:
+        from scanner.card_database import load_card_database
+        basic_db = load_card_database()
+
+    cards_out: list[dict[str, Any]] = []
+    total_copies = 0
+    enriched_count = 0
+
+    for grp_id_str, count in raw_cards.items():
+        try:
+            grp_id = int(grp_id_str)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(count, int):
+            try:
+                count = int(count)
+            except (ValueError, TypeError):
+                continue
+
+        total_copies += count
+
+        entry: dict[str, Any] = {"grp_id": grp_id, "count": count}
+
+        if enriched_db and grp_id in enriched_db:
+            meta = enriched_db[grp_id]
+            entry.update({
+                "name": meta.get("name", "Unknown"),
+                "set": meta.get("set", ""),
+                "collector_number": meta.get("collector_number", ""),
+                "rarity": meta.get("rarity", "unknown"),
+                "cmc": meta.get("cmc", 0),
+                "type_line": meta.get("type_line", ""),
+                "colors": meta.get("colors", []),
+                "oracle_text": meta.get("oracle_text", ""),
+                "image_uri": meta.get("image_uri"),
+            })
+            enriched_count += 1
+        elif basic_db and grp_id in basic_db:
+            meta = basic_db[grp_id]
+            entry.update({
+                "name": meta.get("name", "Unknown"),
+                "set": meta.get("set", ""),
+                "collector_number": meta.get("collector_number", ""),
+                "rarity": "unknown",
+                "cmc": 0,
+                "type_line": "",
+                "colors": [],
+                "oracle_text": "",
+                "image_uri": None,
+            })
+        else:
+            entry.update({
+                "name": f"Card {grp_id}",
+                "set": "",
+                "collector_number": "",
+                "rarity": "unknown",
+                "cmc": 0,
+                "type_line": "",
+                "colors": [],
+                "oracle_text": "",
+                "image_uri": None,
+            })
+
+        cards_out.append(entry)
+
+    # Sort by name for stable output
+    cards_out.sort(key=lambda c: c.get("name", ""))
+
+    return {
+        "cards": cards_out,
+        "total_unique": len(cards_out),
+        "total_copies": total_copies,
+        "enriched_count": enriched_count,
+        "source": "scryfall" if enriched_db else ("basic" if basic_db else "none"),
+    }
+
+
 class MtgaAdvisorHandler(BaseHTTPRequestHandler):
     server_version = "mtga-advisor/0.3"
 
@@ -1350,6 +1581,14 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 _json_response(self, {"error": "not_found", "message": "collection.json fehlt."}, status=HTTPStatus.NOT_FOUND)
                 return
             _json_response(self, payload, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/collection/enriched":
+            result = _build_enriched_collection(output_dir)
+            if "error" in result:
+                _json_response(self, result, status=HTTPStatus.NOT_FOUND)
+            else:
+                _json_response(self, result, status=HTTPStatus.OK)
             return
 
         if self.path == "/api/decks":
