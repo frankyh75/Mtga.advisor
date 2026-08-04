@@ -29,6 +29,8 @@ from scanner.helper_client import (  # noqa: E402
     helper_scan_collection_detailed,
     is_helper_available,
     ping,
+    request_list_regions,
+    request_read_memory,
     request_scan,
 )
 
@@ -275,3 +277,75 @@ def test_send_request_sends_correct_json(mock_sock_path):
         ping(mock_sock_path)
         assert len(server.received_requests) == 1
         assert server.received_requests[0]["action"] == "ping"
+
+
+# --- Tests für Low-Level Primitives (neues Protokoll) ---
+
+
+def test_request_list_regions_success(mock_sock_path):
+    """list_regions liefert eine Liste von Region-Dicts."""
+    regions_response = {
+        "status": "ok",
+        "regions": [
+            {"address": 4294967296, "size": 1048576},
+            {"address": 4296015872, "size": 2097152},
+        ],
+    }
+    with MockHelperServer(mock_sock_path, {"list_regions": regions_response}):
+        result = request_list_regions(mock_sock_path)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["address"] == 4294967296
+        assert result[0]["size"] == 1048576
+        assert result[1]["address"] == 4296015872
+
+
+def test_request_list_regions_raises_helper_error(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"list_regions": {"error": "MTGA not found"}}):
+        with pytest.raises(HelperError, match="MTGA not found"):
+            request_list_regions(mock_sock_path)
+
+
+def test_request_list_regions_raises_protocol_error_when_no_regions(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"list_regions": {"status": "ok"}}):
+        with pytest.raises(HelperProtocolError, match="regions"):
+            request_list_regions(mock_sock_path)
+
+
+def test_request_read_memory_success(mock_sock_path):
+    """read_memory liefert dekodierte Bytes."""
+    import base64
+    raw_data = b"\x00\x01\x02\x03\x04"
+    b64_data = base64.b64encode(raw_data).decode("utf-8")
+    read_response = {
+        "status": "ok",
+        "data": b64_data,
+        "bytes_read": 5,
+    }
+    with MockHelperServer(mock_sock_path, {"read_memory": read_response}):
+        result = request_read_memory(mock_sock_path, address=4294967296, size=5)
+        assert isinstance(result, bytes)
+        assert result == raw_data
+        assert len(result) == 5
+
+
+def test_request_read_memory_raises_helper_error(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"read_memory": {"error": "Invalid address"}}):
+        with pytest.raises(HelperError, match="Invalid address"):
+            request_read_memory(mock_sock_path, address=0, size=64)
+
+
+def test_request_read_memory_raises_protocol_error_when_no_data(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok"}}):
+        with pytest.raises(HelperProtocolError, match="data"):
+            request_read_memory(mock_sock_path, address=4294967296, size=64)
+
+
+def test_request_read_memory_raises_protocol_error_on_invalid_address():
+    with pytest.raises(HelperProtocolError, match="Ungültige Adresse"):
+        request_read_memory("/tmp/no.sock", address=-1, size=64)
+
+
+def test_request_read_memory_raises_protocol_error_on_invalid_size():
+    with pytest.raises(HelperProtocolError, match="Ungültige Größe"):
+        request_read_memory("/tmp/no.sock", address=4294967296, size=0)
