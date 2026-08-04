@@ -12,6 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const chatLoading = document.getElementById("chat-loading");
   const chatDeckCards = document.getElementById("chat-deck-cards");
   const hidePrecons = document.getElementById("hide-precons");
+  const deckSearch = document.getElementById("deck-search");
   const deckVisibility = document.getElementById("deck-visibility");
   const deckDetailsSection = document.getElementById("deck-details");
   const deckDetailEmpty = document.getElementById("deck-detail-empty");
@@ -31,6 +32,78 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
 
   let selectedDeck = null;
+
+  // --- DOM helper utilities (safe rendering via createElement/textContent) ---
+  // Creates an element, applies attributes, and optionally appends children/text.
+  function el(tag, opts) {
+    const node = document.createElement(tag);
+    if (opts) {
+      if (opts.className) node.className = opts.className;
+      if (opts.text != null) node.textContent = opts.text;
+      if (opts.style) node.setAttribute("style", opts.style);
+      if (opts.children) {
+        for (const c of opts.children) {
+          if (c) node.appendChild(c);
+        }
+      }
+    }
+    return node;
+  }
+
+  // Creates a <p class="meta"> with the given text.
+  function metaP(text) {
+    return el("p", { className: "meta", text: String(text) });
+  }
+
+  // Creates an <ul> from an array of <li> text strings or nodes.
+  function ulFrom(items) {
+    const list = el("ul");
+    for (const item of items) {
+      if (typeof item === "string") {
+        list.appendChild(el("li", { text: item }));
+      } else {
+        list.appendChild(item);
+      }
+    }
+    return list;
+  }
+
+  // Creates a <li> with mixed text + inline elements.
+  function li(...children) {
+    const item = el("li");
+    for (const c of children) {
+      if (typeof c === "string") {
+        item.appendChild(document.createTextNode(c));
+      } else {
+        item.appendChild(c);
+      }
+    }
+    return item;
+  }
+
+  // Creates a <strong> element.
+  function strong(text) {
+    return el("strong", { text: String(text) });
+  }
+
+  // Creates a <code> element.
+  function code(text) {
+    return el("code", { text: String(text) });
+  }
+
+  // Removes all children from a DOM node.
+  function clearChildren(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+
+  // Appends all children to a node.
+  function appendAll(node, children) {
+    for (const c of children) {
+      if (c) node.appendChild(c);
+    }
+  }
 
   // Lazy-loads card thumbnails as they scroll into view (single shared
   // observer for all card lists, restored from a WIP fix whose merge
@@ -395,13 +468,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const applyDeckFilter = () => {
     const hide = Boolean(hidePrecons?.checked);
+    const query = (deckSearch?.value ?? "").trim().toLowerCase();
     let visibleCount = 0;
     let hiddenCount = 0;
 
     deckRows.forEach((row) => {
       const isPrecon = row.dataset.isPrecon === "true";
-      const shouldHide = hide && isPrecon;
-      row.classList.toggle("hidden-by-filter", shouldHide);
+      const deckName = (row.dataset.deckName ?? "").toLowerCase();
+      const hiddenByPrecon = hide && isPrecon;
+      const hiddenBySearch = query !== "" && !deckName.includes(query);
+      const shouldHide = hiddenByPrecon || hiddenBySearch;
+      row.classList.toggle("hidden-by-filter", hiddenByPrecon);
+      row.classList.toggle("hidden-by-search", hiddenBySearch && !hiddenByPrecon);
       if (shouldHide) {
         hiddenCount += 1;
       } else {
@@ -410,9 +488,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     if (deckVisibility) {
-      deckVisibility.textContent = hide
-        ? `${visibleCount} Decks sichtbar, ${hiddenCount} Precons ausgeblendet.`
-        : `${visibleCount} Decks sichtbar.`;
+      const parts = [`${visibleCount} Decks sichtbar`];
+      if (hiddenCount > 0) {
+        parts.push(`${hiddenCount} ausgeblendet`);
+      }
+      deckVisibility.textContent = parts.join(", ") + ".";
     }
   };
 
@@ -476,6 +556,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (hidePrecons) {
     hidePrecons.addEventListener("change", applyDeckFilter);
+  }
+
+  if (deckSearch) {
+    deckSearch.addEventListener("input", applyDeckFilter);
   }
 
   if (chatClose && chatPanel) {
@@ -575,88 +659,84 @@ document.addEventListener("DOMContentLoaded", () => {
       historyDiffBtn.disabled = true;
       historyDiffBtn.textContent = "Lade Diff...";
       historyDiffResult.style.display = "block";
+      clearChildren(historyDiffContent);
       try {
         const resp = await fetch("/api/history/diff");
         const data = await resp.json();
         if (data.error) {
-          historyDiffContent.innerHTML = `<p class="meta">${data.error}</p>`;
+          historyDiffContent.appendChild(metaP(data.error));
         } else {
-          let html = "";
+          const fragment = document.createDocumentFragment();
           const cd = data.collectionDiff;
           if (cd && !cd.error) {
             const s = cd.summary;
-            html += `<h4>Collection</h4>`;
-            html += `<p class="meta">+${s.added} neu, +${s.increased} erhöht, -${s.removed} entfernt, -${s.decreased} reduziert, ${s.unchanged} unverändert</p>`;
-            html += `<p class="meta">Netto: ${s.netChange >= 0 ? "+" : ""}${s.netChange} Karten</p>`;
+            fragment.appendChild(el("h4", { text: "Collection" }));
+            fragment.appendChild(metaP(
+              "+" + s.added + " neu, +" + s.increased + " erhöht, " +
+              "-" + s.removed + " entfernt, -" + s.decreased + " reduziert, " +
+              s.unchanged + " unverändert"
+            ));
+            fragment.appendChild(metaP(
+              "Netto: " + (s.netChange >= 0 ? "+" : "") + s.netChange + " Karten"
+            ));
             if (cd.added && cd.added.length > 0) {
-              html += "<ul>";
-              for (const c of cd.added.slice(0, 20)) {
-                html += `<li>+${c.count}x Card ${c.cardId} (neu)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.added.slice(0, 20).map(c => "+" + c.count + "x Card " + c.cardId + " (neu)")
+              ));
             }
             if (cd.increased && cd.increased.length > 0) {
-              html += "<ul>";
-              for (const c of cd.increased.slice(0, 20)) {
-                html += `<li>+${c.delta}x Card ${c.cardId} (jetzt ${c.newCount}x, war ${c.oldCount}x)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.increased.slice(0, 20).map(c =>
+                  "+" + c.delta + "x Card " + c.cardId + " (jetzt " + c.newCount + "x, war " + c.oldCount + "x)"
+                )
+              ));
             }
             if (cd.removed && cd.removed.length > 0) {
-              html += "<ul>";
-              for (const c of cd.removed.slice(0, 20)) {
-                html += `<li>-${c.oldCount}x Card ${c.cardId} (entfernt)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.removed.slice(0, 20).map(c => "-" + c.oldCount + "x Card " + c.cardId + " (entfernt)")
+              ));
             }
             if (cd.decreased && cd.decreased.length > 0) {
-              html += "<ul>";
-              for (const c of cd.decreased.slice(0, 20)) {
-                html += `<li>-${c.delta}x Card ${c.cardId} (jetzt ${c.newCount}x, war ${c.oldCount}x)</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(
+                cd.decreased.slice(0, 20).map(c =>
+                  "-" + c.delta + "x Card " + c.cardId + " (jetzt " + c.newCount + "x, war " + c.oldCount + "x)"
+                )
+              ));
             }
             if (cd.wildcardDiff) {
-              html += "<h5>Wildcards</h5><ul>";
+              fragment.appendChild(el("h5", { text: "Wildcards" }));
+              const wcItems = [];
               for (const [key, change] of Object.entries(cd.wildcardDiff)) {
-                html += `<li>${key}: ${change.old} → ${change.new} (${change.delta >= 0 ? "+" : ""}${change.delta})</li>`;
+                wcItems.push(key + ": " + change.old + " → " + change.new + " (" + (change.delta >= 0 ? "+" : "") + change.delta + ")");
               }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(wcItems));
             }
           }
 
           const dd = data.decksDiff;
           if (dd) {
             const s = dd.summary;
-            html += `<h4>Decks</h4>`;
-            html += `<p class="meta">+${s.added} neu, -${s.removed} entfernt, ~${s.modified} verändert</p>`;
+            fragment.appendChild(el("h4", { text: "Decks" }));
+            fragment.appendChild(metaP("+" + s.added + " neu, -" + s.removed + " entfernt, ~" + s.modified + " verändert"));
             if (dd.added && dd.added.length > 0) {
-              html += "<ul>";
-              for (const d of dd.added) {
-                html += `<li>+ ${d.name} (${d.deckId})</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(dd.added.map(d => "+ " + d.name + " (" + d.deckId + ")")));
             }
             if (dd.removed && dd.removed.length > 0) {
-              html += "<ul>";
-              for (const d of dd.removed) {
-                html += `<li>- ${d.name} (${d.deckId})</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(dd.removed.map(d => "- " + d.name + " (" + d.deckId + ")")));
             }
             if (dd.modified && dd.modified.length > 0) {
-              html += "<ul>";
-              for (const d of dd.modified) {
-                html += `<li>~ ${d.name} (${d.deckId})</li>`;
-              }
-              html += "</ul>";
+              fragment.appendChild(ulFrom(dd.modified.map(d => "~ " + d.name + " (" + d.deckId + ")")));
             }
           }
 
-          historyDiffContent.innerHTML = html || "<p class='meta'>Keine Änderungen.</p>";
+          if (!fragment.hasChildNodes()) {
+            fragment.appendChild(metaP("Keine Änderungen."));
+          }
+          historyDiffContent.appendChild(fragment);
         }
       } catch (err) {
-        historyDiffContent.innerHTML = `<p class="meta">Fehler: ${err.message}</p>`;
+        clearChildren(historyDiffContent);
+        historyDiffContent.appendChild(metaP("Fehler: " + err.message));
       }
       historyDiffBtn.disabled = false;
       historyDiffBtn.textContent = "Diff anzeigen";
@@ -678,67 +758,87 @@ document.addEventListener("DOMContentLoaded", () => {
         const limited = ranks.limited || {};
         const warnings = data.warnings || [];
 
-        let html = "";
+        clearChildren(ranksContent);
+        const fragment = document.createDocumentFragment();
 
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">';
-        html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;">';
-        html += '<h3 style="margin:0 0 .5rem;">Constructed</h3>';
-        if (constructed.class && constructed.class !== "None") {
-          html += `<p style="font-size:1.4rem;font-weight:bold;margin:.25rem 0;">${constructed.class}</p>`;
-          if (constructed.level) html += `<p class="meta">Level ${constructed.level}, Step ${constructed.step || 0}</p>`;
-          html += `<p class="meta">Saison ${constructed.seasonOrdinal || "?"}: ${constructed.wins || 0}-${constructed.losses || 0}${constructed.draws ? `-${constructed.draws}` : ""}</p>`;
-          if (constructed.leaderboardPlace) html += `<p class="meta">Leaderboard #${constructed.leaderboardPlace}</p>`;
-          if (constructed.percentile) html += `<p class="meta">Percentile: ${constructed.percentile}</p>`;
-        } else {
-          html += '<p class="meta">Unranked</p>';
+        // Two-column grid for Constructed / Limited
+        const grid = el("div", {
+          style: "display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;",
+        });
+
+        function rankColumn(title, rank) {
+          const col = el("div", {
+            style: "padding:1rem;border:1px solid var(--border);border-radius:8px;",
+          });
+          col.appendChild(el("h3", { style: "margin:0 0 .5rem;", text: title }));
+          if (rank.class && rank.class !== "None") {
+            col.appendChild(el("p", {
+              style: "font-size:1.4rem;font-weight:bold;margin:.25rem 0;",
+              text: rank.class,
+            }));
+            if (rank.level) {
+              col.appendChild(metaP("Level " + rank.level + ", Step " + (rank.step || 0)));
+            }
+            const seasonText = "Saison " + (rank.seasonOrdinal || "?") + ": " +
+              (rank.wins || 0) + "-" + (rank.losses || 0) +
+              (rank.draws ? "-" + rank.draws : "");
+            col.appendChild(metaP(seasonText));
+            if (rank.leaderboardPlace) {
+              col.appendChild(metaP("Leaderboard #" + rank.leaderboardPlace));
+            }
+            if (rank.percentile) {
+              col.appendChild(metaP("Percentile: " + rank.percentile));
+            }
+          } else {
+            col.appendChild(metaP("Unranked"));
+          }
+          return col;
         }
-        html += "</div>";
 
-        html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;">';
-        html += '<h3 style="margin:0 0 .5rem;">Limited</h3>';
-        if (limited.class && limited.class !== "None") {
-          html += `<p style="font-size:1.4rem;font-weight:bold;margin:.25rem 0;">${limited.class}</p>`;
-          if (limited.level) html += `<p class="meta">Level ${limited.level}, Step ${limited.step || 0}</p>`;
-          html += `<p class="meta">Saison ${limited.seasonOrdinal || "?"}: ${limited.wins || 0}-${limited.losses || 0}${limited.draws ? `-${limited.draws}` : ""}</p>`;
-          if (limited.leaderboardPlace) html += `<p class="meta">Leaderboard #${limited.leaderboardPlace}</p>`;
-          if (limited.percentile) html += `<p class="meta">Percentile: ${limited.percentile}</p>`;
-        } else {
-          html += '<p class="meta">Unranked</p>';
-        }
-        html += "</div>";
-        html += "</div>";
+        grid.appendChild(rankColumn("Constructed", constructed));
+        grid.appendChild(rankColumn("Limited", limited));
+        fragment.appendChild(grid);
 
+        // Account section
         if (account.displayName || account.accountId) {
-          html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;margin-bottom:1rem;">';
-          html += '<h3 style="margin:0 0 .5rem;">Account</h3>';
-          if (account.displayName) html += `<p class="meta">Name: <strong>${account.displayName}</strong></p>`;
-          if (account.countryCode) html += `<p class="meta">Land: ${account.countryCode}</p>`;
-          if (account.accountId) html += `<p class="meta">Account ID: ${account.accountId}</p>`;
-          if (account.personaId) html += `<p class="meta">Persona ID: ${account.personaId}</p>`;
-          if (account.gameId) html += `<p class="meta">Game ID: ${account.gameId}</p>`;
-          html += "</div>";
+          const acctDiv = el("div", {
+            style: "padding:1rem;border:1px solid var(--border);border-radius:8px;margin-bottom:1rem;",
+          });
+          acctDiv.appendChild(el("h3", { style: "margin:0 0 .5rem;", text: "Account" }));
+          if (account.displayName) {
+            const p = metaP("Name: ");
+            p.appendChild(strong(account.displayName));
+            acctDiv.appendChild(p);
+          }
+          if (account.countryCode) acctDiv.appendChild(metaP("Land: " + account.countryCode));
+          if (account.accountId) acctDiv.appendChild(metaP("Account ID: " + account.accountId));
+          if (account.personaId) acctDiv.appendChild(metaP("Persona ID: " + account.personaId));
+          if (account.gameId) acctDiv.appendChild(metaP("Game ID: " + account.gameId));
+          fragment.appendChild(acctDiv);
         }
 
         if (ranks.playerId) {
-          html += `<p class="meta">Player ID: ${ranks.playerId}</p>`;
+          fragment.appendChild(metaP("Player ID: " + ranks.playerId));
         }
 
         if (warnings.length > 0) {
-          html += '<div class="warning"><h3>Warnings</h3><ul>';
-          for (const w of warnings) {
-            html += `<li>${w}</li>`;
-          }
-          html += "</ul></div>";
+          const warnDiv = el("div", { className: "warning" });
+          warnDiv.appendChild(el("h3", { text: "Warnings" }));
+          warnDiv.appendChild(ulFrom(warnings));
+          fragment.appendChild(warnDiv);
         }
 
-        if (!html) {
-          html = '<p class="meta">Keine Rang-Daten verfügbar.</p>';
+        if (!fragment.hasChildNodes()) {
+          fragment.appendChild(metaP("Keine Rang-Daten verfügbar."));
         }
-
-        ranksContent.innerHTML = html;
+        ranksContent.appendChild(fragment);
       })
       .catch((err) => {
-        ranksContent.innerHTML = `<p class="meta">Rang-Daten nicht verfügbar — ${err.message}. Führe <code>mtga-export ranks --output out/ranks.json</code> aus.</p>`;
+        clearChildren(ranksContent);
+        const p = metaP("Rang-Daten nicht verfügbar — " + err.message + ". Führe ");
+        p.appendChild(code("mtga-export ranks --output out/ranks.json"));
+        p.appendChild(document.createTextNode(" aus."));
+        ranksContent.appendChild(p);
       });
   }
 
@@ -757,60 +857,89 @@ document.addEventListener("DOMContentLoaded", () => {
         const fmt = (data.format || "standard").charAt(0).toUpperCase() + (data.format || "standard").slice(1);
         const fetchedAt = data.fetchedAt || "?";
 
-        let html = "";
-        html += `<p class="meta">Format: <strong>${fmt}</strong> · Quelle: MTGGoldfish · Abgerufen: ${fetchedAt}</p>`;
+        clearChildren(metaContent);
+        const fragment = document.createDocumentFragment();
+
+        // Format info line: "Format: **Standard** · Quelle: MTGGoldfish · Abgerufen: ..."
+        const fmtP = metaP("Format: ");
+        fmtP.appendChild(strong(fmt));
+        fmtP.appendChild(document.createTextNode(" · Quelle: MTGGoldfish · Abgerufen: " + fetchedAt));
+        fragment.appendChild(fmtP);
 
         if (warnings.length > 0) {
-          html += '<div class="warning"><h3>Warnings</h3><ul>';
-          for (const w of warnings) {
-            html += `<li>${w}</li>`;
-          }
-          html += "</ul></div>";
+          const warnDiv = el("div", { className: "warning" });
+          warnDiv.appendChild(el("h3", { text: "Warnings" }));
+          warnDiv.appendChild(ulFrom(warnings));
+          fragment.appendChild(warnDiv);
         }
 
         if (topDecks.length > 0) {
-          html += '<h3>Top-Decks</h3>';
-          html += '<table style="width:100%;border-collapse:collapse;">';
-          html += '<thead><tr style="text-align:left;border-bottom:1px solid var(--border);">';
-          html += '<th style="padding:.3rem;">#</th>';
-          html += '<th style="padding:.3rem;">Deck</th>';
-          html += '<th style="padding:.3rem;">Meta%</th>';
-          html += '<th style="padding:.3rem;">Decks</th>';
-          html += '<th style="padding:.3rem;">Top-Karten</th>';
-          html += "</tr></thead><tbody>";
+          fragment.appendChild(el("h3", { text: "Top-Decks" }));
+          const table = el("table", { style: "width:100%;border-collapse:collapse;" });
+
+          // thead
+          const thead = el("thead");
+          const headRow = el("tr", { style: "text-align:left;border-bottom:1px solid var(--border);" });
+          for (const hdr of ["#", "Deck", "Meta%", "Decks", "Top-Karten"]) {
+            headRow.appendChild(el("th", { style: "padding:.3rem;", text: hdr }));
+          }
+          thead.appendChild(headRow);
+          table.appendChild(thead);
+
+          // tbody
+          const tbody = el("tbody");
           topDecks.forEach((deck, i) => {
             const cards = (deck.topCards || []).slice(0, 3).join(", ");
-            const colors = deck.colors ? ` <span style="font-size:.8rem;color:var(--text-dim);">(${deck.colors})</span>` : "";
-            html += '<tr style="border-bottom:1px solid var(--border);">';
-            html += `<td style="padding:.3rem;">${i + 1}</td>`;
-            html += `<td style="padding:.3rem;"><strong>${deck.name}</strong>${colors}</td>`;
-            html += `<td style="padding:.3rem;">${deck.metaShare.toFixed(1)}%</td>`;
-            html += `<td style="padding:.3rem;">${deck.deckCount}</td>`;
-            html += `<td style="padding:.3rem;font-size:.85rem;">${cards}</td>`;
-            html += "</tr>";
+            const row = el("tr", { style: "border-bottom:1px solid var(--border);" });
+
+            row.appendChild(el("td", { style: "padding:.3rem;", text: String(i + 1) }));
+
+            const deckTd = el("td", { style: "padding:.3rem;" });
+            deckTd.appendChild(strong(deck.name));
+            if (deck.colors) {
+              deckTd.appendChild(document.createTextNode(" "));
+              deckTd.appendChild(el("span", {
+                style: "font-size:.8rem;color:var(--text-dim);",
+                text: "(" + deck.colors + ")",
+              }));
+            }
+            row.appendChild(deckTd);
+
+            row.appendChild(el("td", { style: "padding:.3rem;", text: deck.metaShare.toFixed(1) + "%" }));
+            row.appendChild(el("td", { style: "padding:.3rem;", text: String(deck.deckCount) }));
+            row.appendChild(el("td", { style: "padding:.3rem;font-size:.85rem;", text: cards }));
+
+            tbody.appendChild(row);
           });
-          html += "</tbody></table>";
+          table.appendChild(tbody);
+          fragment.appendChild(table);
         }
 
         if (topCards.length > 0) {
-          html += '<h3>Häufigste Karten</h3>';
-          html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">';
+          fragment.appendChild(el("h3", { text: "Häufigste Karten" }));
+          const grid = el("div", {
+            style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;",
+          });
           for (const card of topCards.slice(0, 15)) {
-            html += `<div style="padding:.5rem;border:1px solid var(--border);border-radius:6px;">`;
-            html += `<strong>${card.name}</strong><br><span class="meta">${card.decks} Decks</span>`;
-            html += "</div>";
+            const cardDiv = el("div", {
+              style: "padding:.5rem;border:1px solid var(--border);border-radius:6px;",
+            });
+            cardDiv.appendChild(strong(card.name));
+            cardDiv.appendChild(el("br"));
+            cardDiv.appendChild(el("span", { className: "meta", text: card.decks + " Decks" }));
+            grid.appendChild(cardDiv);
           }
-          html += "</div>";
+          fragment.appendChild(grid);
         }
 
-        if (!html) {
-          html = '<p class="meta">Keine Meta-Daten verfügbar.</p>';
+        if (!fragment.hasChildNodes()) {
+          fragment.appendChild(metaP("Keine Meta-Daten verfügbar."));
         }
-
-        metaContent.innerHTML = html;
+        metaContent.appendChild(fragment);
       })
       .catch((err) => {
-        metaContent.innerHTML = `<p class="meta">Meta-Daten nicht verfügbar — ${err.message}.</p>`;
+        clearChildren(metaContent);
+        metaContent.appendChild(metaP("Meta-Daten nicht verfügbar — " + err.message + "."));
       });
   }
 });

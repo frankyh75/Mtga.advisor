@@ -113,6 +113,40 @@ def test_dashboard_script_is_loaded_from_asset() -> None:
     assert "innerHTML" not in js
 
 
+def test_dashboard_js_has_deck_search_filter() -> None:
+    """dashboard.js must wire up client-side deck-name search."""
+    js = _dashboard_js()
+
+    assert "deck-search" in js
+    assert "deckSearch" in js
+    assert "hidden-by-search" in js
+    assert 'addEventListener("input"' in js
+
+
+def test_render_index_includes_deck_search_input() -> None:
+    """The rendered HTML must contain the deck search text field."""
+    collection = {
+        "source": "memory-scan",
+        "cards": {"100": 2, "200": 1},
+        "diagnostics": {"completeness": {"cards": "complete"}, "warnings": []},
+    }
+    run_report = {"diagnostics": {"completeness": {"cards": "complete"}, "warnings": []}}
+    deck = {"name": "Test", "mainboard": [{"count": 4}], "sideboard": [], "diagnostics": {"warnings": []}}
+    advisor_result = {"summary": {}, "recommendations": [], "warnings": []}
+    decks = {
+        "schema": "decks.v1",
+        "decks": [
+            {"name": "Control", "deckId": "1", "deckKey": "1", "isPrecon": False},
+            {"name": "Aggro Red", "deckId": "2", "deckKey": "2", "isPrecon": True},
+        ],
+    }
+    html = _render_index(collection, run_report, deck, advisor_result, decks, LLMConfig())
+
+    assert 'id="deck-search"' in html
+    assert "Deck suchen" in html
+    assert "deck-search" in html
+
+
 def test_dashboard_js_has_intersection_observer() -> None:
     """Card thumbnails are lazy-loaded via IntersectionObserver."""
     js = _dashboard_js()

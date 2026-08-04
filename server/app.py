@@ -964,12 +964,15 @@ def _render_index(
     .btn-select-deck:hover { opacity: .85; }
     .deck-row:hover { background: rgba(180,83,9,.06); cursor: pointer; }
     .deck-row.is-selected { background: rgba(180,83,9,.14); }
-    .deck-row.hidden-by-filter { display: none; }
+    .deck-row.hidden-by-filter, .deck-row.hidden-by-search { display: none; }
     .deck-type { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .75rem; }
     .deck-type.precon { background: #fee8d1; color: #8a4b08; }
     .deck-type.normal { background: #e7efe9; color: #26513a; }
     .deck-toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: .5rem; flex-wrap: wrap; }
     .deck-toolbar label { display: inline-flex; gap: .45rem; align-items: center; cursor: pointer; }
+    .deck-search { flex: 0 1 18rem; }
+    .deck-search input { width: 100%; padding: .3rem .6rem; border: 1px solid var(--line); border-radius: 8px; font-size: .9rem; background: var(--bg); color: var(--fg); }
+    .deck-search input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
     .deck-details { margin-top: 1rem; border: 1px solid var(--line); border-radius: 16px; background: rgba(247,241,231,.9); padding: 1rem; }
     .deck-details code, .deck-details pre { background: #231f1a; color: #f8ead1; }
     .deck-details pre { max-height: 20rem; }
@@ -1122,6 +1125,9 @@ def _render_index(
     <h2>Decks <span class="badge">Phase 1.2</span></h2>
     <div class="deck-toolbar">
       <label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>
+      <div class="deck-search">
+        <input id="deck-search" type="text" placeholder="Deck suchen..." autocomplete="off" aria-label="Deck nach Namen suchen">
+      </div>
       <span id="deck-visibility" class="meta">Klick auf eine Zeile für Details, Chat-Button für Advisor.</span>
     </div>
     $decks_table
