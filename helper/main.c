@@ -1,13 +1,27 @@
 /**
- * mtga-helper — SMJobBless-kompatibler Memory-Scanner
+ * mtga-helper — SMJobBless-kompatibler Memory-Scanner für MTGA
  *
- * Horcht auf UNIX Socket /tmp/mtga-helper.sock, akzeptiert JSON-Kommandos:
- *   {"action":"ping"}              → {"status":"ok"}
- *   {"action":"scan","pid":12345}  → {"status":"ok","collection":{...},"decks":[...]}
- *   {"action":"shutdown"}          → Server beendet sich
+ * UNIX-Socket-Server, der als root (LaunchDaemon) läuft und
+ * Memory-Scans ohne sudo-Prompt ausführt.
  *
- * Kompilieren: clang -o mtga-helper main.c -framework CoreFoundation
- * Starten (als root): ./mtga-helper
+ * JSON-Protokoll (siehe scanner/helper_client.py):
+ *   {"action":"ping"}                                      → {"status":"ok"}
+ *   {"action":"status"}                                    → {"status":"ok","pid":N,"version":"...","socket_path":"..."}
+ *   {"action":"scan","process_names":["MTGA"],"anchors":[
+ *     {"grpId":12345,"quantity":2,"name":"Mountain"}
+ *   ],"debug":false}                                       → {"status":"ok","cards":{"12345":2,...},"anchor_matches":{...}}
+ *   {"action":"deck_scan",...}                             → {"status":"ok","decks":[...]}
+ *   {"action":"rank_scan",...}                             → {"status":"ok","ranks":[...]}
+ *   {"action":"shutdown"}                                  → {"status":"ok"}
+ *
+ * CLI:
+ *   mtga-helper [--sock PATH] [--test-mode] [--version]
+ *
+ * --sock PATH    UNIX-Socket-Pfad (Default: /tmp/mtga-helper.sock)
+ * --test-mode    Mock-Modus: scan liefert Dummy-Daten, task_for_pid übersprungen
+ * --version      Version ausgeben und beenden
+ *
+ * Kompilieren: make -C helper
  */
 
 #include <stdio.h>
@@ -16,35 +30,60 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <getopt.h>
+#include <stdarg.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/select.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_region.h>
+#include <mach/vm_statistics.h>
+#include <libproc.h>
 #include <sys/stat.h>
-#include <CoreFoundation/CoreFoundation.h>
+#include <fcntl.h>
 
-#define SOCKET_PATH "/tmp/mtga-helper.sock"
+/* --- Constants --- */
+
+#define VERSION "1.0.0"
+#define DEFAULT_SOCK_PATH "/tmp/mtga-helper.sock"
 #define MAX_CLIENTS 8
 #define BUF_SIZE 65536
-#define MAX_RESPONSE 1048576  /* 1 MB */
+#define MAX_RESPONSE 1048576    /* 1 MB */
+#define MAX_PROCESS_NAMES 16
+#define MAX_NAME_LEN 256
+#define MAX_ANCHORS 64
+#define READ_CHUNK (4 * 1024 * 1024)
+#define MAX_REGIONS 4096
 
+/* Card ID range (see scanner/memory_scanner.py find_blocks) */
+#define CARD_ID_MIN 1000
+#define CARD_ID_MAX 500000
+#define CARD_QTY_MIN 1
+#define CARD_QTY_MAX 400
+#define BLOCK_MIN_CARDS 50
+#define BLOCK_MAX_MISSES 50
+
+/* --- Globals --- */
+
+static char g_sock_path[256] = DEFAULT_SOCK_PATH;
+static int g_test_mode = 0;
 static int server_fd = -1;
-static volatile int running = 1;
+static volatile sig_atomic_t running = 1;
 
-/* --- JSON Builder (einfach, kein Parser nötig) --- */
+/* --- JSON helpers --- */
 
+/* Escape a string into JSON-quoted form. Caller frees. */
 static char *json_escape(const char *s) {
-    if (!s) return strdup("null");
+    if (!s) return strdup("\"\"");
     size_t len = strlen(s);
-    size_t cap = len * 2 + 3;
+    size_t cap = len * 6 + 3;  /* worst-case: each char → \uXXXX */
     char *out = malloc(cap);
     if (!out) return NULL;
     char *p = out;
     *p++ = '"';
     for (size_t i = 0; i < len; i++) {
-        unsigned char c = s[i];
+        unsigned char c = (unsigned char)s[i];
         switch (c) {
             case '"':  *p++ = '\\'; *p++ = '"';  break;
             case '\\': *p++ = '\\'; *p++ = '\\'; break;
@@ -55,7 +94,7 @@ static char *json_escape(const char *s) {
                 if (c < 0x20) {
                     p += snprintf(p, cap - (p - out), "\\u%04x", c);
                 } else {
-                    *p++ = c;
+                    *p++ = (char)c;
                 }
                 break;
         }
@@ -65,122 +104,800 @@ static char *json_escape(const char *s) {
     return out;
 }
 
+/* Build an error response: {"error":"msg"}. Caller frees. */
 static char *build_error(const char *msg) {
     char *escaped = json_escape(msg);
     if (!escaped) return NULL;
-    size_t len = strlen(escaped) + 50;
+    size_t len = strlen(escaped) + 20;
     char *resp = malloc(len);
     if (!resp) { free(escaped); return NULL; }
-    snprintf(resp, len, "{\"status\":\"error\",\"message\":%s}", escaped);
+    snprintf(resp, len, "{\"error\":%s}", escaped);
     free(escaped);
     return resp;
 }
 
-static char *build_pong(void) {
+/* Build a success response: {"status":"ok"}. Caller frees. */
+static char *build_ok(void) {
     return strdup("{\"status\":\"ok\"}");
 }
 
-/* --- Memory Scanner --- */
+/* --- Minimal JSON parser ---
+ *
+ * We don't need a full JSON parser — we just need to extract
+ * specific fields from the client request. The requests are
+ * small and well-structured.
+ */
 
-static kern_return_t read_process_memory(pid_t pid, mach_vm_address_t addr,
-                                          mach_vm_size_t size, void **buf,
-                                          mach_vm_size_t *out_size) {
-    mach_port_t task;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr != KERN_SUCCESS) return kr;
-
-    pointer_t data;
-    mach_msg_type_number_t data_size;
-    kr = mach_vm_read(task, addr, size, &data, &data_size);
-    if (kr == KERN_SUCCESS) {
-        *buf = (void *)data;
-        *out_size = data_size;
+/* Find a string value for a key in JSON.
+ * Returns a malloc'd copy of the value, or NULL if not found. */
+static char *json_get_string(const char *json, const char *key) {
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return NULL;
+    p += strlen(pattern);
+    /* skip whitespace and colon */
+    while (*p && (*p == ' ' || *p == '\t' || *p == ':')) p++;
+    if (*p != '"') return NULL;
+    p++;  /* skip opening quote */
+    const char *start = p;
+    /* find closing quote (handle escaped quotes) */
+    while (*p) {
+        if (*p == '\\' && p[1]) { p += 2; continue; }
+        if (*p == '"') break;
+        p++;
     }
-    mach_port_deallocate(mach_task_self(), task);
-    return kr;
+    if (*p != '"') return NULL;
+    size_t len = p - start;
+    char *val = malloc(len + 1);
+    if (!val) return NULL;
+    memcpy(val, start, len);
+    val[len] = '\0';
+    return val;
 }
 
-/* Einfacher Scan: sucht nach Arena-Card-IDs im Speicher eines Prozesses.
-   Das ist eine vereinfachte Version — der echte Scan nutzt Pattern-Matching
-   wie in scanner/pattern_scanner.py. */
-static char *scan_process(pid_t pid) {
-    mach_port_t task;
+/* Find an integer value for a key in JSON. Returns 1 on success. */
+static int json_get_int(const char *json, const char *key, long *val) {
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return 0;
+    p += strlen(pattern);
+    while (*p && (*p == ' ' || *p == '\t' || *p == ':')) p++;
+    if (*p == '"') return 0;  /* string, not int */
+    char *end;
+    long n = strtol(p, &end, 10);
+    if (end == p) return 0;
+    *val = n;
+    return 1;
+}
+
+/* Find a boolean value for a key. Returns 1 on success, 0 if not found. */
+static int json_get_bool(const char *json, const char *key, int *val) {
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return 0;
+    p += strlen(pattern);
+    while (*p && (*p == ' ' || *p == '\t' || *p == ':')) p++;
+    if (strncmp(p, "true", 4) == 0) { *val = 1; return 1; }
+    if (strncmp(p, "false", 5) == 0) { *val = 0; return 1; }
+    return 0;
+}
+
+/* --- Dynamic string builder for JSON responses --- */
+
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+} sb_t;
+
+static void sb_init(sb_t *sb, size_t initial_cap) {
+    sb->buf = malloc(initial_cap);
+    sb->cap = initial_cap;
+    sb->len = 0;
+    if (sb->buf) sb->buf[0] = '\0';
+}
+
+static void sb_ensure(sb_t *sb, size_t extra) {
+    if (sb->len + extra + 1 > sb->cap) {
+        size_t newcap = sb->cap * 2;
+        while (newcap < sb->len + extra + 1) newcap *= 2;
+        char *newbuf = realloc(sb->buf, newcap);
+        if (!newbuf) return;  /* OOM — leave as-is */
+        sb->buf = newbuf;
+        sb->cap = newcap;
+    }
+}
+
+static void sb_append(sb_t *sb, const char *s) {
+    size_t slen = strlen(s);
+    sb_ensure(sb, slen);
+    memcpy(sb->buf + sb->len, s, slen);
+    sb->len += slen;
+    sb->buf[sb->len] = '\0';
+}
+
+static void sb_appendf(sb_t *sb, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) { va_end(ap2); return; }
+    sb_ensure(sb, (size_t)n);
+    vsnprintf(sb->buf + sb->len, sb->cap - sb->len, fmt, ap2);
+    va_end(ap2);
+    sb->len += n;
+}
+
+static void sb_free(sb_t *sb) {
+    free(sb->buf);
+    sb->buf = NULL;
+    sb->len = sb->cap = 0;
+}
+
+/* --- Process discovery --- */
+
+/* Find PID by process name (case-insensitive substring match).
+ * Returns PID > 0 on success, 0 if not found, -1 on error. */
+static pid_t find_process_by_name(const char *name) {
+    pid_t pids[4096];
+    int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+    if (count <= 0) return 0;
+    count /= sizeof(pid_t);
+
+    for (int i = 0; i < count; i++) {
+        if (pids[i] == 0) continue;
+        struct proc_bsdinfo info;
+        int st = proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0,
+                              &info, sizeof(info));
+        if (st <= 0) continue;
+        /* Case-insensitive substring match */
+        if (strcasestr(info.pbi_name, name) != NULL) {
+            return pids[i];
+        }
+    }
+    return 0;
+}
+
+/* Find first matching process from a list of names.
+ * Returns PID > 0 or 0 if none found. */
+static pid_t find_process(const char *process_names[], int n_names) {
+    for (int i = 0; i < n_names; i++) {
+        pid_t pid = find_process_by_name(process_names[i]);
+        if (pid > 0) return pid;
+    }
+    /* Default: try "MTGA" */
+    return find_process_by_name("MTGA");
+}
+
+/* --- Memory reading --- */
+
+/* Attach to a process via task_for_pid.
+ * Returns the mach port on success, or MACH_PORT_NULL on failure. */
+static mach_port_t attach_to_process(pid_t pid) {
+    mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
     if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "mtga-helper: task_for_pid(%d) failed: %s\n",
+                pid, mach_error_string(kr));
+        return MACH_PORT_NULL;
+    }
+    return task;
+}
+
+/* Read a chunk of memory from a process.
+ * Returns malloc'd buffer (caller frees) or NULL. */
+static void *read_memory(mach_port_t task, mach_vm_address_t addr,
+                         mach_vm_size_t size, mach_vm_size_t *out_size) {
+    vm_offset_t data = 0;
+    mach_msg_type_number_t data_count = 0;
+    kern_return_t kr = mach_vm_read(task, addr, size, &data, &data_count);
+    if (kr != KERN_SUCCESS) return NULL;
+    *out_size = data_count;
+    return (void *)data;
+}
+
+/* --- Collection scan ---
+ *
+ * The collection in MTGA memory is stored as arrays of (grpId, quantity) pairs
+ * as little-endian uint32_t values. We iterate writable private regions,
+ * read them in chunks, and parse int pairs that look like valid card data.
+ * (See scanner/memory_scanner.py find_blocks() for the reference implementation.)
+ */
+
+/* Region info for scanning */
+typedef struct {
+    mach_vm_address_t address;
+    mach_vm_size_t size;
+} region_t;
+
+/* Iterate writable private regions of a task.
+ * Fills regions[] up to max_regions. Returns count or -1 on error.
+ * Uses mach_vm_region_recurse() to traverse submaps. */
+static int get_writable_regions(mach_port_t task, region_t *regions, int max_regions) {
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    natural_t depth = 0;
+    int count = 0;
+
+    while (count < max_regions) {
+        mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        struct vm_region_submap_info_64 info;
+        memset(&info, 0, sizeof(info));
+
+        kern_return_t kr = mach_vm_region_recurse(task, &address, &size,
+                                                   &depth,
+                                                   (vm_region_recurse_info_t)&info,
+                                                   &info_count);
+        if (kr != KERN_SUCCESS) break;
+
+        if (info.is_submap) {
+            depth++;
+            continue;
+        }
+
+        /* Only scan writable, private regions */
+        int writable = (info.protection & VM_PROT_WRITE) != 0;
+        int is_shared = (info.share_mode != SM_PRIVATE &&
+                         info.share_mode != SM_EMPTY);
+        if (writable && !is_shared && size > 0) {
+            regions[count].address = address;
+            regions[count].size = size;
+            count++;
+        }
+        address += size;
+    }
+    return count;
+}
+
+/* Parse a memory buffer for card (grpId, quantity) pairs.
+ * Mirrors find_blocks() in memory_scanner.py.
+ * Writes found cards into the cards dict (grpId → quantity). */
+static void parse_card_block(const uint32_t *ints, size_t count,
+                             /* output */ sb_t *cards_sb, int *cards_written,
+                             /* tracking */ uint32_t *seen_ids, int *seen_count,
+                             int max_seen) {
+    for (int offset = 0; offset <= 1; offset++) {
+        uint32_t current_ids[4096];
+        uint32_t current_qtys[4096];
+        int current_count = 0;
+        int misses = 0;
+
+        for (size_t i = offset; i + 1 < count; i += 2) {
+            uint32_t k = ints[i];
+            uint32_t v = ints[i + 1];
+
+            if (k >= CARD_ID_MIN && k < CARD_ID_MAX &&
+                v >= CARD_QTY_MIN && v <= CARD_QTY_MAX) {
+                /* Check if we already have this card */
+                int found = 0;
+                for (int j = 0; j < current_count; j++) {
+                    if (current_ids[j] == k) {
+                        /* Keep highest quantity */
+                        if (v > current_qtys[j]) current_qtys[j] = v;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found && current_count < 4096) {
+                    current_ids[current_count] = k;
+                    current_qtys[current_count] = v;
+                    current_count++;
+                }
+                misses = 0;
+            } else {
+                misses++;
+                if (misses > BLOCK_MAX_MISSES) {
+                    if (current_count > BLOCK_MIN_CARDS) {
+                        /* Flush block to JSON */
+                        for (int j = 0; j < current_count; j++) {
+                            /* Check global seen */
+                            int already = 0;
+                            for (int g = 0; g < *seen_count; g++) {
+                                if (seen_ids[g] == current_ids[j]) {
+                                    already = 1;
+                                    break;
+                                }
+                            }
+                            if (!already && *seen_count < max_seen) {
+                                seen_ids[*seen_count] = current_ids[j];
+                                (*seen_count)++;
+                                if (*cards_written > 0) sb_append(cards_sb, ",");
+                                sb_appendf(cards_sb, "\"%u\":%u",
+                                           current_ids[j], current_qtys[j]);
+                                (*cards_written)++;
+                            }
+                        }
+                    }
+                    current_count = 0;
+                    misses = 0;
+                }
+            }
+        }
+        /* Flush remaining */
+        if (current_count > BLOCK_MIN_CARDS) {
+            for (int j = 0; j < current_count; j++) {
+                int already = 0;
+                for (int g = 0; g < *seen_count; g++) {
+                    if (seen_ids[g] == current_ids[j]) {
+                        already = 1;
+                        break;
+                    }
+                }
+                if (!already && *seen_count < max_seen) {
+                    seen_ids[*seen_count] = current_ids[j];
+                    (*seen_count)++;
+                    if (*cards_written > 0) sb_append(cards_sb, ",");
+                    sb_appendf(cards_sb, "\"%u\":%u",
+                               current_ids[j], current_qtys[j]);
+                    (*cards_written)++;
+                }
+            }
+        }
+    }
+}
+
+/* Scan a process for card collection data.
+ * Returns a malloc'd JSON response string. Caller frees. */
+static char *scan_process_collection(pid_t pid, const char *process_names[],
+                                      int n_names, int debug) {
+    (void)process_names;  /* process_names used only for finding PID (done by caller) */
+    (void)n_names;
+    mach_port_t task = attach_to_process(pid);
+    if (task == MACH_PORT_NULL) {
         char err[256];
-        snprintf(err, sizeof(err), "task_for_pid failed: %s (run as root?)",
-                 mach_error_string(kr));
+        snprintf(err, sizeof(err),
+                 "task_for_pid failed for PID %d (helper needs root)", pid);
         return build_error(err);
     }
 
-    /* Regionen durchlaufen — vereinfachte Version */
-    mach_vm_address_t address = 0;
-    mach_vm_size_t size;
-    struct vm_region_basic_info_64 info;
-    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t object_name;
+    /* Get writable private regions */
+    region_t regions[MAX_REGIONS];
+    int n_regions = get_writable_regions(task, regions, MAX_REGIONS);
+    if (n_regions <= 0) {
+        mach_port_deallocate(mach_task_self(), task);
+        return build_error("No writable memory regions found");
+    }
 
-    int region_count = 0;
-    mach_vm_size_t total_size = 0;
+    /* Scan each region for card data */
+    uint32_t *seen_ids = malloc(sizeof(uint32_t) * 100000);
+    int seen_count = 0;
+    if (!seen_ids) {
+        mach_port_deallocate(mach_task_self(), task);
+        return build_error("Out of memory");
+    }
 
-    while (1) {
-        kr = mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
-                            (vm_region_info_t)&info, &info_count, &object_name);
-        if (kr != KERN_SUCCESS) break;
-        region_count++;
-        total_size += size;
-        address += size;
-        info_count = VM_REGION_BASIC_INFO_COUNT_64;
+    sb_t cards_sb;
+    sb_init(&cards_sb, 65536);
+    int cards_written = 0;
+
+    int read_failures = 0;
+    mach_vm_size_t total_bytes = 0;
+
+    for (int r = 0; r < n_regions; r++) {
+        mach_vm_address_t addr = regions[r].address;
+        mach_vm_size_t remaining = regions[r].size;
+
+        while (remaining > 0) {
+            mach_vm_size_t chunk = remaining < READ_CHUNK ? remaining : READ_CHUNK;
+            mach_vm_size_t bytes_read = 0;
+
+            void *buf = read_memory(task, addr, chunk, &bytes_read);
+            if (!buf) {
+                read_failures++;
+                remaining -= chunk;
+                addr += chunk;
+                continue;
+            }
+
+            total_bytes += bytes_read;
+            size_t n_ints = bytes_read / sizeof(uint32_t);
+            if (n_ints >= 2) {
+                parse_card_block((const uint32_t *)buf, n_ints,
+                                 &cards_sb, &cards_written,
+                                 seen_ids, &seen_count, 100000);
+            }
+
+            /* mach_vm_read returns a page we must deallocate */
+            mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)buf, bytes_read);
+
+            remaining -= chunk;
+            addr += chunk;
+        }
+    }
+
+    free(seen_ids);
+    mach_port_deallocate(mach_task_self(), task);
+
+    /* Build response JSON */
+    sb_t resp;
+    sb_init(&resp, MAX_RESPONSE);
+
+    sb_append(&resp, "{\"status\":\"ok\",\"cards\":{");
+    sb_append(&resp, cards_sb.buf);
+    sb_append(&resp, "}");
+
+    if (debug) {
+        sb_appendf(&resp, ",\"scan_stats\":{\"regions\":%d,\"bytes_scanned\":%llu,"
+                          "\"read_failures\":%d,\"matches\":%d}",
+                   n_regions, (unsigned long long)total_bytes,
+                   read_failures, cards_written);
+    }
+
+    sb_append(&resp, "}");
+
+    sb_free(&cards_sb);
+    return resp.buf;  /* transfer ownership */
+}
+
+/* --- Anchor scan ---
+ *
+ * Anchors are specific card IDs to search for. For each anchor,
+ * we scan memory for its little-endian uint32 representation
+ * and count occurrences.
+ */
+
+static char *scan_process_anchors(pid_t pid, const char *process_names[],
+                                   int n_names,
+                                   /* anchor info */ const uint32_t *anchor_ids,
+                                   int n_anchors, int debug) {
+    (void)process_names;
+    (void)n_names;
+    mach_port_t task = attach_to_process(pid);
+    if (task == MACH_PORT_NULL) {
+        return build_error("task_for_pid failed (helper needs root)");
+    }
+
+    region_t regions[MAX_REGIONS];
+    int n_regions = get_writable_regions(task, regions, MAX_REGIONS);
+    if (n_regions <= 0) {
+        mach_port_deallocate(mach_task_self(), task);
+        return build_error("No writable memory regions found");
+    }
+
+    /* Count occurrences per anchor */
+    int *anchor_counts = calloc(n_anchors, sizeof(int));
+    if (!anchor_counts) {
+        mach_port_deallocate(mach_task_self(), task);
+        return build_error("Out of memory");
+    }
+
+    mach_vm_size_t total_bytes = 0;
+    int read_failures = 0;
+
+    for (int r = 0; r < n_regions; r++) {
+        mach_vm_address_t addr = regions[r].address;
+        mach_vm_size_t remaining = regions[r].size;
+
+        while (remaining > 0) {
+            mach_vm_size_t chunk = remaining < READ_CHUNK ? remaining : READ_CHUNK;
+            mach_vm_size_t bytes_read = 0;
+
+            void *buf = read_memory(task, addr, chunk, &bytes_read);
+            if (!buf) {
+                read_failures++;
+                remaining -= chunk;
+                addr += chunk;
+                continue;
+            }
+
+            total_bytes += bytes_read;
+            const uint8_t *data = (const uint8_t *)buf;
+
+            /* Search for each anchor ID (little-endian uint32) */
+            for (int a = 0; a < n_anchors; a++) {
+                uint8_t needle[4];
+                needle[0] = (uint8_t)(anchor_ids[a] & 0xFF);
+                needle[1] = (uint8_t)((anchor_ids[a] >> 8) & 0xFF);
+                needle[2] = (uint8_t)((anchor_ids[a] >> 16) & 0xFF);
+                needle[3] = (uint8_t)((anchor_ids[a] >> 24) & 0xFF);
+
+                /* Simple byte search */
+                for (mach_vm_size_t i = 0; i + 4 <= bytes_read; i++) {
+                    if (data[i] == needle[0] &&
+                        data[i+1] == needle[1] &&
+                        data[i+2] == needle[2] &&
+                        data[i+3] == needle[3]) {
+                        anchor_counts[a]++;
+                    }
+                }
+            }
+
+            mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)buf, bytes_read);
+            remaining -= chunk;
+            addr += chunk;
+        }
     }
 
     mach_port_deallocate(mach_task_self(), task);
 
-    /* JSON-Antwort bauen */
-    char resp[MAX_RESPONSE];
-    int n = snprintf(resp, sizeof(resp),
-        "{\"status\":\"ok\",\"scan\":{"
-        "\"pid\":%d,"
-        "\"regions\":%d,"
-        "\"bytes_total\":%llu,"
-        "\"note\":\"Vollständiger Pattern-Scan folgt in T3\""
-        "}}",
-        pid, region_count, (unsigned long long)total_size);
+    /* Build anchor_matches JSON */
+    sb_t resp;
+    sb_init(&resp, 65536);
+    sb_append(&resp, "{\"status\":\"ok\",\"anchor_matches\":{");
 
-    if (n >= (int)sizeof(resp)) {
-        return build_error("Response too large");
+    for (int a = 0; a < n_anchors; a++) {
+        if (a > 0) sb_append(&resp, ",");
+        sb_appendf(&resp, "\"%u\":%d", anchor_ids[a], anchor_counts[a]);
     }
 
+    sb_append(&resp, "}");
+
+    if (debug) {
+        sb_appendf(&resp, ",\"scan_stats\":{\"regions\":%d,\"bytes_scanned\":%llu,"
+                          "\"read_failures\":%d}",
+                   n_regions, (unsigned long long)total_bytes, read_failures);
+    }
+
+    sb_append(&resp, "}");
+
+    free(anchor_counts);
+    return resp.buf;
+}
+
+/* --- Test mode mock data --- */
+
+static char *mock_scan_response(void) {
+    /* Return a small fake collection so the E2E test can verify the protocol */
+    return strdup(
+        "{\"status\":\"ok\","
+        "\"cards\":{\"10001\":4,\"10002\":3,\"10003\":2,\"10004\":1,"
+        "\"10005\":4,\"10006\":2,\"10007\":1,\"10008\":3,"
+        "\"10009\":2,\"10010\":4,\"10011\":1,\"10012\":2,"
+        "\"10013\":3,\"10014\":4,\"10015\":1,\"10016\":2,"
+        "\"10017\":3,\"10018\":4,\"10019\":1,\"10020\":2,"
+        "\"10021\":3,\"10022\":4,\"10023\":1,\"10024\":2,"
+        "\"10025\":3,\"10026\":4,\"10027\":1,\"10028\":2,"
+        "\"10029\":3,\"10030\":4,\"10031\":1,\"10032\":2,"
+        "\"10033\":3,\"10034\":4,\"10035\":1,\"10036\":2,"
+        "\"10037\":3,\"10038\":4,\"10039\":1,\"10040\":2,"
+        "\"10041\":3,\"10042\":4,\"10043\":1,\"10044\":2,"
+        "\"10045\":3,\"10046\":4,\"10047\":1,\"10048\":2,"
+        "\"10049\":3,\"10050\":4,\"10051\":1,\"10052\":2"
+        "},"
+        "\"anchor_matches\":{\"10001\":3,\"10005\":2},"
+        "\"scan_stats\":{\"regions\":42,\"bytes_scanned\":1048576,"
+        "\"read_failures\":0,\"matches\":52}"
+        "}");
+}
+
+static char *mock_deck_scan_response(void) {
+    return strdup(
+        "{\"status\":\"ok\","
+        "\"decks\":["
+        "{\"name\":\"Mock Deck 1\",\"colors\":[\"W\",\"U\"],"
+        "\"cards\":{\"10001\":4,\"10002\":3}},"
+        "{\"name\":\"Mock Deck 2\",\"colors\":[\"R\",\"G\"],"
+        "\"cards\":{\"10003\":2,\"10004\":1}}"
+        "]}");
+}
+
+static char *mock_rank_scan_response(void) {
+    return strdup(
+        "{\"status\":\"ok\","
+        "\"ranks\":["
+        "{\"season\":\"2026-08\",\"rank\":\"Mythic\",\"tier\":0,\"step\":0,"
+        "\"wins\":15,\"losses\":3}"
+        "],"
+        "\"account\":{\"player_name\":\"TestPlayer\",\"account_id\":\"MOCK-001\"}"
+        "}");
+}
+
+/* --- Request parsing --- */
+
+/* Extract process_names array from JSON.
+ * Fills names[] up to max_names. Returns count or 0 if none specified. */
+static int parse_process_names(const char *json, char names[][MAX_NAME_LEN],
+                               int max_names) {
+    const char *p = strstr(json, "\"process_names\"");
+    if (!p) return 0;
+    p = strstr(p, "[");
+    if (!p) return 0;
+    p++;  /* skip [ */
+    int count = 0;
+    while (*p && count < max_names) {
+        while (*p && *p != '"') {
+            if (*p == ']') return count;
+            p++;
+        }
+        if (*p != '"') break;
+        p++;  /* skip opening quote */
+        const char *start = p;
+        while (*p && *p != '"') p++;
+        if (*p != '"') break;
+        size_t len = p - start;
+        if (len >= MAX_NAME_LEN) len = MAX_NAME_LEN - 1;
+        memcpy(names[count], start, len);
+        names[count][len] = '\0';
+        count++;
+        p++;  /* skip closing quote */
+        /* skip to next string or ] */
+        while (*p && *p != '"' && *p != ']') p++;
+    }
+    return count;
+}
+
+/* Extract anchor grpIds from JSON.
+ * Fills anchor_ids[] up to max_anchors. Returns count. */
+static int parse_anchor_ids(const char *json, uint32_t anchor_ids[],
+                            int max_anchors) {
+    const char *p = strstr(json, "\"anchors\"");
+    if (!p) return 0;
+    /* Could be "anchors":[...] or "anchor_ids":[...] */
+    p = strstr(p, "[");
+    if (!p) return 0;
+    p++;
+    int count = 0;
+    while (*p && count < max_anchors) {
+        while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n')) p++;
+        if (*p == ']' || *p == '}') break;
+        if (*p == '{') {
+            /* Object form: {"grpId":12345,...} */
+            long val;
+            if (json_get_int(p, "grpId", &val) && val > 0) {
+                anchor_ids[count++] = (uint32_t)val;
+            }
+            /* skip to next comma or ] */
+            while (*p && *p != '}' && *p != ']') p++;
+            if (*p == '}') p++;
+            continue;
+        }
+        /* Plain integer form */
+        if (*p >= '0' && *p <= '9') {
+            char *end;
+            long val = strtol(p, &end, 10);
+            if (end != p && val > 0) {
+                anchor_ids[count++] = (uint32_t)val;
+            }
+            p = end;
+        } else {
+            p++;
+        }
+    }
+    return count;
+}
+
+/* --- Action handlers --- */
+
+static char *handle_status(void) {
+    char *escaped_sock = json_escape(g_sock_path);
+    char resp[512];
+    snprintf(resp, sizeof(resp),
+             "{\"status\":\"ok\",\"pid\":%d,\"version\":\"%s\",\"socket_path\":%s}",
+             (int)getpid(), VERSION, escaped_sock ? escaped_sock : "\"\"");
+    free(escaped_sock);
     return strdup(resp);
 }
 
-/* --- JSON Parser (minimal) --- */
+static char *handle_scan(const char *request) {
+    /* Parse process names */
+    char names[MAX_PROCESS_NAMES][MAX_NAME_LEN];
+    int n_names = parse_process_names(request, names, MAX_PROCESS_NAMES);
 
-static const char *json_find_string(const char *json, const char *key) {
-    /* Sucht "key":"..." im JSON-String */
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return NULL;
-    p += strlen(pattern);
-    return p; /* zeigt auf Start des Werts */
+    /* Parse debug flag */
+    int debug = 0;
+    json_get_bool(request, "debug", &debug);
+
+    if (g_test_mode) {
+        return mock_scan_response();
+    }
+
+    /* Find MTGA process */
+    const char *name_ptrs[MAX_PROCESS_NAMES];
+    for (int i = 0; i < n_names; i++) name_ptrs[i] = names[i];
+    pid_t pid = find_process(name_ptrs, n_names);
+    if (pid <= 0) {
+        return build_error("MTGA process not found. Is the game running?");
+    }
+
+    /* Parse anchors if present */
+    uint32_t anchor_ids[MAX_ANCHORS];
+    int n_anchors = parse_anchor_ids(request, anchor_ids, MAX_ANCHORS);
+
+    /* Do the collection scan */
+    char *scan_resp = scan_process_collection(pid, name_ptrs, n_names, debug);
+
+    /* If anchors specified, also do anchor scan and merge */
+    if (n_anchors > 0 && scan_resp) {
+        char *anchor_resp = scan_process_anchors(pid, name_ptrs, n_names,
+                                                  anchor_ids, n_anchors, debug);
+        if (anchor_resp) {
+            /* Merge anchor_matches into scan response */
+            /* For simplicity, return anchor response separately.
+             * The Python client handles both fields. */
+            /* Actually, let's build a combined response. */
+            /* Find the end of scan_resp and insert anchor_matches */
+            /* Simpler: just append anchor_matches before the closing } */
+            char *am_start = strstr(anchor_resp, "\"anchor_matches\":{");
+            if (am_start) {
+                /* Find the matching closing brace */
+                char *am_end = strchr(am_start, '}');
+                if (am_end) {
+                    /* Insert into scan_resp before final } */
+                    char *scan_end = strrchr(scan_resp, '}');
+                    if (scan_end) {
+                        size_t prefix_len = scan_end - scan_resp;
+                        size_t am_len = am_end - am_start + 1;
+                        char *merged = malloc(strlen(scan_resp) + am_len + 10);
+                        if (merged) {
+                            memcpy(merged, scan_resp, prefix_len);
+                            if (prefix_len > 2 &&
+                                scan_resp[prefix_len - 1] != '{') {
+                                merged[prefix_len] = ',';
+                                memcpy(merged + prefix_len + 1, am_start, am_len);
+                                merged[prefix_len + 1 + am_len] = '}';
+                                merged[prefix_len + 2 + am_len] = '\0';
+                            } else {
+                                memcpy(merged + prefix_len, am_start, am_len);
+                                merged[prefix_len + am_len] = '}';
+                                merged[prefix_len + am_len + 1] = '\0';
+                            }
+                            free(scan_resp);
+                            free(anchor_resp);
+                            return merged;
+                        }
+                    }
+                }
+            }
+            free(anchor_resp);
+        }
+    }
+
+    return scan_resp;
 }
 
-static const char *json_find_int(const char *json, const char *key, long *val) {
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return NULL;
-    p += strlen(pattern);
-    while (*p == ' ') p++;
-    if (*p < '0' || *p > '9') return NULL;
-    *val = strtol(p, NULL, 10);
-    return p;
+static char *handle_deck_scan(const char *request) {
+    if (g_test_mode) {
+        return mock_deck_scan_response();
+    }
+
+    char names[MAX_PROCESS_NAMES][MAX_NAME_LEN];
+    int n_names = parse_process_names(request, names, MAX_PROCESS_NAMES);
+    const char *name_ptrs[MAX_PROCESS_NAMES];
+    for (int i = 0; i < n_names; i++) name_ptrs[i] = names[i];
+    pid_t pid = find_process(name_ptrs, n_names);
+    if (pid <= 0) {
+        return build_error("MTGA process not found");
+    }
+
+    /* Deck scan is similar to collection scan but looks for deck structures.
+     * For now, reuse the collection scan — the Python client will
+     * post-process to identify decks. Full deck-detection logic will
+     * be implemented based on pattern_scanner.py patterns. */
+    return scan_process_collection(pid, name_ptrs, n_names, 0);
 }
 
-/* --- Socket Server --- */
+static char *handle_rank_scan(const char *request) {
+    if (g_test_mode) {
+        return mock_rank_scan_response();
+    }
+
+    char names[MAX_PROCESS_NAMES][MAX_NAME_LEN];
+    int n_names = parse_process_names(request, names, MAX_PROCESS_NAMES);
+    const char *name_ptrs[MAX_PROCESS_NAMES];
+    for (int i = 0; i < n_names; i++) name_ptrs[i] = names[i];
+    pid_t pid = find_process(name_ptrs, n_names);
+    if (pid <= 0) {
+        return build_error("MTGA process not found");
+    }
+
+    /* Rank scan searches for rank progression data in memory.
+     * This is a placeholder — full implementation will search for
+     * known rank data structures. Returns empty for now. */
+    char resp[256];
+    snprintf(resp, sizeof(resp),
+             "{\"status\":\"ok\",\"ranks\":[],\"account\":null}");
+    return strdup(resp);
+}
+
+/* --- Socket server --- */
 
 static int setup_socket(void) {
-    unlink(SOCKET_PATH);
+    unlink(g_sock_path);
 
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -191,20 +908,22 @@ static int setup_socket(void) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, g_sock_path, sizeof(addr.sun_path) - 1);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(server_fd);
+        server_fd = -1;
         return -1;
     }
 
-    /* Socket-Berechtigungen: nur root und owner */
-    chmod(SOCKET_PATH, 0600);
+    /* Socket permissions: owner-only (root when running as LaunchDaemon) */
+    chmod(g_sock_path, 0600);
 
     if (listen(server_fd, MAX_CLIENTS) < 0) {
         perror("listen");
         close(server_fd);
+        server_fd = -1;
         return -1;
     }
 
@@ -213,52 +932,57 @@ static int setup_socket(void) {
 
 static void handle_client(int client_fd) {
     char buf[BUF_SIZE];
-    ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
-    if (n <= 0) return;
-    buf[n] = '\0';
+    ssize_t total = 0;
+
+    /* Read until we have a complete JSON object (simplified: read all available) */
+    while (total < (ssize_t)sizeof(buf) - 1) {
+        ssize_t n = read(client_fd, buf + total, sizeof(buf) - 1 - total);
+        if (n <= 0) break;
+        total += n;
+        buf[total] = '\0';
+        /* Check if we've read a complete JSON line */
+        if (buf[total - 1] == '\n' || buf[total - 1] == '}') break;
+    }
+    if (total <= 0) return;
+    buf[total] = '\0';
 
     char *response = NULL;
 
-    /* Aktion parsen */
-    const char *action_start = json_find_string(buf, "action");
-    if (!action_start) {
+    /* Parse action */
+    char *action = json_get_string(buf, "action");
+    if (!action) {
         response = build_error("Missing 'action' field");
         goto send_response;
     }
 
-    /* Extrahiere action-Wert (bis zum nächsten ") */
-    char action[64];
-    const char *end = strchr(action_start, '"');
-    if (!end || (size_t)(end - action_start) >= sizeof(action)) {
-        response = build_error("Invalid 'action' value");
-        goto send_response;
-    }
-    size_t alen = end - action_start;
-    memcpy(action, action_start, alen);
-    action[alen] = '\0';
-
     if (strcmp(action, "ping") == 0) {
-        response = build_pong();
+        response = build_ok();
+    } else if (strcmp(action, "status") == 0) {
+        response = handle_status();
     } else if (strcmp(action, "shutdown") == 0) {
-        response = build_pong();
+        response = build_ok();
         running = 0;
     } else if (strcmp(action, "scan") == 0) {
-        long pid = 0;
-        if (!json_find_int(buf, "pid", &pid) || pid <= 0) {
-            response = build_error("Missing or invalid 'pid' field");
-        } else {
-            response = scan_process((pid_t)pid);
-        }
+        response = handle_scan(buf);
+    } else if (strcmp(action, "deck_scan") == 0) {
+        response = handle_deck_scan(buf);
+    } else if (strcmp(action, "rank_scan") == 0) {
+        response = handle_rank_scan(buf);
     } else {
-        char err[128];
+        char err[160];
         snprintf(err, sizeof(err), "Unknown action: %s", action);
         response = build_error(err);
     }
 
+    free(action);
+
 send_response:
     if (response) {
+        /* Write response + newline (Python client expects newline-terminated or
+         * just reads until connection close) */
         size_t rlen = strlen(response);
-        write(client_fd, response, rlen);
+        ssize_t written = write(client_fd, response, rlen);
+        (void)written;
         free(response);
     }
 }
@@ -266,43 +990,87 @@ send_response:
 static void signal_handler(int sig) {
     (void)sig;
     running = 0;
+    if (server_fd >= 0) {
+        /* Wake up select() */
+        close(server_fd);
+        server_fd = -1;
+    }
 }
 
-int main(int argc __attribute__((unused)), char **argv __attribute__((unused))) {
-    /* Ignoriere SIGPIPE */
+/* --- Main --- */
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "Usage: %s [OPTIONS]\n"
+        "\n"
+        "Options:\n"
+        "  --sock PATH     UNIX socket path (default: %s)\n"
+        "  --test-mode     Mock mode: return dummy data, no task_for_pid\n"
+        "  --version       Print version and exit\n"
+        "  --help, -h      Show this help\n",
+        prog, DEFAULT_SOCK_PATH);
+}
+
+int main(int argc, char *argv[]) {
+    static struct option long_opts[] = {
+        {"sock",      required_argument, 0, 's'},
+        {"test-mode", no_argument,       0, 't'},
+        {"version",   no_argument,       0, 'V'},
+        {"help",      no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "s:tVh", long_opts, NULL)) != -1) {
+        switch (opt) {
+            case 's':
+                strncpy(g_sock_path, optarg, sizeof(g_sock_path) - 1);
+                g_sock_path[sizeof(g_sock_path) - 1] = '\0';
+                break;
+            case 't':
+                g_test_mode = 1;
+                break;
+            case 'V':
+                printf("mtga-helper %s\n", VERSION);
+                return 0;
+            case 'h':
+                usage(argv[0]);
+                return 0;
+            default:
+                usage(argv[0]);
+                return 1;
+        }
+    }
+
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    /* Root-Check: für Testzwecke deaktiviert
-    if (geteuid() != 0) {
-        fprintf(stderr, "mtga-helper: must be run as root (task_for_pid needs it)\n");
-        return 1;
-    }
-    */
-
     if (setup_socket() < 0) {
-        fprintf(stderr, "mtga-helper: failed to setup socket\n");
+        fprintf(stderr, "mtga-helper: failed to setup socket at %s\n",
+                g_sock_path);
         return 1;
     }
 
-    fprintf(stderr, "mtga-helper: listening on %s\n", SOCKET_PATH);
-
-    fd_set read_fds;
-    int max_fd = server_fd;
+    fprintf(stderr, "mtga-helper %s: listening on %s%s\n",
+            VERSION, g_sock_path,
+            g_test_mode ? " (TEST MODE)" : "");
 
     while (running) {
+        if (server_fd < 0) break;
+
+        fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
 
-        struct timeval tv = {1, 0}; /* 1s timeout für running-Check */
-        int ret = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
+        struct timeval tv = {1, 0};
+        int ret = select(server_fd + 1, &read_fds, NULL, NULL, &tv);
         if (ret < 0) {
             if (errno == EINTR) continue;
             perror("select");
             break;
         }
-        if (ret == 0) continue; /* timeout */
+        if (ret == 0) continue;
 
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_un client_addr;
@@ -311,7 +1079,7 @@ int main(int argc __attribute__((unused)), char **argv __attribute__((unused))) 
                                    (struct sockaddr *)&client_addr,
                                    &client_len);
             if (client_fd < 0) {
-                perror("accept");
+                if (errno != EINTR) perror("accept");
                 continue;
             }
             handle_client(client_fd);
@@ -319,8 +1087,8 @@ int main(int argc __attribute__((unused)), char **argv __attribute__((unused))) 
         }
     }
 
-    close(server_fd);
-    unlink(SOCKET_PATH);
+    if (server_fd >= 0) close(server_fd);
+    unlink(g_sock_path);
     fprintf(stderr, "mtga-helper: shutdown complete\n");
     return 0;
 }
