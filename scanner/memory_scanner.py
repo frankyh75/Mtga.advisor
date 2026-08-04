@@ -360,12 +360,43 @@ def scan_collection_detailed(
     memory_scanner: Callable[[Pymem, bytes], list[int]] | None = None,
     block_parser: Callable[[Pymem, int], list[dict[int, int]]] | None = None,
     debug: bool = False,
+    use_helper: bool | None = None,
+    sock_path: str | None = None,
 ) -> MemoryScanResult | None:
     """Hauptfunktion: Scannt den MTGA-Speicher nach der Collection.
 
+    Wenn *use_helper* True ist (oder None und der Helper-Daemon läuft),
+    wird der Scan über den Sudo-Helper-Daemon ausgeführt — sudo-frei.
+    Andernfalls wird der direkte pymem-osx-Weg verwendet (erfordert sudo).
+
+    Args:
+        use_helper: True → Helper erzwingen; False → direkter Scan;
+                     None → auto-detect (Helper wenn verfügbar).
+        sock_path: Pfad zum Helper-UNIX-Socket (sonst Default).
+
     Returns:
-        Dictionary {grpId: quantity} oder None bei Fehler.
+        MemoryScanResult oder None bei Fehler.
     """
+    # --- Helper-Pfad (sudo-frei) ---
+    from .helper_client import is_helper_available, helper_scan_collection_detailed
+    from .helper_client import DEFAULT_SOCK_PATH as _default_sock
+
+    if sock_path is None:
+        sock_path = _default_sock
+
+    if use_helper is None:
+        use_helper = is_helper_available(sock_path)
+
+    if use_helper:
+        print_fn("🔄 Scan über Helper-Daemon (sudo-frei)...")
+        return helper_scan_collection_detailed(
+            sock_path,
+            process_names=process_names,
+            debug=debug,
+            print_fn=print_fn,
+        )
+
+    # --- Direkter Scan (pymem-osx, erfordert sudo) ---
     if db_loader is None:
         db_loader = load_card_database
     if memory_scanner is None:
@@ -478,8 +509,13 @@ def scan_collection(
     memory_scanner: Callable[[Pymem, bytes], list[int]] | None = None,
     block_parser: Callable[[Pymem, int], list[dict[int, int]]] | None = None,
     debug: bool = False,
+    use_helper: bool | None = None,
+    sock_path: str | None = None,
 ) -> dict[int, int] | None:
-    """Kompatibler Wrapper: liefert nur {grpId: quantity}."""
+    """Kompatibler Wrapper: liefert nur {grpId: quantity}.
+
+    Siehe scan_collection_detailed() für use_helper- und sock_path-Parameter.
+    """
     result = scan_collection_detailed(
         input_fn=input_fn,
         print_fn=print_fn,
@@ -488,6 +524,8 @@ def scan_collection(
         memory_scanner=memory_scanner,
         block_parser=block_parser,
         debug=debug,
+        use_helper=use_helper,
+        sock_path=sock_path,
     )
     if result is None:
         return None
@@ -506,9 +544,29 @@ def main() -> int:
         type=Path,
         help="Schreibt collection.json und run-report.json in dieses Verzeichnis.",
     )
+    parser.add_argument(
+        "--helper",
+        choices=["auto", "force", "off"],
+        default="auto",
+        help="Helper-Daemon nutzen: auto (default), force (erzwingen), off (direkter Scan).",
+    )
+    parser.add_argument(
+        "--sock",
+        type=str,
+        default=None,
+        help="Pfad zum Helper-UNIX-Socket (default: /tmp/mtga-helper.sock).",
+    )
     args = parser.parse_args()
 
-    result = scan_collection_detailed(debug=args.debug)
+    use_helper: bool | None
+    if args.helper == "force":
+        use_helper = True
+    elif args.helper == "off":
+        use_helper = False
+    else:
+        use_helper = None  # auto
+
+    result = scan_collection_detailed(debug=args.debug, use_helper=use_helper, sock_path=args.sock)
     if result is None:
         return 1
 
