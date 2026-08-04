@@ -9,7 +9,10 @@
 #   4. Sende list_regions → erwarte JSON-Response mit "regions"-Array
 #   5. Sende read_memory mit Mock-Adresse → erwarte "data"-Feld (Base64)
 #   6. Sende ungültiges Kommando → erwarte "error"-Feld
-#   7. Stoppe Helper, Cleanup Socket
+#   7. Sende scan → erwarte "cards"-Dict mit Mock-Karten
+#   8. Sende deck_scan → erwarte "decks"-Liste mit Mock-Decks
+#   9. Sende rank_scan → erwarte "ranks"-Objekt mit Mock-Rängen
+#   10. Stoppe Helper, Cleanup Socket
 #
 # Dieser Test kann ohne laufenden MTGA-Prozess ausgeführt werden,
 # da der Helper im Test-Modus Mock-Daten zurückgibt.
@@ -175,11 +178,77 @@ else
     fail "Ungültiges Kommando liefert keine Fehler-Antwort: '$ERR_RESP'"
 fi
 
+# --- Test 7: scan (Mock-Modus) ---
+info "Test 7: Sende scan-Kommando..."
+SCAN_RESP=$(sock_send "$SOCK_PATH" '{"action":"scan","debug":false}')
+if echo "$SCAN_RESP" | grep -q '"cards"'; then
+    pass "scan-Antwort enthält 'cards'-Feld"
+    if echo "$SCAN_RESP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('status') == 'ok'
+assert isinstance(d.get('cards'), dict)
+assert len(d['cards']) > 0
+assert 'anchor_matches' in d
+assert 'validation' in d
+" 2>/dev/null; then
+        pass "scan-Antwort ist valides JSON mit Karten-Daten"
+    else
+        fail "scan-Antwort: JSON-Validierung fehlgeschlagen"
+    fi
+else
+    fail "scan-Antwort enthält kein 'cards'-Feld: '$SCAN_RESP'"
+fi
+
+# --- Test 8: deck_scan (Mock-Modus) ---
+info "Test 8: Sende deck_scan-Kommando..."
+DECK_RESP=$(sock_send "$SOCK_PATH" '{"action":"deck_scan","method":"auto"}')
+if echo "$DECK_RESP" | grep -q '"decks"'; then
+    pass "deck_scan-Antwort enthält 'decks'-Feld"
+    if echo "$DECK_RESP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('status') == 'ok'
+assert isinstance(d.get('decks'), list)
+assert len(d['decks']) >= 1
+assert 'name' in d['decks'][0]
+assert 'cards' in d['decks'][0]
+" 2>/dev/null; then
+        pass "deck_scan-Antwort ist valides JSON mit Deck-Liste"
+    else
+        fail "deck_scan-Antwort: JSON-Validierung fehlgeschlagen"
+    fi
+else
+    fail "deck_scan-Antwort enthält kein 'decks'-Feld: '$DECK_RESP'"
+fi
+
+# --- Test 9: rank_scan (Mock-Modus) ---
+info "Test 9: Sende rank_scan-Kommando..."
+RANK_RESP=$(sock_send "$SOCK_PATH" '{"action":"rank_scan","include_account":true}')
+if echo "$RANK_RESP" | grep -q '"ranks"'; then
+    pass "rank_scan-Antwort enthält 'ranks'-Feld"
+    if echo "$RANK_RESP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('status') == 'ok'
+assert 'ranks' in d
+assert 'constructed' in d['ranks']
+assert 'limited' in d['ranks']
+assert d['ranks']['constructed']['season_rank'] == 'Mythic'
+" 2>/dev/null; then
+        pass "rank_scan-Antwort ist valides JSON mit Rang-Daten"
+    else
+        fail "rank_scan-Antwort: JSON-Validierung fehlgeschlagen"
+    fi
+else
+    fail "rank_scan-Antwort enthält kein 'ranks'-Feld: '$RANK_RESP'"
+fi
+
 # --- Ergebnis ---
 echo ""
 if [[ $FAILED -eq 0 ]]; then
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}Alle Tests bestanden (6/6)${NC}"
+    echo -e "${GREEN}Alle Tests bestanden (9/9)${NC}"
     echo -e "${GREEN}========================================${NC}"
     exit 0
 else

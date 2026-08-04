@@ -13,3 +13,6 @@ out-decks/
 build/
 helper/build/
 *.bundle/
+
+# Helper binary (wird via `make -C helper build` erzeugt)
+helper/mtga-helper
