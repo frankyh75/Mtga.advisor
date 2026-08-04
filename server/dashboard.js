@@ -742,6 +742,136 @@ document.addEventListener("DOMContentLoaded", () => {
       });
   }
 
+  // --- Helper-Status section ---
+  const helperContent = document.getElementById("helper-status-content");
+  if (helperContent) {
+    const renderHelperStatus = (data) => {
+      const running = data.running;
+      const installed = data.installed;
+      const bundleBuilt = data.bundle_built;
+
+      let indicatorClass = "unknown";
+      let statusLabel = "Unbekannt";
+      let statusDetail = "";
+
+      if (running) {
+        indicatorClass = "running";
+        statusLabel = "Läuft";
+        statusDetail = `PID: ${data.pid ?? "?"} · Version: ${data.version ?? "?"} · Socket: ${data.socket_path}`;
+      } else if (installed) {
+        indicatorClass = "installed";
+        statusLabel = "Installiert (läuft nicht)";
+        statusDetail = "Daemon installiert aber nicht aktiv. Neu starten: sudo launchctl load /Library/LaunchDaemons/com.mtga.helper.plist";
+      } else if (bundleBuilt) {
+        indicatorClass = "not-installed";
+        statusLabel = "Gebaut, nicht installiert";
+        statusDetail = data.install_instructions || "sudo ./helper/install.sh";
+      } else {
+        indicatorClass = "not-installed";
+        statusLabel = "Nicht installiert";
+        statusDetail = data.install_instructions || "Helper bauen und installieren: make -C helper && sudo ./helper/install.sh";
+      }
+
+      let html = '<div class="helper-status-box">';
+      html += `<div class="helper-indicator ${indicatorClass}"></div>`;
+      html += '<div class="helper-status-text">';
+      html += `<strong>${statusLabel}</strong>`;
+      html += `<p class="meta">${statusDetail}</p>`;
+      html += '</div>';
+
+      if (!installed && bundleBuilt) {
+        html += '<button class="helper-btn" id="helper-install-btn">Helper installieren</button>';
+      } else if (!installed && !bundleBuilt) {
+        html += '<button class="helper-btn" id="helper-build-btn" disabled>Bundle fehlt — make -C helper</button>';
+      } else if (installed && !running) {
+        html += '<button class="helper-btn btn-green" id="helper-start-btn">Daemon starten</button>';
+      } else if (running) {
+        html += '<button class="helper-btn" id="helper-refresh-btn">Aktualisieren</button>';
+      }
+
+      html += '</div>';
+
+      // Detail-Liste
+      html += '<ul class="helper-detail-list">';
+      html += `<li>Bundle gebaut: ${bundleBuilt ? "ja" : "nein"}</li>`;
+      html += `<li>Installiert: ${installed ? "ja" : "nein"}</li>`;
+      html += `<li>Daemon läuft: ${running ? "ja" : "nein"}</li>`;
+      html += `<li>Socket: ${data.socket_path}</li>`;
+      html += '</ul>';
+
+      helperContent.innerHTML = html;
+
+      // Install-Button Handler
+      const installBtn = document.getElementById("helper-install-btn");
+      if (installBtn) {
+        installBtn.addEventListener("click", async () => {
+          installBtn.disabled = true;
+          installBtn.textContent = "Öffne Terminal...";
+          // Wir können sudo nicht direkt aus dem Browser ausführen.
+          // Zeige eine Anleitung mit dem genauen Befehl.
+          helperContent.insertAdjacentHTML("beforeend",
+            '<div class="helper-status-box" style="margin-top:.5rem;border-color:var(--accent);">' +
+            '<div class="helper-status-text">' +
+            '<strong>Installation im Terminal</strong>' +
+            '<p class="meta">Der Browser kann keine root-Rechte erlangen. Bitte im Terminal ausführen:</p>' +
+            '<pre style="margin:.5rem 0;font-size:.85rem;">cd ' + window.location.pathname.replace("/","") + "\n" + "sudo ./helper/install.sh</pre>" +
+            '<p class="meta">Nach der Installation: Status aktualisieren.</p>' +
+            '</div><button class="helper-btn btn-green" id="helper-refresh-after-install">Status aktualisieren</button>' +
+            '</div>'
+          );
+          installBtn.remove();
+
+          const refreshBtn = document.getElementById("helper-refresh-after-install");
+          if (refreshBtn) {
+            refreshBtn.addEventListener("click", () => loadHelperStatus());
+          }
+        });
+      }
+
+      // Start-Button Handler (Daemon läuft nicht, aber ist installiert)
+      const startBtn = document.getElementById("helper-start-btn");
+      if (startBtn) {
+        startBtn.addEventListener("click", async () => {
+          startBtn.disabled = true;
+          startBtn.textContent = "Öffne Terminal...";
+          helperContent.insertAdjacentHTML("beforeend",
+            '<div class="helper-status-box" style="margin-top:.5rem;border-color:var(--accent);">' +
+            '<div class="helper-status-text">' +
+            '<strong>Daemon starten</strong>' +
+            '<p class="meta">Im Terminal ausführen:</p>' +
+            '<pre style="margin:.5rem 0;font-size:.85rem;">sudo launchctl load /Library/LaunchDaemons/com.mtga.helper.plist</pre>' +
+            '</div><button class="helper-btn btn-green" id="helper-refresh-after-start">Status aktualisieren</button>' +
+            '</div>'
+          );
+          startBtn.remove();
+
+          const refreshBtn = document.getElementById("helper-refresh-after-start");
+          if (refreshBtn) {
+            refreshBtn.addEventListener("click", () => loadHelperStatus());
+          }
+        });
+      }
+
+      // Refresh-Button Handler
+      const refreshBtn = document.getElementById("helper-refresh-btn");
+      if (refreshBtn) {
+        refreshBtn.addEventListener("click", () => loadHelperStatus());
+      }
+    };
+
+    const loadHelperStatus = async () => {
+      try {
+        const resp = await fetch("/api/helper/status");
+        const data = await resp.json();
+        renderHelperStatus(data);
+      } catch (err) {
+        helperContent.innerHTML = `<p class="meta">Helper-Status nicht abrufbar: ${err.message}</p>`;
+      }
+    };
+
+    loadHelperStatus();
+  }
+
   // --- Meta-Daten section (MTGGoldfish) ---
   const metaContent = document.getElementById("meta-content");
   if (metaContent) {

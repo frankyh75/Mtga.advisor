@@ -899,6 +899,79 @@ def _call_llm_chat(config: LLMConfig, prompt: str) -> dict[str, Any]:
     return {"response": content, "model": config.model_name}
 
 
+# ---------------------------------------------------------------------------
+# /api/helper/status — Helper-Daemon Status
+# ---------------------------------------------------------------------------
+
+_HELPER_BUNDLE_PATH = Path(__file__).resolve().parents[1] / "helper" / "build" / "mtga-helper.bundle"
+_HELPER_INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "helper" / "install.sh"
+_HELPER_PLIST_PATH = "/Library/LaunchDaemons/com.mtga.helper.plist"
+_HELPER_SOCK_PATH = "/tmp/mtga-helper.sock"
+
+
+def _helper_status_response() -> dict[str, Any]:
+    """Ermittelt den Status des Sudo-Helper-Daemons für das Dashboard.
+
+    Returns:
+        Dict mit Feldern:
+        - installed: bool — Bundle liegt in /Library/PrivilegedHelperTools
+        - running: bool — Daemon antwortet auf Ping
+        - socket_path: str — Pfad zum UNIX-Socket
+        - pid: int | None — Prozess-ID des Daemons
+        - version: str | None — Version des Daemons
+        - bundle_built: bool — Helper-Bundle wurde lokal gebaut
+        - install_instructions: str — Kurze Anleitung falls nicht installiert
+    """
+
+    status: dict[str, Any] = {
+        "installed": False,
+        "running": False,
+        "socket_path": _HELPER_SOCK_PATH,
+        "pid": None,
+        "version": None,
+        "bundle_built": _HELPER_BUNDLE_PATH.exists(),
+        "install_instructions": "",
+    }
+
+    # Prüfe ob der Helper installiert ist (plist oder bundle im Systemverzeichnis)
+    helper_system_bundle = Path("/Library/PrivilegedHelperTools/mtga-helper.bundle")
+    status["installed"] = (
+        Path(_HELPER_PLIST_PATH).exists()
+        or helper_system_bundle.exists()
+    )
+
+    # Prüfe ob der Helper läuft und antwortet
+    try:
+        from scanner.helper_client import get_status, is_helper_available
+
+        helper_status = get_status(_HELPER_SOCK_PATH)
+        status["running"] = helper_status.running
+        status["pid"] = helper_status.pid
+        status["version"] = helper_status.version
+
+        # Falls get_status running=False meldet, versuche nochmal mit ping
+        if not status["running"] and is_helper_available(_HELPER_SOCK_PATH):
+            status["running"] = True
+
+    except Exception:
+        # Import-Fehler oder andere Probleme — Helper nicht verfügbar
+        pass
+
+    if not status["installed"]:
+        if not status["bundle_built"]:
+            status["install_instructions"] = (
+                "Helper noch nicht gebaut. Terminal öffnen und ausführen: "
+                "make -C helper && sudo ./helper/install.sh"
+            )
+        else:
+            status["install_instructions"] = (
+                "Helper gebaut aber nicht installiert. Ausführen: "
+                "sudo ./helper/install.sh"
+            )
+
+    return status
+
+
 def _render_index(
     collection: dict[str, Any] | None,
     run_report: dict[str, Any] | None,
@@ -1071,6 +1144,24 @@ def _render_index(
     #config-toggle { font-size: .85rem; color: var(--accent); cursor: pointer; }
     #config-fields { display: none; margin-top: .5rem; }
     #config-fields.open { display: block; }
+
+    /* Helper-Status Section */
+    #helper-status-content { margin-top: .8rem; }
+    .helper-status-box { display: flex; align-items: center; gap: 1rem; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); margin-bottom: .5rem; flex-wrap: wrap; }
+    .helper-indicator { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .helper-indicator.running { background: var(--green); box-shadow: 0 0 8px rgba(45,106,79,.5); }
+    .helper-indicator.installed { background: var(--accent); }
+    .helper-indicator.not-installed { background: var(--danger); }
+    .helper-indicator.unknown { background: var(--muted); }
+    .helper-status-text { flex: 1; min-width: 200px; }
+    .helper-status-text strong { font-size: 1.1rem; }
+    .helper-status-text .meta { margin: .15rem 0; }
+    .helper-btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: .4rem 1rem; cursor: pointer; font-size: .9rem; flex-shrink: 0; }
+    .helper-btn:hover { opacity: .85; }
+    .helper-btn:disabled { opacity: .5; cursor: default; }
+    .helper-btn.btn-green { background: var(--green); }
+    .helper-detail-list { font-size: .85rem; color: var(--muted); margin: .3rem 0; padding-left: 1.2rem; }
+    .helper-detail-list li { padding: .1rem 0; }
   </style>
 </head>
 <body>
@@ -1085,6 +1176,7 @@ def _render_index(
       <a href="/api/run-report">run-report.json</a>
       <a href="/api/advisor-result">advisor-result.json</a>
       <a href="/api/meta">meta.json</a>
+      <a href="/api/helper/status">helper/status</a>
       <span id="config-toggle">⚙ LLM-Config</span>
     </nav>
   </div>
@@ -1101,6 +1193,14 @@ def _render_index(
       <input id="cfg-max-tokens" type="number" step="64" min="64" value="$cfg_max_tokens">
       <button id="cfg-save" style="margin-top:.5rem;background:var(--green);color:#fff;border:none;border-radius:8px;padding:.4rem 1rem;cursor:pointer;">Speichern</button>
       <span id="cfg-status" style="margin-left:.5rem;font-size:.85rem;"></span>
+    </div>
+  </div>
+
+  <div class="section" id="helper-section">
+    <h2>Sudo-Helper <span class="badge">T5</span></h2>
+    <p class="meta">Memory-Scanner als LaunchDaemon (root) — sudo-freie Scans nach einmaliger Installation.</p>
+    <div id="helper-status-content">
+      <p class="meta" id="helper-loading">Prüfe Helper-Status...</p>
     </div>
   </div>
 
@@ -1291,6 +1391,11 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 _json_response(self, {"error": "not_found", "message": "ranks.json fehlt. Führe 'mtga-export ranks --output out/ranks.json' aus."}, status=HTTPStatus.NOT_FOUND)
                 return
             _json_response(self, payload, status=HTTPStatus.OK)
+            return
+
+        # /api/helper/status — Helper-Daemon Status (running, pid, version, installed)
+        if self.path == "/api/helper/status":
+            _json_response(self, _helper_status_response(), status=HTTPStatus.OK)
             return
 
         # /api/card-image/<grp_id> — redirect to Scryfall image URL

@@ -30,6 +30,7 @@ from server.app import (  # noqa: E402
     _generate_qr_ascii,
     _print_server_banner,
     _health_response,
+    _helper_status_response,
 )
 
 
@@ -604,3 +605,93 @@ def test_no_auth_allows_all_requests() -> None:
             assert resp.status == 200
         finally:
             server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# T5: /api/helper/status endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def test_helper_status_response_returns_dict_with_required_fields() -> None:
+    """_helper_status_response must return a dict with all required fields."""
+    status = _helper_status_response()
+    assert isinstance(status, dict)
+    assert "installed" in status
+    assert "running" in status
+    assert "socket_path" in status
+    assert "pid" in status
+    assert "version" in status
+    assert "bundle_built" in status
+    assert "install_instructions" in status
+    assert isinstance(status["installed"], bool)
+    assert isinstance(status["running"], bool)
+    assert isinstance(status["socket_path"], str)
+
+
+def test_helper_status_response_running_is_false_when_no_socket() -> None:
+    """When no helper socket exists, running should be False."""
+    status = _helper_status_response()
+    # On a test machine without the helper installed, running should be False
+    # (We can't guarantee installed is False, but running should be False
+    #  if there's no socket)
+    if not status["installed"]:
+        assert status["running"] is False
+
+
+def test_helper_status_response_install_instructions_when_not_installed() -> None:
+    """When helper is not installed, install_instructions should be non-empty."""
+    status = _helper_status_response()
+    if not status["installed"]:
+        assert status["install_instructions"] != ""
+        assert "install.sh" in status["install_instructions"]
+
+
+def test_helper_status_endpoint_via_http() -> None:
+    """GET /api/helper/status should return 200 with JSON status."""
+    import tempfile
+    configure_basic_auth(None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server, port, thread = _start_test_server(Path(tmpdir))
+        try:
+            resp = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/helper/status", timeout=5
+            )
+            assert resp.status == 200
+            data = json.loads(resp.read().decode("utf-8"))
+            assert "installed" in data
+            assert "running" in data
+            assert "socket_path" in data
+        finally:
+            server.shutdown()
+
+
+def test_render_index_includes_helper_status_section() -> None:
+    """_render_index should include the Sudo-Helper section in the HTML."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert "Sudo-Helper" in html
+    assert "helper-section" in html
+    assert "helper-status-content" in html
+    assert "helper-loading" in html
+
+
+def test_render_index_includes_helper_status_nav_link() -> None:
+    """_render_index should include a link to /api/helper/status in the nav."""
+    html = _render_index(None, None, None, None, None, LLMConfig())
+    assert 'href="/api/helper/status"' in html
+
+
+def test_dashboard_js_has_helper_status_fetch() -> None:
+    """dashboard.js should fetch /api/helper/status and render the result."""
+    js = _dashboard_js()
+    assert "/api/helper/status" in js
+    assert "helper-status-content" in js
+    assert "renderHelperStatus" in js
+    assert "loadHelperStatus" in js
+
+
+def test_dashboard_js_has_helper_install_button() -> None:
+    """dashboard.js should include an install button for the helper."""
+    js = _dashboard_js()
+    assert "helper-install-btn" in js
+    assert "helper-start-btn" in js
+    assert "helper-refresh-btn" in js
