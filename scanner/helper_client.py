@@ -4,8 +4,13 @@ Der Helper-Daemon (als LaunchDaemon unter root) lauscht auf einem UNIX-Socket
 und führt Memory-Scans im root-Kontext aus. Dieses Modul kapselt die
 Socket-Kommunikation und das JSON-Protokoll.
 
-Protokoll:
-  Request:  {"action": "ping"|"scan"|"status", ...}
+Protokoll (Low-Level):
+  {"action": "ping"}                              → {"status": "ok"}
+  {"action": "status"}                            → {"status": "ok", "pid": N, "version": "...", ...}
+  {"action": "list_regions"}                      → {"status": "ok", "regions": [{"address": ..., "size": ...}, ...]}
+  {"action": "read_memory", "address": N, "size": N} → {"status": "ok", "data": "<base64>", "bytes_read": N}
+  {"action": "shutdown"}                         → {"status": "ok"}
+
   Response: {"status": "ok", ...} | {"error": "..."}
 """
 
@@ -14,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -114,6 +120,58 @@ def get_status(sock_path: str = DEFAULT_SOCK_PATH) -> HelperStatus:
 def is_helper_available(sock_path: str = DEFAULT_SOCK_PATH) -> bool:
     """Prüft, ob der Helper-Daemon läuft und erreichbar ist."""
     return ping(sock_path)
+
+
+# --- Low-Level Primitives (neues Protokoll) ---
+
+def request_list_regions(sock_path: str = DEFAULT_SOCK_PATH, *,
+                         timeout: float = 60) -> list[dict[str, int]]:
+    """Listet beschreibbare Memory-Regionen des MTGA-Prozesses auf.
+
+    Returns:
+        Liste von {"address": int, "size": int} Dicts.
+    Raises:
+        HelperConnectionError, HelperProtocolError, HelperError.
+    """
+    resp = _send_request({"action": "list_regions"}, sock_path, timeout=timeout)
+    if "error" in resp:
+        raise HelperError(resp["error"])
+    regions = resp.get("regions")
+    if not isinstance(regions, list):
+        raise HelperProtocolError(f"list_regions-Response fehlt 'regions'-Liste: {resp}")
+    return regions
+
+
+def request_read_memory(sock_path: str = DEFAULT_SOCK_PATH, *,
+                        address: int,
+                        size: int,
+                        timeout: float = 60) -> bytes:
+    """Liest rohen Memory-Inhalt an einer Adresse.
+
+    Args:
+        address: Speicheradresse (virtual address im MTGA-Prozess).
+        size: Anzahl Bytes (max 16 MB).
+
+    Returns:
+        Rohe Bytes (base64-decoded).
+    Raises:
+        HelperConnectionError, HelperProtocolError, HelperError.
+    """
+    if address < 0:
+        raise HelperProtocolError(f"Ungültige Adresse: {address}")
+    if size <= 0:
+        raise HelperProtocolError(f"Ungültige Größe: {size}")
+
+    resp = _send_request(
+        {"action": "read_memory", "address": address, "size": size},
+        sock_path, timeout=timeout,
+    )
+    if "error" in resp:
+        raise HelperError(resp["error"])
+    data_b64 = resp.get("data")
+    if data_b64 is None:
+        raise HelperProtocolError(f"read_memory-Response fehlt 'data'-Feld: {resp}")
+    return base64.b64decode(data_b64)
 
 
 def request_scan(sock_path: str = DEFAULT_SOCK_PATH, *,

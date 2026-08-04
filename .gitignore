@@ -5,3 +5,11 @@ __pycache__/
 out-memory/
 out/
 out-decks/
+
+# macOS
+.DS_Store
+
+# Build artifacts
+build/
+helper/build/
+*.bundle/

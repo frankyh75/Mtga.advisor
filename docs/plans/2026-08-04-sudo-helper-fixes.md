@@ -22,7 +22,7 @@
 - Modify: `helper/main.c`
 - Modify: `scanner/helper_client.py`
 
-**Verification:** `echo '{"action":"scan","pid":1}' | nc -U /tmp/mtga-helper.sock` darf **nicht** mehr gegen PID 1 auflösen (Server ignoriert das Feld komplett). Manueller Test: Helper mit laufendem MTGA-Prozess → Scan trifft den echten Prozess ohne dass eine PID übergeben wurde.
+**Verification:** `echo '{"action":"scan","pid":1}' | nc -U /var/run/mtga-helper.sock` darf **nicht** mehr gegen PID 1 auflösen (Server ignoriert das Feld komplett). Manueller Test: Helper mit laufendem MTGA-Prozess → Scan trifft den echten Prozess ohne dass eine PID übergeben wurde.
 
 ---
 
@@ -34,7 +34,7 @@
 
 **Changes:**
 - `umask(0077)` vor `bind()` setzen, damit der Socket von Anfang an mit restriktiven Rechten entsteht (kein nachträgliches `chmod` nötig).
-- Socket-Pfad von `/tmp/mtga-helper.sock` nach `/var/run/mtga-helper.sock` (oder ein dediziertes, root-only Verzeichnis wie `/Library/PrivilegedHelperTools/mtga-helper.sock`) verschieben. Alle Referenzen synchron halten: `helper/main.c`, `helper/launchd.plist`, `helper/install.sh`, `scanner/helper_client.py::DEFAULT_SOCK_PATH`, `server/app.py::_HELPER_SOCK_PATH`, `helper/tests/test_e2e.sh`.
+- Socket-Pfad von `/var/run/mtga-helper.sock` nach `/var/run/mtga-helper.sock` (oder ein dediziertes, root-only Verzeichnis wie `/Library/PrivilegedHelperTools/mtga-helper.sock`) verschieben. Alle Referenzen synchron halten: `helper/main.c`, `helper/launchd.plist`, `helper/install.sh`, `scanner/helper_client.py::DEFAULT_SOCK_PATH`, `server/app.py::_HELPER_SOCK_PATH`, `helper/tests/test_e2e.sh`.
 - Entscheiden und dokumentieren, welcher Prozess/User den Socket überhaupt ansprechen darf (nur root, oder auch der Desktop-User?) — aktuelle `chmod 0600` erlaubt nur root selbst, was die CLI (als normaler User) aussperrt. Falls der normale User zugreifen soll: Peer-Credential-Check (`getpeereid()`) statt weiter Dateirechte, nicht einfach `0666`.
 
 **Files:**

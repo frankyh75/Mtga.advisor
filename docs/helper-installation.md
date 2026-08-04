@@ -19,7 +19,7 @@
                                                  └──────────────────────┘
 ```
 
-Der Helper lauscht auf einem UNIX Socket (`/tmp/mtga-helper.sock`), empfängt JSON-Kommandos und führt `task_for_pid()` + Memory-Read im root-Kontext aus. Die Mac App / CLI kommuniziert als normaler User darüber.
+Der Helper lauscht auf einem UNIX Socket (`/var/run/mtga-helper.sock`), empfängt JSON-Kommandos und führt `task_for_pid()` + Memory-Read im root-Kontext aus. Die Mac App / CLI kommuniziert als normaler User darüber.
 
 ## Schritt 1: Helper bauen
 
@@ -68,7 +68,7 @@ Dafür müssen Info.plist und Helper-Info.plist korrekt konfiguriert sein (siehe
 launchctl list | grep mtga-helper
 
 # Socket erreichbar?
-echo '{"action":"ping"}' | nc -U /tmp/mtga-helper.sock
+echo '{"action":"ping"}' | nc -U /var/run/mtga-helper.sock
 # Erwartet: {"status":"ok"}
 ```
 
@@ -90,7 +90,7 @@ Im lokalen Dashboard (`http://127.0.0.1:8000/`) wird der Helper-Status angezeigt
 - **Grün:** Helper läuft, Scans funktionieren ohne sudo
 - **Rot:** Helper nicht installiert oder nicht erreichbar — Install-Button wird angezeigt
 
-API-Endpoint: `GET /api/helper/status` → `{"running": true, "socket": "/tmp/mtga-helper.sock"}`
+API-Endpoint: `GET /api/helper/status` → `{"running": true, "socket": "/var/run/mtga-helper.sock"}`
 
 ## Helper deinstallieren
 
@@ -98,7 +98,7 @@ API-Endpoint: `GET /api/helper/status` → `{"running": true, "socket": "/tmp/mt
 sudo launchctl unload /Library/LaunchDaemons/com.mtga.helper.plist
 sudo rm -rf /Library/PrivilegedHelperTools/mtga-helper.bundle
 sudo rm /Library/LaunchDaemons/com.mtga.helper.plist
-rm -f /tmp/mtga-helper.sock
+rm -f /var/run/mtga-helper.sock
 ```
 
 ## Troubleshooting
@@ -117,7 +117,7 @@ sudo /Library/PrivilegedHelperTools/mtga-helper.bundle/Contents/MacOS/mtga-helpe
 
 ```bash
 # Socket existiert?
-ls -la /tmp/mtga-helper.sock
+ls -la /var/run/mtga-helper.sock
 
 # Berechtigungen prüfen
 # Der Socket muss für den User lesbar/schreibbar sein
@@ -137,7 +137,7 @@ codesign -d -r- /Library/PrivilegedHelperTools/mtga-helper.bundle
 
 ### MTGA-Prozess nicht gefunden
 
-Der Helper benötigt die PID des MTGA-Prozesses. Die CLI sucht automatisch nach MTGA-Prozessen:
+Der Helper löst die PID des MTGA-Prozesses serverseitig auf (proc_listpids). Die CLI sendet nur Prozessnamen-Hints:
 
 ```bash
 # Manuell PID finden
@@ -159,7 +159,7 @@ ps aux | grep -i "mtga\|magic" | grep -v grep
 ### Scan
 ```json
 // Request
-{"action":"scan","pid":12345}
+{"action":"scan","process_names":["MTGA"]}
 // Response
 {"cards":{"12345":4,"67890":2},"decks":[...],"stats":{"anchorCount":5,"scanTime":1.2}}
 ```
@@ -180,7 +180,7 @@ ps aux | grep -i "mtga\|magic" | grep -v grep
 ## Sicherheitshinweise
 
 - Der Helper läuft als root — nur das Bundle in `/Library/PrivilegedHelperTools/` wird akzeptiert
-- Der UNIX Socket hat Berechtigungen `0660` (root:admin) — nur Admin-User können kommunizieren
+- Der UNIX Socket hat Berechtigungen `0660` (rw-rw----). Peer-Credential-Check via `getpeereid()` verifiziert die UID des Clients — nur root und der Console-User (Desktop-User) dürfen zugreifen
 - Der Helper validiert alle JSON-Kommandos und lehnt unbekannte Aktionen ab
 - Keine Remote-Netzwerk-Schnittstelle — nur lokaler UNIX Socket
 - Code-Signing verhindert Manipulation des Helper-Bundles

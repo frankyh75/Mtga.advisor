@@ -20,7 +20,7 @@
 ## T1: Helper-Tool Binary (C)
 
 **Objective:** Kleines C-Programm, das:
-- Auf einem UNIX Socket (`/tmp/mtga-helper.sock`) horcht
+- Auf einem UNIX Socket (`/var/run/mtga-helper.sock`) horcht
 - JSON-Kommandos empfängt: `{"action":"scan","pid":<mtga_pid>}`
 - `task_for_pid()` aufruft und Memory-Scan macht
 - Ergebnis als JSON zurückgibt
@@ -30,7 +30,7 @@
 - Create: `helper/Makefile` (kompiliert zu `mtga-helper`)
 - Create: `helper/launchd.plist` (SMJobBless-kompatibel)
 
-**Verification:** `make -C helper` → Binary existiert. Manuell starten, `echo '{"action":"ping"}' | nc -U /tmp/mtga-helper.sock` → `{"status":"ok"}`
+**Verification:** `make -C helper` → Binary existiert. Manuell starten, `echo '{"action":"ping"}' | nc -U /var/run/mtga-helper.sock` → `{"status":"ok"}`
 
 ---
 

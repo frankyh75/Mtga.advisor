@@ -30,7 +30,7 @@ sudo ./helper/install.sh
 .venv/bin/python -m cli.main run --output out
 ```
 
-Die CLI erkennt automatisch, ob der Helper läuft (Socket `/tmp/mtga-helper.sock`). Fallback: sudo-Weg mit Warnung.
+Die CLI erkennt automatisch, ob der Helper läuft (Socket `/var/run/mtga-helper.sock`). Fallback: sudo-Weg mit Warnung.
 
 **Detaillierte Anleitung:** [docs/helper-installation.md](docs/helper-installation.md)
 
