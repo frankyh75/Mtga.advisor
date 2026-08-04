@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -740,6 +741,24 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
     method = args.method
     print(f"🔍 Deck-Scan (Methode: {method})")
 
+    if args.debug:
+        log_dir = args.output
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "deck-scan-debug.log"
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(logging.Formatter("  %(message)s"))
+        scanner_logger = logging.getLogger("scanner")
+        scanner_logger.setLevel(logging.DEBUG)
+        scanner_logger.addHandler(file_handler)
+        scanner_logger.addHandler(stream_handler)
+        scanner_logger.propagate = False
+        scanner_logger.debug("=== deck-scan run started (method=%s) ===", method)
+        print(f"🪵 Debug-Log: {log_path}")
+
     # An MTGA-Prozess attachen
     candidate_names = get_macos_mtga_process_names()
     pm = _attach_process(candidate_names)
@@ -757,7 +776,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
     if method in ("il2cpp", "auto"):
         print("🧭 IL2CPP-Navigation: Suche PAPA → DecksManager → _allDecks...")
         adapter = PymemMemoryAdapter(pm)
-        il2cpp_result = scan_decks_il2cpp(adapter)
+        il2cpp_result = scan_decks_il2cpp(adapter, debug=args.debug)
         if il2cpp_result and il2cpp_result.decks:
             print(f"✅ IL2CPP: {len(il2cpp_result.decks)} Decks gefunden")
         elif il2cpp_result:
@@ -766,40 +785,32 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
             print("⚠ IL2CPP: Scan fehlgeschlagen")
 
     # --- Pattern-based Scan ---
+    # In "auto" mode, pattern-scan is a fallback for when IL2CPP fails to
+    # find decks — it's redundant (and, on this codebase, memory-hungry
+    # enough to get OOM-killed) once IL2CPP already succeeded, so skip it
+    # entirely in that case rather than deriving anchors from IL2CPP's own
+    # results just to re-scan for the same decks.
+    il2cpp_already_succeeded = bool(il2cpp_result and il2cpp_result.decks)
     pattern_result: DeckScanResult | None = None
-    if method in ("pattern", "auto"):
+    if method == "pattern" or (method == "auto" and not il2cpp_already_succeeded):
         anchor_ids = args.anchors or []
         if not anchor_ids and method == "pattern":
             _error("--anchors erforderlich für Pattern-Scan (oder --method auto verwenden)")
             return 1
         if not anchor_ids and method == "auto":
-            # Versuche Anker aus Collection-Scan zu holen
-            if il2cpp_result and il2cpp_result.decks:
-                # Nutze grpIds aus IL2CPP-Decks als Anker
-                anchor_ids = list({
-                    grp_id
-                    for deck in il2cpp_result.decks
-                    for pile in deck.piles.values()
-                    for grp_id in pile
-                })[:20]
-            if not anchor_ids:
-                # Versuche gespeciherte Anker oder Collection
-                from scanner.memory_scanner import _anchor_file
-                anchor_file = _anchor_file()
-                if anchor_file.exists():
-                    import json as _json
-                    try:
-                        saved = _json.loads(anchor_file.read_text(encoding="utf-8"))
-                        anchor_ids = [a[0] for a in saved if isinstance(a, (list, tuple)) and len(a) >= 1]
-                    except (OSError, ValueError):
-                        pass
-            if not anchor_ids:
-                if il2cpp_result and il2cpp_result.decks:
-                    # IL2CPP already succeeded, no need for pattern fallback
+            # Versuche gespeicherte Anker oder Collection
+            from scanner.memory_scanner import _anchor_file
+            anchor_file = _anchor_file()
+            if anchor_file.exists():
+                import json as _json
+                try:
+                    saved = _json.loads(anchor_file.read_text(encoding="utf-8"))
+                    anchor_ids = [a[0] for a in saved if isinstance(a, (list, tuple)) and len(a) >= 1]
+                except (OSError, ValueError):
                     pass
-                else:
-                    _error("Keine Anker für Pattern-Scan verfügbar. Verwende --anchors oder führe vorher 'scan' aus.")
-                    return 1
+            if not anchor_ids:
+                _error("Keine Anker für Pattern-Scan verfügbar. Verwende --anchors oder führe vorher 'scan' aus.")
+                return 1
 
         if anchor_ids:
             print(f"🔎 Pattern-Scan mit {len(anchor_ids)} Anker-GrpIDs...")
@@ -822,15 +833,20 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
                 "deckId": deck_id,
                 "name": deck.name or "Unknown Deck",
                 "source": "il2cpp",
-                "cards": _piles_to_card_dict(deck.piles),
+                "cards": _piles_to_card_dict(deck.piles, card_db),
                 "cardsById": _piles_to_cards_by_id(deck.piles),
             })
             deck_piles_by_id[deck_id] = deck.piles
 
     if pattern_result and pattern_result.decks:
         warnings_all.extend(pattern_result.warnings)
-        for deck in pattern_result.decks:
-            deck_id = deck.deck_id or f"pattern-{deck.raw_address:#x}"
+        for pattern_index, deck in enumerate(pattern_result.decks):
+            # deck.raw_address is a buffer-relative offset from the pattern
+            # parser (often 0 for several distinct decks), not a unique
+            # absolute address — include the loop index so distinct decks
+            # don't collide onto the same fallback deckId and get dropped
+            # as "duplicates" below.
+            deck_id = deck.deck_id or f"pattern-{pattern_index}-{deck.raw_address:#x}"
             # Skip if already found by IL2CPP (dedup by deck_id)
             if any(d["deckId"] == deck_id for d in all_decks):
                 continue

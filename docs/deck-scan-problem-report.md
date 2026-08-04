@@ -113,3 +113,55 @@ mit korrekten Karten-IDs und Mengen, ohne Pattern-Scan-Fallback. Der alte
 TypeInfoTable-Pfad bleibt als Fallback erhalten (u.a. für `rank_scanner.py`,
 das PAPA/InventoryManager separat braucht und noch nicht auf den neuen
 Ansatz umgestellt ist).
+
+## Nachtrag (2026-08-04, Folgefunde)
+
+Zwei weitere Probleme nach dem ersten Live-Test gefunden und behoben:
+
+1. **`PAPA_HEAP_REGIONS` war selbst noch hartcodiert.** Der neue
+   Backref-Ansatz suchte `FieldInfo`-Einträge nur in denselben drei fest
+   codierten Adressbereichen, die schon beim alten Ansatz aus mtgatool
+   übernommen wurden — bei ASLR (jeder MTGA-Prozessstart hat andere
+   Basisadressen) trifft das nicht zuverlässig. Fix: `discover_decks_manager_via_backref`
+   enumeriert jetzt die echte Speicherkarte des laufenden Prozesses
+   (`_iterate_writable_private_regions`) statt geratener Fixadressen — dieselbe
+   Methode, die schon für die Instanz-Suche im selben Schritt genutzt wurde.
+
+2. **`--method auto` lief unnötig auch den Pattern-Scan,** selbst wenn
+   IL2CPP schon erfolgreich alle Decks gefunden hatte (`cli/main.py:_run_deck_scan`)
+   — Anker wurden aus den frisch gefundenen IL2CPP-Decks abgeleitet und dann
+   nochmal danach gesucht. Das kostete nicht nur Zeit, sondern führte in der
+   Praxis zu einem OOM-Kill während des Pattern-Scans — und weil die
+   Ausgabedatei erst nach *beiden* Scans geschrieben wird, gingen dabei auch
+   die bereits gefundenen guten IL2CPP-Daten verloren. Fix: Pattern-Scan wird
+   in `auto`-Modus jetzt komplett übersprungen, sobald IL2CPP Decks gefunden hat.
+
+3. **"Decks-Bildschirm offen" widerlegt:** Ein weiterer Fehlversuch trat
+   auch bei offenem Decks-Bildschirm auf (trotz identischer Prozess-ID,
+   also kein ASLR-Neustart-Effekt) — die Instabilität liegt tiefer im
+   Backref-Verfahren selbst, nicht am UI-Zustand.
+
+4. **`--debug`-Flag verdrahtet** (`scanner/il2cpp_nav.py::discover_decks_manager_via_backref`,
+   `cli/main.py:_run_deck_scan`): gibt jetzt bei jedem der 6 Discovery-Schritte
+   `OK`/`FAIL` mit Grund aus. Damit den nächsten Fehlschlag präzise lokalisiert:
+   `DeckDataProvider`-Klasse wurde gefunden, aber `DecksManager` lag **nicht**
+   in derselben einzelnen VM-Region wie `DeckDataProvider` (Region nur
+   ~5.2 MB groß) — obwohl beide Klassen laut Annahme in derselben
+   Heap-Arena liegen sollten.
+
+5. **Ursache: `mach_vm_region_recurse` kann eine zusammenhängende
+   Heap-Allokation in mehrere benachbarte VM-Region-Einträge aufsplitten**
+   (unterschiedliche interne Wired/Resident-Bookkeeping-Flags, gleiche
+   eigentliche Arena) — `_region_containing` fand nur das eine Fragment,
+   das `ddp_class` enthielt, nicht die gesamte Arena. Fix: neue
+   `_coalesced_region_containing` verschmilzt aneinandergrenzende Regionen
+   zu einer zusammenhängenden Spanne, bevor nach `DecksManager` gesucht wird.
+
+6. **Pattern-Scan-ID-Kollision behoben** (`cli/main.py:_run_deck_scan`):
+   Pattern-Kandidaten haben nie eine echte `deckId` (`deck_scanner.py`
+   setzt sie immer auf `""`), der Fallback nutzte `deck.raw_address` — bei
+   Pattern-Kandidaten aber nur ein pufferrelativer Offset (oft `0`), keine
+   echte Adresse. Dadurch kollidierten alle gefundenen Decks auf dieselbe
+   ID `pattern-0x0`, und die Dedup-Logik verwarf alle bis auf das erste als
+   vermeintliche Duplikate (21 gefunden → nur 1 geschrieben). Fix: laufender
+   Index in der Fallback-ID.

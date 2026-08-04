@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import logging
 import os
 import struct
 from functools import lru_cache
@@ -24,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from .pattern_scanner import _iterate_regions_with_error, _iterate_writable_private_regions
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # IL2CPP structure offsets (Unity 2021.x, MTGA-verified)
@@ -488,12 +491,6 @@ def find_papa_instance(mem: MemoryReader, papa_class: int) -> int | None:
 # structure that references it — instead of assuming any fixed offset.
 # ---------------------------------------------------------------------------
 
-# FieldInfo arrays for this game build were found consistently within these
-# heap ranges across multiple process launches (same ranges historically
-# used for the PAPA instance heap-scan above). Live *instances*, in contrast,
-# are scattered across the general managed heap and are not confined here —
-# see _find_instance_by_klass, which scans writable process memory broadly.
-FIELDINFO_HEAP_REGIONS = PAPA_HEAP_REGIONS
 
 
 def _bulk_read(mem: MemoryReader, base: int, size: int, chunk_size: int = 0x400000) -> bytes:
@@ -537,12 +534,42 @@ def _find_string_in_metadata_regions(
     return None
 
 
-def _region_containing(regions: list[tuple[int, int]], addr: int) -> tuple[int, int] | None:
-    """Return the (base, size) of the region in `regions` that contains addr."""
-    for r_addr, r_size in regions:
+def _coalesced_region_containing(regions: list[tuple[int, int]], addr: int) -> tuple[int, int] | None:
+    """Return the maximal byte-contiguous span of `regions` that contains addr.
+
+    mach_vm_region_recurse can split one real heap allocation into several
+    adjacent vm_region entries (e.g. differing internal wired/resident
+    bookkeeping) even though it's a single contiguous arena. A class
+    name-string backref search needs the whole arena, not just whichever
+    single fragment happens to contain the address we started from — so
+    merge every region that touches its neighbor into one span before
+    searching.
+    """
+    ordered = sorted(regions, key=lambda r: r[0])
+    start_idx = None
+    for i, (r_addr, r_size) in enumerate(ordered):
         if r_addr <= addr < r_addr + r_size:
-            return r_addr, r_size
-    return None
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+
+    span_start, span_size = ordered[start_idx]
+    span_end = span_start + span_size
+
+    # Extend forward through touching regions.
+    for r_addr, r_size in ordered[start_idx + 1:]:
+        if r_addr != span_end:
+            break
+        span_end = r_addr + r_size
+
+    # Extend backward through touching regions.
+    for r_addr, r_size in reversed(ordered[:start_idx]):
+        if r_addr + r_size != span_start:
+            break
+        span_start = r_addr
+
+    return span_start, span_end - span_start
 
 
 def _validate_class_struct(mem: MemoryReader, klass: int, expected_name: str | None = None) -> bool:
@@ -572,6 +599,8 @@ def _find_class_by_field_backref_in_regions(
     metadata_regions: list[tuple[int, int]],
     fieldinfo_regions: list[tuple[int, int]],
     field_name: str,
+    *,
+    budget: int = 4_000_000_000,
 ) -> int | None:
     """Find the Il2CppClass that declares a field named `field_name`.
 
@@ -586,17 +615,29 @@ def _find_class_by_field_backref_in_regions(
     that address — the start of the matching FieldInfo entry — and read its
     `parent` field directly.
 
-    Note: `fieldinfo_regions` uses (start, end) pairs (matching
-    FIELDINFO_HEAP_REGIONS/PAPA_HEAP_REGIONS), unlike `metadata_regions`
+    `fieldinfo_regions` uses (start, end) pairs, unlike `metadata_regions`
     and most other region lists in this module, which use (addr, size).
+    Regions are searched smallest-first, up to `budget` bytes total, mirroring
+    _find_instance_by_klass_in_regions — the FieldInfo arena's absolute
+    address shifts with ASLR on every process launch, so this must scan the
+    live process's actual writable region map rather than a fixed guess.
     """
     name_addr = _find_string_in_metadata_regions(mem, metadata_regions, field_name)
     if name_addr is None:
         return None
 
     needle = struct.pack("<Q", name_addr)
-    for region_start, region_end in fieldinfo_regions:
-        buf = _bulk_read(mem, region_start, region_end - region_start)
+    ordered = sorted(fieldinfo_regions, key=lambda r: r[1] - r[0])
+
+    remaining = budget
+    for region_start, region_end in ordered:
+        if remaining <= 0:
+            break
+        region_size = region_end - region_start
+        read_size = min(region_size, remaining)
+        remaining -= read_size
+
+        buf = _bulk_read(mem, region_start, read_size)
         idx = buf.find(needle)
         while idx != -1:
             entry_addr = region_start + idx
@@ -679,6 +720,8 @@ def _find_instance_by_klass_in_regions(
 
 def discover_decks_manager_via_backref(
     reader: Il2CppReader | MemoryReader | Any,
+    *,
+    debug: bool = False,
 ) -> tuple[int, int] | None:
     """Locate a live DecksManager instance without data_segment_base/TypeInfoTable.
 
@@ -688,7 +731,9 @@ def discover_decks_manager_via_backref(
     discovery above cannot find them reliably on macOS. Instead:
 
       1. Find DeckDataProvider's Il2CppClass via a FieldInfo backref to the
-         "_allDecks" field name (FieldInfo arrays live in FIELDINFO_HEAP_REGIONS).
+         "_allDecks" field name (FieldInfo arrays live somewhere in the
+         process's writable private heap — enumerated fresh each run, since
+         their absolute address shifts with ASLR).
       2. Find DecksManager's Il2CppClass in the *same* class-descriptor heap
          arena as DeckDataProvider (classes for a build are allocated together).
       3. Read DecksManager's real "_deckDataProvider" field offset from its
@@ -702,40 +747,68 @@ def discover_decks_manager_via_backref(
         (decks_manager_instance, decks_manager_class), or None if any step
         fails.
     """
+    def _log(msg: str) -> None:
+        if debug:
+            logger.debug("[backref] %s", msg)
+
     mem = _coerce_safe_reader(reader)
     if mem is None:
+        _log("FAIL: reader could not be coerced to a MemoryReader")
         return None
     pm = getattr(reader, "pm", reader)
     if not hasattr(pm, "task"):
         # Not a live process handle (e.g. a bare MockMemory in tests) —
         # region enumeration needs a real task port.
+        _log("FAIL: no live task port on reader (not a real process handle)")
         return None
 
     metadata_regions = _find_metadata_regions(pm)
     if not metadata_regions:
+        _log("FAIL: no global-metadata.dat regions found in process memory")
         return None
+    _log(f"OK: {len(metadata_regions)} metadata region(s) found")
+
+    # FieldInfo arrays and live instances both live somewhere in the
+    # process's writable private heap, but their absolute address shifts
+    # with ASLR on every launch — enumerate the real region map once
+    # instead of guessing fixed ranges, and reuse it for both searches.
+    writable_regions = _iterate_writable_private_regions(pm)
+    fieldinfo_regions = [(addr, addr + size) for addr, size in writable_regions]
+    _log(
+        f"OK: {len(writable_regions)} writable private region(s), "
+        f"{sum(size for _, size in writable_regions):,} bytes total"
+    )
 
     ddp_class = _find_class_by_field_backref_in_regions(
-        mem, metadata_regions, FIELDINFO_HEAP_REGIONS, "_allDecks",
+        mem, metadata_regions, fieldinfo_regions, "_allDecks",
     )
     if ddp_class is None:
+        _log("FAIL: no FieldInfo backref to \"_allDecks\" found in writable regions "
+             "(DeckDataProvider class not located)")
         return None
+    _log(f"OK: DeckDataProvider class @ {ddp_class:#x}")
 
     readable_regions, _ = _iterate_regions_with_error(pm)
-    arena = _region_containing(readable_regions, ddp_class)
+    arena = _coalesced_region_containing(readable_regions, ddp_class)
     if arena is None:
+        _log("FAIL: no readable region contains the DeckDataProvider class address")
         return None
+    _log(f"OK: class-descriptor arena @ {arena[0]:#x} (+{arena[1]:#x}, coalesced from adjacent regions)")
 
     dm_class = _find_class_by_name_in_arena(mem, metadata_regions, arena[0], arena[1], "DecksManager")
     if dm_class is None:
+        _log("FAIL: \"DecksManager\" class not found in the same heap arena as DeckDataProvider")
         return None
+    _log(f"OK: DecksManager class @ {dm_class:#x}")
 
     ddp_field = next(
         (f for f in get_class_fields(mem, dm_class) if f.name == "_deckDataProvider"),
         None,
     )
     if ddp_field is None:
+        _log("FAIL: DecksManager class has no \"_deckDataProvider\" field in its FieldInfo array")
         return None
+    _log(f"OK: _deckDataProvider field offset = {ddp_field.offset:#x}")
 
     def _validate(candidate: int) -> bool:
         ddp_ptr = _read_ptr(mem, candidate + ddp_field.offset)
@@ -743,10 +816,12 @@ def discover_decks_manager_via_backref(
             return False
         return _read_ptr(mem, ddp_ptr) == ddp_class
 
-    writable_regions = _iterate_writable_private_regions(pm)
     dm_instance = _find_instance_by_klass_in_regions(mem, writable_regions, dm_class, validate=_validate)
     if dm_instance is None:
+        _log("FAIL: no live instance in writable memory whose class pointer matches "
+             "DecksManager (and validates via _deckDataProvider)")
         return None
+    _log(f"OK: DecksManager instance @ {dm_instance:#x}")
 
     return dm_instance, dm_class
 
@@ -975,6 +1050,8 @@ def read_deck(
     mem: MemoryReader,
     deck_addr: int,
     deck_class: int | None = None,
+    *,
+    debug: bool = False,
 ) -> Il2CppDeckResult | None:
     """Read a Client_Deck from memory.
 
@@ -990,6 +1067,9 @@ def read_deck(
         mem: Memory reader.
         deck_addr: Address of the Client_Deck instance.
         deck_class: Optional pre-read class pointer for the deck.
+        debug: If set, print every field name on Client_Deck and DeckSummary
+            once (diagnostic aid for finding an as-yet-unread field, e.g.
+            deck format — no format field is read today).
 
     Returns:
         Il2CppDeckResult with name and piles, or None if deck is invalid.
@@ -1004,6 +1084,9 @@ def read_deck(
 
     fields = get_class_fields(mem, deck_class)
 
+    if debug:
+        logger.debug("[read_deck] Client_Deck fields: %s", [f.name for f in fields])
+
     summary_field = next((f for f in fields if f.name == DECK_SUMMARY_FIELD), None)
     contents_field = next((f for f in fields if f.name == DECK_CONTENTS_FIELD), None)
 
@@ -1013,6 +1096,14 @@ def read_deck(
     if summary_field is not None:
         summary_ptr = _read_ptr(mem, deck_addr + summary_field.offset)
         if summary_ptr > MIN_VALID_PTR:
+            if debug:
+                summary_class = _read_ptr(mem, summary_ptr)
+                if summary_class > MIN_VALID_PTR:
+                    summary_fields = get_class_fields(mem, summary_class)
+                    logger.debug(
+                        "[read_deck] DeckSummary fields: %s",
+                        [f.name for f in summary_fields],
+                    )
             name = _read_deck_name(mem, summary_ptr)
             if name:
                 result.name = name
@@ -1118,6 +1209,7 @@ def scan_decks_il2cpp(
     papa_class: int = 0,
     type_info_table: int = 0,
     data_segment_base: int = 0,
+    debug: bool = False,
 ) -> Il2CppScanResult | None:
     """Scan for MTGA decks via IL2CPP memory navigation.
 
@@ -1148,7 +1240,7 @@ def scan_decks_il2cpp(
     # data_segment_base/TypeInfoTable discovery entirely. Only attempted
     # when the caller hasn't pre-supplied explicit PAPA addresses.
     if papa_instance == 0 and papa_class == 0:
-        via_backref = discover_decks_manager_via_backref(reader)
+        via_backref = discover_decks_manager_via_backref(reader, debug=debug)
         if via_backref is not None:
             dm_instance, dm_class = via_backref
             nav_result = navigate_to_all_decks(
@@ -1156,8 +1248,8 @@ def scan_decks_il2cpp(
             )
             if nav_result is not None and nav_result.entries:
                 decks: list[Il2CppDeckResult] = []
-                for deck_id, deck_ptr in nav_result.entries:
-                    deck = read_deck(mem, deck_ptr)
+                for idx, (deck_id, deck_ptr) in enumerate(nav_result.entries):
+                    deck = read_deck(mem, deck_ptr, debug=debug and idx == 0)
                     if deck is not None:
                         deck.deck_id = deck_id
                         decks.append(deck)
