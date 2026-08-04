@@ -372,10 +372,6 @@ static char *handle_status(void) {
 /* Forward declarations — these functions are defined later in the file
  * but referenced by handle_list_regions / handle_read_memory. */
 static mach_port_t attach_to_process(pid_t pid);
-typedef struct {
-    mach_vm_address_t address;
-    mach_vm_size_t size;
-} region_t_fwd;
 static int get_writable_regions(mach_port_t task, region_t *regions, int max_regions);
 static void *read_memory(mach_port_t task, mach_vm_address_t addr,
                          mach_vm_size_t size, mach_vm_size_t *out_size);

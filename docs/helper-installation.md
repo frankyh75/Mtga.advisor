@@ -156,12 +156,20 @@ ps aux | grep -i "mtga\|magic" | grep -v grep
 {"status":"ok","version":"1.0"}
 ```
 
-### Scan
+### list_regions
 ```json
 // Request
-{"action":"scan","process_names":["MTGA"]}
+{"action":"list_regions"}
 // Response
-{"cards":{"12345":4,"67890":2},"decks":[...],"stats":{"anchorCount":5,"scanTime":1.2}}
+{"status":"ok","regions":[{"address":4294967296,"size":1048576},...]}
+```
+
+### read_memory
+```json
+// Request
+{"action":"read_memory","address":4294967296,"size":4096}
+// Response
+{"status":"ok","data":"<base64>","bytes_read":4096}
 ```
 
 ### Status
