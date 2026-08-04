@@ -712,11 +712,46 @@ def _run_deck_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_helper_available() -> bool:
+    """Prüft, ob der Sudo-Helper-Daemon läuft und erreichbar ist."""
+    from scanner.helper_client import is_helper_available as _check
+    return _check()
+
+
+def _run_scan_via_helper(args: argparse.Namespace) -> int:
+    """Führt den Memory-Scan über den Helper-Daemon aus (sudo-frei)."""
+    from scanner.helper_client import helper_scan_collection_detailed
+
+    result = helper_scan_collection_detailed(debug=args.debug)
+    if result is None:
+        return 1
+    collection_path, run_report_path = write_collection_artifacts(
+        result.collection, args.output, scan_result=result
+    )
+    print(f"Collection exportiert: {collection_path}")
+    print(f"Run-Report: {run_report_path}")
+    return 0
+
+
 def _run_scan(args: argparse.Namespace) -> int:
+    # Auto-Detect: Helper → direkt (sudo-frei), sonst Fallback mit Warnung
+    if _is_helper_available():
+        return _run_scan_via_helper(args)
+
+    # Fallback: direkter Scan (benötigt sudo)
+    print(
+        "⚠ Sudo-Helper nicht verfügbar — direkter Memory-Scan erfordert sudo.\n"
+        "  Starte mit: sudo python3 -m cli.main scan ...\n"
+        "  Oder installiere den Helper: sudo ./helper/install.sh\n"
+        "  Siehe: docs/helper-installation.md",
+        file=sys.stderr,
+    )
     result = scan_memory_collection_detailed(debug=args.debug)
     if result is None:
         return 1
-    collection_path, run_report_path = write_collection_artifacts(result.collection, args.output, scan_result=result)
+    collection_path, run_report_path = write_collection_artifacts(
+        result.collection, args.output, scan_result=result
+    )
     print(f"Collection exportiert: {collection_path}")
     print(f"Run-Report: {run_report_path}")
     return 0
