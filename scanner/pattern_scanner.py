@@ -14,6 +14,141 @@ import ctypes.util
 from dataclasses import dataclass
 from typing import Any
 
+from typing import Any, Protocol
+
+
+class MemoryBackend(Protocol):
+    """Protocol für austauschbare Memory-Backends.
+
+    Drei Methoden, die jedes Backend implementieren muss:
+    - read_bytes: liest Speicher an einer Adresse
+    - iterate_writable_private_regions: listet beschreibbare, private Regionen (IL2CPP-Navigation)
+    - iterate_readable_regions: listet alle lesbaren Regionen (Pattern-Scanning)
+    """
+
+    def read_bytes(self, addr: int, size: int) -> bytes | None: ...
+
+    def iterate_writable_private_regions(self) -> list[tuple[int, int]]: ...
+
+    def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]: ...
+
+
+class PymemBackend:
+    """Pymem-basiertes Backend — nutzt task_for_pid() lokal (braucht sudo)."""
+
+    def __init__(self, pm: Pymem) -> None:
+        self._pm = pm
+        self._lib: Any | None = None
+
+    def _ensure_lib(self) -> Any:
+        if self._lib is None:
+            self._lib = _load_mach_lib()
+            _setup_mach_functions(self._lib)
+        return self._lib
+
+    def _task_port(self) -> int:
+        task = getattr(self._pm, "task")
+        return int(getattr(task, "value", task))
+
+    def read_bytes(self, addr: int, size: int) -> bytes | None:
+        lib = self._ensure_lib()
+        buffer = ctypes.create_string_buffer(size)
+        out_size = ctypes.c_uint64(0)
+        result = lib.mach_vm_read_overwrite(
+            ctypes.c_uint64(self._task_port()),
+            ctypes.c_uint64(addr),
+            ctypes.c_uint64(size),
+            ctypes.cast(buffer, ctypes.c_void_p),
+            ctypes.byref(out_size),
+        )
+        if result != KERN_SUCCESS or out_size.value <= 0:
+            return None
+        return buffer.raw[: out_size.value]
+
+    def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+        lib = self._ensure_lib()
+        regions: list[tuple[int, int]] = []
+        address = ctypes.c_uint64(0)
+        size = ctypes.c_uint64(0)
+        info = vm_region_submap_info_data_64_t()
+        depth = ctypes.c_uint32(0)
+
+        while True:
+            count = ctypes.c_uint32(
+                ctypes.sizeof(vm_region_submap_info_data_64_t) // ctypes.sizeof(ctypes.c_uint32)
+            )
+            result = lib.mach_vm_region_recurse(
+                ctypes.c_uint64(self._task_port()),
+                ctypes.byref(address),
+                ctypes.byref(size),
+                ctypes.byref(depth),
+                ctypes.byref(info),
+                ctypes.byref(count),
+            )
+            if result != KERN_SUCCESS:
+                break
+
+            addr = address.value
+            sz = size.value
+
+            if info.is_submap:
+                depth = ctypes.c_uint32(depth.value + 1)
+                continue
+
+            prot = info.protection
+            writable = bool(prot & VM_PROT_READ) and bool(prot & VM_PROT_WRITE)
+            if writable and info.share_mode not in _SHARED_SHARE_MODES:
+                if 0 < sz < 1024 * 1024 * 1024:
+                    regions.append((addr, sz))
+
+            address = ctypes.c_uint64(addr + sz)
+
+        return regions
+
+
+    def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+        """Iteriert über alle lesbaren Speicherregionen (für Pattern-Scanning)."""
+        lib = self._ensure_lib()
+        regions: list[tuple[int, int]] = []
+        address = ctypes.c_uint64(0)
+        size = ctypes.c_uint64(0)
+        info = vm_region_submap_info_data_64_t()
+        depth = ctypes.c_uint32(0)
+        first_error: int | None = None
+
+        while True:
+            count = ctypes.c_uint32(
+                ctypes.sizeof(vm_region_submap_info_data_64_t) // ctypes.sizeof(ctypes.c_uint32)
+            )
+            result = lib.mach_vm_region_recurse(
+                ctypes.c_uint64(self._task_port()),
+                ctypes.byref(address),
+                ctypes.byref(size),
+                ctypes.byref(depth),
+                ctypes.byref(info),
+                ctypes.byref(count),
+            )
+
+            if result != KERN_SUCCESS:
+                first_error = int(result)
+                break
+
+            addr = address.value
+            sz = size.value
+
+            if info.is_submap:
+                depth = ctypes.c_uint32(depth.value + 1)
+                continue
+
+            if info.protection & VM_PROT_READ:
+                if sz > 0 and sz < 1024 * 1024 * 1024:
+                    regions.append((addr, sz))
+
+            address = ctypes.c_uint64(addr + sz)
+
+        return regions, first_error
+
+
 try:
     from pymem import Pymem
 except ImportError:  # pragma: no cover - fallback for environments without pymem
@@ -111,9 +246,8 @@ class vm_region_submap_info_data_64_t(ctypes.Structure):
 
 
 def _task_port(pm: Pymem) -> int:
-    """Normalisiert den pymem-osx Task-Port fuer ctypes-Aufrufe."""
-    task = getattr(pm, "task")
-    return int(getattr(task, "value", task))
+    """Legacy-Wrapper: Baut PymemBackend und delegiert."""
+    return PymemBackend(pm)._task_port()
 
 
 def _load_mach_lib() -> Any:
@@ -165,57 +299,13 @@ def _setup_mach_functions(lib: Any) -> None:
 
 
 def _iterate_regions_with_error(pm: Pymem) -> tuple[list[tuple[int, int]], int | None]:
-    """Iteriert über alle Speicherregionen des Zielprozesses.
-
-    Returns:
-        Liste von (address, size)-Tupeln für lesbare, private Regionen.
-    """
-    lib = _load_mach_lib()
-    _setup_mach_functions(lib)
-
-    regions: list[tuple[int, int]] = []
-    address = ctypes.c_uint64(0)
-    size = ctypes.c_uint64(0)
-    info = vm_region_submap_info_data_64_t()
-    depth = ctypes.c_uint32(0)
-    first_error: int | None = None
-
-    while True:
-        count = ctypes.c_uint32(ctypes.sizeof(vm_region_submap_info_data_64_t) // ctypes.sizeof(ctypes.c_uint32))
-        result = lib.mach_vm_region_recurse(
-            ctypes.c_uint64(_task_port(pm)),
-            ctypes.byref(address),
-            ctypes.byref(size),
-            ctypes.byref(depth),
-            ctypes.byref(info),
-            ctypes.byref(count),
-        )
-
-        if result != KERN_SUCCESS:
-            first_error = int(result)
-            break
-
-        addr = address.value
-        sz = size.value
-
-        if info.is_submap:
-            depth = ctypes.c_uint32(depth.value + 1)
-            continue
-
-        # MTGA/Unity kann Collection-Daten auch in shared/readable Mappings halten.
-        if info.protection & VM_PROT_READ:
-            if sz > 0 and sz < 1024 * 1024 * 1024:  # < 1GB
-                regions.append((addr, sz))
-
-        # Nächste Region
-        address = ctypes.c_uint64(addr + sz)
-
-    return regions, first_error
+    """Legacy-Wrapper: Baut PymemBackend und delegiert."""
+    return PymemBackend(pm).iterate_readable_regions()
 
 
 def _iterate_regions(pm: Pymem) -> list[tuple[int, int]]:
-    """Iteriert über alle Speicherregionen des Zielprozesses."""
-    regions, _ = _iterate_regions_with_error(pm)
+    """Legacy-Wrapper: Baut PymemBackend und delegiert."""
+    regions, _ = PymemBackend(pm).iterate_readable_regions()
     return regions
 
 
@@ -230,75 +320,16 @@ _SHARED_SHARE_MODES = frozenset({SM_SHARED, SM_TRUESHARED, SM_SHARED_ALIASED})
 
 
 def _iterate_writable_private_regions(pm: Pymem) -> list[tuple[int, int]]:
-    """Iteriert über beschreibbare, nicht geteilte Speicherregionen.
-
-    Der IL2CPP-verwaltete Heap (Klasseninstanzen) lebt in privatem,
-    beschreibbarem Anwendungsspeicher — nie im read-only dyld Shared Cache
-    oder in gemappten, nur lesbaren Dateien. Dieser Filter reduziert die zu
-    durchsuchende Speichermenge gegenüber `_iterate_regions` erheblich, was
-    Heap-weite Instanz-Suchen deutlich beschleunigt.
-    """
-    lib = _load_mach_lib()
-    _setup_mach_functions(lib)
-
-    regions: list[tuple[int, int]] = []
-    address = ctypes.c_uint64(0)
-    size = ctypes.c_uint64(0)
-    info = vm_region_submap_info_data_64_t()
-    depth = ctypes.c_uint32(0)
-
-    while True:
-        count = ctypes.c_uint32(ctypes.sizeof(vm_region_submap_info_data_64_t) // ctypes.sizeof(ctypes.c_uint32))
-        result = lib.mach_vm_region_recurse(
-            ctypes.c_uint64(_task_port(pm)),
-            ctypes.byref(address),
-            ctypes.byref(size),
-            ctypes.byref(depth),
-            ctypes.byref(info),
-            ctypes.byref(count),
-        )
-
-        if result != KERN_SUCCESS:
-            break
-
-        addr = address.value
-        sz = size.value
-
-        if info.is_submap:
-            depth = ctypes.c_uint32(depth.value + 1)
-            continue
-
-        prot = info.protection
-        writable = bool(prot & VM_PROT_READ) and bool(prot & VM_PROT_WRITE)
-        if writable and info.share_mode not in _SHARED_SHARE_MODES:
-            if 0 < sz < 1024 * 1024 * 1024:  # < 1GB
-                regions.append((addr, sz))
-
-        address = ctypes.c_uint64(addr + sz)
-
-    return regions
+    """Legacy-Wrapper: Baut PymemBackend und delegiert."""
+    return PymemBackend(pm).iterate_writable_private_regions()
 
 
 def _read_bytes_silent(pm: Pymem, addr: int, size: int) -> bytes | None:
-    """Liest Prozessspeicher ohne pymem-osx-Fehlerausgaben."""
-    lib = _load_mach_lib()
-    _setup_mach_functions(lib)
-
-    buffer = ctypes.create_string_buffer(size)
-    out_size = ctypes.c_uint64(0)
-    result = lib.mach_vm_read_overwrite(
-        ctypes.c_uint64(_task_port(pm)),
-        ctypes.c_uint64(addr),
-        ctypes.c_uint64(size),
-        ctypes.cast(buffer, ctypes.c_void_p),
-        ctypes.byref(out_size),
-    )
-    if result != KERN_SUCCESS or out_size.value <= 0:
-        return None
-    return buffer.raw[: out_size.value]
+    """Legacy-Wrapper: Baut PymemBackend und delegiert."""
+    return PymemBackend(pm).read_bytes(addr, size)
 
 
-def _scan_region(pm: Pymem, addr: int, size: int, needle: bytes) -> tuple[list[int], int, int]:
+def _scan_region(backend: MemoryBackend, addr: int, size: int, needle: bytes) -> tuple[list[int], int, int]:
     """Scannt eine Speicherregion chunkweise nach einem Byte-Pattern."""
     found: list[int] = []
     bytes_scanned = 0
@@ -312,7 +343,7 @@ def _scan_region(pm: Pymem, addr: int, size: int, needle: bytes) -> tuple[list[i
     offset = 0
     while offset < size:
         chunk_size = min(REGION_SCAN_CHUNK_SIZE, size - offset)
-        data = _read_bytes_silent(pm, addr + offset, chunk_size)
+        data = backend.read_bytes(addr + offset, chunk_size)
         if data is None:
             read_failures += 1
             break
@@ -337,7 +368,7 @@ def _scan_region(pm: Pymem, addr: int, size: int, needle: bytes) -> tuple[list[i
 
 
 def _scan_region_many(
-    pm: Pymem,
+    backend: MemoryBackend,
     addr: int,
     size: int,
     needles: dict[int, bytes],
@@ -356,7 +387,7 @@ def _scan_region_many(
     offset = 0
     while offset < size:
         chunk_size = min(REGION_SCAN_CHUNK_SIZE, size - offset)
-        data = _read_bytes_silent(pm, addr + offset, chunk_size)
+        data = backend.read_bytes(addr + offset, chunk_size)
         if data is None:
             read_failures += 1
             break
@@ -383,11 +414,11 @@ def _scan_region_many(
     return found, bytes_scanned, read_failures
 
 
-def scan_process_memory_with_stats(pm: Pymem, needle: bytes) -> ScanResult:
+def scan_process_memory_with_stats(backend: MemoryBackend, needle: bytes) -> ScanResult:
     """Scannt den gesamten Prozess-Speicher nach einem Byte-Pattern.
 
     Args:
-        pm: Pymem-Instanz (attached an MTGA-Prozess)
+        backend: MemoryBackend-Instanz (attached an MTGA-Prozess)
         needle: Zu suchendes Byte-Pattern (z.B. struct.pack('<I', card_id))
 
     Returns:
@@ -396,13 +427,13 @@ def scan_process_memory_with_stats(pm: Pymem, needle: bytes) -> ScanResult:
     if not needle:
         return ScanResult([], ScanStats(regions=0, bytes_scanned=0, read_failures=0, matches=0))
 
-    regions, region_error = _iterate_regions_with_error(pm)
+    regions, region_error = backend.iterate_readable_regions()
     found: list[int] = []
     bytes_scanned = 0
     read_failures = 0
 
     for addr, size in regions:
-        region_found, region_bytes, region_failures = _scan_region(pm, addr, size, needle)
+        region_found, region_bytes, region_failures = _scan_region(backend, addr, size, needle)
         found.extend(region_found)
         bytes_scanned += region_bytes
         read_failures += region_failures
@@ -419,12 +450,12 @@ def scan_process_memory_with_stats(pm: Pymem, needle: bytes) -> ScanResult:
     )
 
 
-def scan_process_memory(pm: Pymem, needle: bytes) -> list[int]:
+def scan_process_memory(backend: MemoryBackend, needle: bytes) -> list[int]:
     """Scannt den gesamten Prozess-Speicher nach einem Byte-Pattern."""
-    return scan_process_memory_with_stats(pm, needle).addresses
+    return scan_process_memory_with_stats(backend, needle).addresses
 
 
-def scan_process_memory_many_with_stats(pm: Pymem, needles: dict[int, bytes]) -> MultiScanResult:
+def scan_process_memory_many_with_stats(backend: MemoryBackend, needles: dict[int, bytes]) -> MultiScanResult:
     """Scannt den gesamten Prozess-Speicher in einem Durchlauf nach mehreren Patterns."""
     active_needles = {key: needle for key, needle in needles.items() if needle}
     empty_addresses = {key: [] for key in needles}
@@ -434,13 +465,13 @@ def scan_process_memory_many_with_stats(pm: Pymem, needles: dict[int, bytes]) ->
             ScanStats(regions=0, bytes_scanned=0, read_failures=0, matches=0),
         )
 
-    regions, region_error = _iterate_regions_with_error(pm)
+    regions, region_error = backend.iterate_readable_regions()
     found: dict[int, list[int]] = {key: [] for key in needles}
     bytes_scanned = 0
     read_failures = 0
 
     for addr, size in regions:
-        region_found, region_bytes, region_failures = _scan_region_many(pm, addr, size, active_needles)
+        region_found, region_bytes, region_failures = _scan_region_many(backend, addr, size, active_needles)
         for key, addresses in region_found.items():
             found[key].extend(addresses)
         bytes_scanned += region_bytes
@@ -459,6 +490,6 @@ def scan_process_memory_many_with_stats(pm: Pymem, needles: dict[int, bytes]) ->
     )
 
 
-def scan_process_memory_many(pm: Pymem, needles: dict[int, bytes]) -> dict[int, list[int]]:
+def scan_process_memory_many(backend: MemoryBackend, needles: dict[int, bytes]) -> dict[int, list[int]]:
     """Scannt den gesamten Prozess-Speicher nach mehreren Byte-Patterns."""
-    return scan_process_memory_many_with_stats(pm, needles).addresses
+    return scan_process_memory_many_with_stats(backend, needles).addresses

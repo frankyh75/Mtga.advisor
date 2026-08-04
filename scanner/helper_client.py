@@ -122,7 +122,7 @@ def is_helper_available(sock_path: str = DEFAULT_SOCK_PATH) -> bool:
     return ping(sock_path)
 
 
-# --- Low-Level Primitives (neues Protokoll) ---
+# --- Low-Level Primitives ---
 
 def request_list_regions(sock_path: str = DEFAULT_SOCK_PATH, *,
                          timeout: float = 60) -> list[dict[str, int]]:
@@ -174,235 +174,68 @@ def request_read_memory(sock_path: str = DEFAULT_SOCK_PATH, *,
     return base64.b64decode(data_b64)
 
 
-def request_scan(sock_path: str = DEFAULT_SOCK_PATH, *,
-                 process_names: Sequence[str] | None = None,
-                 anchors: Sequence[tuple[int, int, str]] | None = None,
-                 debug: bool = False) -> dict[str, Any]:
-    """Fordert einen Memory-Scan vom Helper an.
+# --- RemoteMemoryAdapter (IL2CPP-kompatibel) ---
 
-    Args:
-        sock_path: Pfad zum UNIX-Socket.
-        process_names: Liste der zu scannenden Prozessnamen (z.B. ["MTGA"]).
-        anchors: Liste von (grpId, quantity, name) Tuples für Anker-basierten Scan.
-        debug: Wenn True, gibt der Helper Debug-Statistiken zurück.
+class RemoteMemoryAdapter:
+    """Adapter, der über den Helper-Daemon auf MTGA-Speicher zugreift.
 
-    Returns:
-        Response-Dict mit "cards", "anchor_matches", "validation", etc.
-
-    Raises:
-        HelperConnectionError: Helper nicht erreichbar.
-        HelperProtocolError: Ungültige Response.
-        HelperError: Helper meldet Fehler bei der Ausführung.
+    Implementiert dieselbe Schnittstelle wie PymemMemoryAdapter in
+    scanner/il2cpp_nav.py, sodass scan_decks_il2cpp() und
+    scan_ranks_and_account() ohne Änderungen funktionieren.
     """
-    request: dict[str, Any] = {
-        "action": "scan",
-        "debug": debug,
-    }
-    if process_names:
-        request["process_names"] = list(process_names)
-    if anchors:
-        request["anchors"] = [
-            {"grpId": aid, "quantity": aqty, "name": aname}
-            for aid, aqty, aname in anchors
-        ]
 
-    resp = _send_request(request, sock_path, timeout=60)
-    if "error" in resp:
-        raise HelperError(resp["error"])
-    if "cards" not in resp:
-        raise HelperProtocolError(f"Scan-Response fehlt 'cards'-Feld: {resp}")
-    return resp
+    def __init__(self, sock_path: str = DEFAULT_SOCK_PATH) -> None:
+        self._sock_path = sock_path
+        self._pid: int | None = None
 
+    @property
+    def pid(self) -> int:
+        if self._pid is None:
+            status = get_status(self._sock_path)
+            self._pid = status.pid or 0
+        return self._pid
 
-def request_deck_scan(sock_path: str = DEFAULT_SOCK_PATH, *,
-                      process_names: Sequence[str] | None = None,
-                      method: str = "auto",
-                      anchors: Sequence[int] | None = None,
-                      debug: bool = False) -> dict[str, Any]:
-    """Fordert einen Deck-Scan vom Helper an.
+    def read_bytes(self, addr: int, size: int) -> bytes:
+        try:
+            return request_read_memory(self._sock_path, address=addr, size=size)
+        except (HelperConnectionError, HelperProtocolError, HelperError):
+            return b"\x00" * size
 
-    Returns:
-        Response-Dict mit "decks"-Liste.
-    """
-    request: dict[str, Any] = {
-        "action": "deck_scan",
-        "method": method,
-        "debug": debug,
-    }
-    if process_names:
-        request["process_names"] = list(process_names)
-    if anchors:
-        request["anchor_ids"] = list(anchors)
+    def read_ptr(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 8)
+        return struct.unpack_from("<Q", raw)[0]
 
-    resp = _send_request(request, sock_path, timeout=60)
-    if "error" in resp:
-        raise HelperError(resp["error"])
-    return resp
+    def read_u32(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 4)
+        return struct.unpack_from("<I", raw)[0]
 
+    def read_i32(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 4)
+        return struct.unpack_from("<i", raw)[0]
 
-def request_rank_scan(sock_path: str = DEFAULT_SOCK_PATH, *,
-                      process_names: Sequence[str] | None = None,
-                      include_account: bool = True) -> dict[str, Any]:
-    """Fordert einen Rank/Account-Scan vom Helper an.
-
-    Returns:
-        Response-Dict mit "ranks" und optional "account".
-    """
-    request: dict[str, Any] = {
-        "action": "rank_scan",
-        "include_account": include_account,
-    }
-    if process_names:
-        request["process_names"] = list(process_names)
-
-    resp = _send_request(request, sock_path, timeout=60)
-    if "error" in resp:
-        raise HelperError(resp["error"])
-    return resp
+    def read_string(self, addr: int) -> str:
+        if addr == 0:
+            return ""
+        raw = self.read_bytes(addr, 256)
+        end = raw.find(b"\x00")
+        if end == -1:
+            end = len(raw)
+        return raw[:end].decode("ascii", errors="replace")
 
 
 # --- Helper-based Scan Functions (Drop-in für memory_scanner) ---
 
-def helper_scan_collection(
-    sock_path: str = DEFAULT_SOCK_PATH,
-    *,
-    process_names: Sequence[str] | None = None,
-    anchors: Sequence[tuple[int, int, str]] | None = None,
-    debug: bool = False,
-    print_fn: Callable[..., None] = print,
-) -> dict[int, int] | None:
-    """Scannt die Collection über den Helper-Daemon.
-
-    Dies ist der sudo-freie Weg: Der Helper läuft als root und führt
-    task_for_pid() + Memory-Read aus.
-
-    Returns:
-        Dictionary {grpId: quantity} oder None bei Fehler.
-    """
-    if not is_helper_available(sock_path):
-        print_fn("⚠ Helper-Daemon nicht erreichbar.")
-        return None
-
-    try:
-        resp = request_scan(
-            sock_path,
-            process_names=process_names,
-            anchors=anchors,
-            debug=debug,
-        )
-    except HelperError as exc:
-        print_fn(f"❌ Helper-Scan fehlgeschlagen: {exc}")
-        return None
-    except (HelperConnectionError, HelperProtocolError) as exc:
-        print_fn(f"❌ Helper-Kommunikation fehlgeschlagen: {exc}")
-        return None
-
-    cards_raw = resp.get("cards", {})
-    # JSON-Keys sind Strings → int konvertieren
-    cards: dict[int, int] = {}
-    for k, v in cards_raw.items():
-        try:
-            cards[int(k)] = int(v)
-        except (ValueError, TypeError):
-            continue
-
-    return cards if cards else None
-
-
-def helper_scan_collection_detailed(
-    sock_path: str = DEFAULT_SOCK_PATH,
-    *,
-    process_names: Sequence[str] | None = None,
-    anchors: Sequence[tuple[int, int, str]] | None = None,
-    debug: bool = False,
-    print_fn: Callable[..., None] = print,
-) -> MemoryScanResult | None:
-    """Scannt die Collection über den Helper und liefert ein MemoryScanResult.
-
-    Returns:
-        MemoryScanResult oder None bei Fehler.
-    """
-    from .memory_scanner import validate_collection
-    from .card_database import load_card_database
-
-    if not is_helper_available(sock_path):
-        print_fn("⚠ Helper-Daemon nicht erreichbar.")
-        return None
-
-    print_fn("🔄 Scan über Helper-Daemon (sudo-frei)...")
-    try:
-        resp = request_scan(
-            sock_path,
-            process_names=process_names,
-            anchors=anchors,
-            debug=debug,
-        )
-    except HelperError as exc:
-        print_fn(f"❌ Helper-Scan fehlgeschlagen: {exc}")
-        return None
-    except (HelperConnectionError, HelperProtocolError) as exc:
-        print_fn(f"❌ Helper-Kommunikation fehlgeschlagen: {exc}")
-        return None
-
-    cards_raw = resp.get("cards", {})
-    collection: dict[int, int] = {}
-    for k, v in cards_raw.items():
-        try:
-            collection[int(k)] = int(v)
-        except (ValueError, TypeError):
-            continue
-
-    if not collection:
-        print_fn("❌ Helper lieferte keine Karten.")
-        return None
-
-    # Validierung mit Karten-DB
-    db = load_card_database()
-    validation = validate_collection(collection, db=db, anchors=list(anchors) if anchors else None)
-
-    anchor_matches_raw = resp.get("anchor_matches", {})
-    anchor_matches: dict[int, int] = {}
-    for k, v in anchor_matches_raw.items():
-        try:
-            anchor_matches[int(k)] = int(v)
-        except (ValueError, TypeError):
-            continue
-
-    scan_stats = None
-    if debug and "scan_stats" in resp:
-        stats_raw = resp["scan_stats"]
-        from .pattern_scanner import ScanStats
-        try:
-            scan_stats = ScanStats(
-                regions=stats_raw.get("regions", 0),
-                bytes_scanned=stats_raw.get("bytes_scanned", 0),
-                read_failures=stats_raw.get("read_failures", 0),
-                matches=stats_raw.get("matches", 0),
-                region_error=stats_raw.get("region_error", ""),
-            )
-        except (KeyError, TypeError):
-            pass
-
-    print_fn(f"✅ Helper-Scan: {len(collection)} unique Karten gefunden")
-    return MemoryScanResult(
-        collection=collection,
-        anchors=list(anchors) if anchors else [],
-        anchor_matches=anchor_matches,
-        validation=validation,
-        scan_stats=scan_stats,
-    )
-
-
 def helper_scan_decks(
     sock_path: str = DEFAULT_SOCK_PATH,
     *,
-    process_names: Sequence[str] | None = None,
     method: str = "auto",
     anchor_ids: Sequence[int] | None = None,
     debug: bool = False,
     print_fn: Callable[..., None] = print,
 ) -> list[dict[str, Any]] | None:
-    """Scannt Decks über den Helper-Daemon.
+    """Scannt Decks über den Helper-Daemon (via IL2CPP-Navigation).
+
+    Nutzt RemoteMemoryAdapter + scan_decks_il2cpp() aus scanner.il2cpp_nav.
 
     Returns:
         Liste von Deck-Dicts oder None bei Fehler.
@@ -412,22 +245,46 @@ def helper_scan_decks(
         return None
 
     try:
-        resp = request_deck_scan(
-            sock_path,
-            process_names=process_names,
-            method=method,
-            anchors=anchor_ids,
-            debug=debug,
-        )
-    except HelperError as exc:
+        from .il2cpp_nav import scan_decks_il2cpp
+        adapter = RemoteMemoryAdapter(sock_path)
+        decks = scan_decks_il2cpp(adapter)
+        if not decks:
+            print_fn("❌ Helper Deck-Scan: keine Decks gefunden.")
+            return None
+        return decks
+    except Exception as exc:
         print_fn(f"❌ Helper Deck-Scan fehlgeschlagen: {exc}")
         return None
-    except (HelperConnectionError, HelperProtocolError) as exc:
-        print_fn(f"❌ Helper-Kommunikation fehlgeschlagen: {exc}")
+
+
+def helper_scan_ranks(
+    sock_path: str = DEFAULT_SOCK_PATH,
+    *,
+    include_account: bool = True,
+    print_fn: Callable[..., None] = print,
+) -> dict[str, Any] | None:
+    """Scannt Ranks/Account über den Helper-Daemon (via IL2CPP-Navigation).
+
+    Nutzt RemoteMemoryAdapter + scan_ranks_and_account() aus scanner.il2cpp_nav.
+
+    Returns:
+        Dict mit "ranks" und optional "account", oder None bei Fehler.
+    """
+    if not is_helper_available(sock_path):
+        print_fn("⚠ Helper-Daemon nicht erreichbar.")
         return None
 
-    decks = resp.get("decks", [])
-    return decks if decks else None
+    try:
+        from .rank_scanner import scan_ranks_and_account
+        adapter = RemoteMemoryAdapter(sock_path)
+        result = scan_ranks_and_account(adapter, read_account=include_account)
+        if not result:
+            print_fn("❌ Helper Rank-Scan: keine Daten gefunden.")
+            return None
+        return result
+    except Exception as exc:
+        print_fn(f"❌ Helper Rank-Scan fehlgeschlagen: {exc}")
+        return None
 
 
 # --- Exceptions ---

@@ -48,19 +48,8 @@
 #define MAX_CLIENTS 8
 #define BUF_SIZE 65536
 #define MAX_RESPONSE 1048576    /* 1 MB */
-#define MAX_PROCESS_NAMES 16
-#define MAX_NAME_LEN 256
-#define MAX_ANCHORS 64
 #define READ_CHUNK (4 * 1024 * 1024)
 #define MAX_REGIONS 4096
-
-/* Card ID range (see scanner/memory_scanner.py find_blocks) */
-#define CARD_ID_MIN 1000
-#define CARD_ID_MAX 500000
-#define CARD_QTY_MIN 1
-#define CARD_QTY_MAX 400
-#define BLOCK_MIN_CARDS 50
-#define BLOCK_MAX_MISSES 50
 
 /* --- Globals --- */
 
@@ -601,12 +590,7 @@ static int check_peer_credentials(int client_fd) {
         return 0;
     }
 
-    /* Fallback: if we cannot determine the console user (e.g. headless),
-     * allow any non-root user in group 20 (staff) or 80 (admin) on macOS. */
-    if (peer_gid == 20 || peer_gid == 80) {
-        return 0;
-    }
-
+    /* No fallback — reject. Only root and the console user are allowed. */
     fprintf(stderr, "mtga-helper: rejected connection from uid %d gid %d\n",
             (int)peer_uid, (int)peer_gid);
     return -1;

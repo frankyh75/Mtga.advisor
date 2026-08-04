@@ -26,7 +26,7 @@ from .macos_paths import (
     get_macos_mtga_process_name,
     get_macos_mtga_process_names,
 )
-from .pattern_scanner import _read_bytes_silent, scan_process_memory, scan_process_memory_with_stats
+from .pattern_scanner import MemoryBackend, PymemBackend, scan_process_memory, scan_process_memory_with_stats
 from .pattern_scanner import ScanStats, scan_process_memory_many_with_stats
 
 
@@ -43,7 +43,7 @@ def _anchor_file() -> Path:
     return get_default_cache_dir() / "last_anchors.json"
 
 
-def find_blocks(pm: Pymem, addr: int) -> list[dict[int, int]]:
+def find_blocks(backend: MemoryBackend, addr: int) -> list[dict[int, int]]:
     """Liest Speicher um eine Adresse und sucht nach (k,v)-Paaren.
 
     Die Collection-Daten liegen als Array von (grpId, quantity)-Paaren
@@ -51,7 +51,7 @@ def find_blocks(pm: Pymem, addr: int) -> list[dict[int, int]]:
     alle gültigen Paare.
 
     Args:
-        pm: Pymem-Instanz
+        backend: MemoryBackend-Instanz
         addr: Fundstelle einer Anker-Karte
 
     Returns:
@@ -59,7 +59,7 @@ def find_blocks(pm: Pymem, addr: int) -> list[dict[int, int]]:
     """
     try:
         block_start = max(0, addr - 1024 * 1024)
-        data = _read_bytes_silent(pm, block_start, 4 * 1024 * 1024)
+        data = backend.read_bytes(block_start, 4 * 1024 * 1024)
         if data is None:
             return []
         ints = struct.unpack(f"<{len(data) // 4}I", data)
@@ -357,8 +357,8 @@ def scan_collection_detailed(
     print_fn: Callable[..., None] = print,
     db_loader: Callable[[], dict[int, dict[str, Any]]] | None = None,
     process_names: Sequence[str] | None = None,
-    memory_scanner: Callable[[Pymem, bytes], list[int]] | None = None,
-    block_parser: Callable[[Pymem, int], list[dict[int, int]]] | None = None,
+    memory_scanner: Callable[[MemoryBackend, bytes], list[int]] | None = None,
+    block_parser: Callable[[MemoryBackend, int], list[dict[int, int]]] | None = None,
     debug: bool = False,
     use_helper: bool | None = None,
     sock_path: str | None = None,
@@ -420,6 +420,7 @@ def scan_collection_detailed(
     pm = _attach_process(candidate_names, print_fn=print_fn)
     if pm is None:
         return None
+    backend = PymemBackend(pm)
 
     # 4. Anker-Karten eingeben
     anchors = get_user_anchors(name_to_id, input_fn=input_fn, print_fn=print_fn)
@@ -436,7 +437,7 @@ def scan_collection_detailed(
 
     if memory_scanner is scan_process_memory:
         needles = {aid: struct.pack("<I", aid) for aid, _, _ in anchors}
-        multi_result = scan_process_memory_many_with_stats(pm, needles)
+        multi_result = scan_process_memory_many_with_stats(backend, needles)
         aggregate_stats = multi_result.stats
         for i, (aid, _aqty, aname) in enumerate(anchors, 1):
             display = (aname[:15] + "..") if len(aname) > 15 else aname
@@ -460,7 +461,7 @@ def scan_collection_detailed(
             print_fn(f"   [{i}/{total}] Suche {display}...")
 
             needle = struct.pack("<I", aid)
-            found = memory_scanner(pm, needle)
+            found = memory_scanner(backend, needle)
             anchor_matches[aid] = len(found)
             print_fn(f"     → {len(found)} Fundstellen")
             matches.extend(found)
@@ -477,7 +478,7 @@ def scan_collection_detailed(
     print_fn("\n📦 Parse Speicherblöcke...")
     candidates: list[dict[int, int]] = []
     for m in matches:
-        candidates.extend(block_parser(pm, m))
+        candidates.extend(block_parser(backend, m))
 
     if not candidates:
         print_fn("❌ Keine validen Datenblöcke gefunden.")
@@ -506,8 +507,8 @@ def scan_collection(
     print_fn: Callable[..., None] = print,
     db_loader: Callable[[], dict[int, dict[str, Any]]] | None = None,
     process_names: Sequence[str] | None = None,
-    memory_scanner: Callable[[Pymem, bytes], list[int]] | None = None,
-    block_parser: Callable[[Pymem, int], list[dict[int, int]]] | None = None,
+    memory_scanner: Callable[[MemoryBackend, bytes], list[int]] | None = None,
+    block_parser: Callable[[MemoryBackend, int], list[dict[int, int]]] | None = None,
     debug: bool = False,
     use_helper: bool | None = None,
     sock_path: str | None = None,
