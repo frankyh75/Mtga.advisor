@@ -1,6 +1,6 @@
 {
-  "_comment": "MTGA Advisor LLM Config — Tailscale (Mac Studio)",
-  "endpoint": "http://100.95.116.78:8081/v1/chat/completions",
+  "_comment": "MTGA Advisor LLM Config — lokales LLM (z.B. llama.cpp, ollama)",
+  "endpoint": "http://127.0.0.1:8081/v1/chat/completions",
   "model_name": "ornith:35b",
   "temperature": 0.3,
   "max_tokens": 4096,
