@@ -37,14 +37,25 @@ aus Python-Templates in `_render_index`).
 | `POST /api/history/save` | `app.py:1515` | Snapshot speichern |
 | `POST /api/chat` | `app.py:1423` | LLM-Chat mit Deck-Kontext |
 
-### Kritischer Bug (blockiert Deck-Detail + Chat)
+### ~~Kritischer Bug~~ (behoben, Commit `bc2e2a6`)
 
-`server/dashboard.js:294` und `:328` rufen `GET /api/decks/{deckKey}`
-(**Plural**) auf. Diese Route existiert **nicht** — nur `GET /api/deck/<id>`
-(Singular) und `GET /api/deck-cards?deck_id=`. Deck-Detail-Panel und
-Chat-Panel laufen dadurch aktuell live gegen 404. Höchste Priorität, da alles
-Weitere (Analyze/Improve/neue Suche) auf einem funktionierenden Deck-Detail
-aufbaut.
+~~`server/dashboard.js:294` und `:328` rufen `GET /api/decks/{deckKey}`
+(Plural) auf. Diese Route existiert nicht.~~ **Behoben:** beide Stellen
+rufen jetzt `GET /api/deck/<id>` (Singular) auf, live gegen echte
+IL2CPP-Scan-Daten verifiziert (alte Route 404, neue Route 200). Dabei auch
+Karten-Thumbnails wiederhergestellt (`renderCardSection`, lazy-loaded via
+`IntersectionObserver` + `/api/card-image/<id>`), die derselbe verunglückte
+Merge-Konflikt verworfen hatte.
+
+### Neuer Fund: XSS-Hardening-Test schlägt fehl
+
+`server/tests/test_app.py::test_dashboard_script_is_loaded_from_asset`
+prüft, dass `dashboard.js` kein `innerHTML` verwendet (nur sichere
+DOM-APIs). Schlägt fehl — die History-/Meta-/Ranks-Render-Blöcke
+(`dashboard.js`, ab ca. Zeile 550) bauen HTML per Template-Strings und
+`innerHTML`. Vorbestehend (nicht durch den obigen Fix verursacht, per
+Stash-Vergleich verifiziert). Gehört in Sprint 1 (GUI stabilisieren) —
+siehe Punkt 3 unten.
 
 ### Frontend-Stand
 
@@ -82,46 +93,48 @@ Funktioniert: `out/collection.json` (via `scanner/memory_scanner.py`),
 
 ## Sprint 1 — Stabilisieren + kleine neue Bausteine
 
-1. **Bugfix `/api/decks/{deckKey}` → `/api/deck/<id>`**: Frontend-Aufrufe
-   in `dashboard.js:294`/`:328` korrigieren (oder Backend-Alias ergänzen).
-   Kleinster Fix, größter Hebel — entsperrt Deck-Detail und Chat.
-2. **`server/dashboard.js`-Merge-Konflikt committen**: Arbeitsverzeichnis ist
-   bereits konfliktfrei (keine `<<<<<<<`-Marker mehr), aber nie eingecheckt.
-   Vor jeder weiteren Arbeit an der Datei sauber committen.
-3. **Chat-Panel-Regressionstest** mit echten, vollständigen `decks.json`/
+1. ~~**Bugfix `/api/decks/{deckKey}` → `/api/deck/<id>`**~~ ✅ erledigt
+   (Commit `bc2e2a6`), inkl. Karten-Thumbnails.
+2. ~~**`server/dashboard.js`-Merge-Konflikt committen**~~ ✅ erledigt
+   (Commit `2e72d15`).
+3. **`innerHTML`-Refactor** (neu, siehe Fund oben): History-/Meta-/Ranks-
+   Render-Blöcke in `dashboard.js` auf sichere DOM-APIs (`createElement`/
+   `textContent`) umstellen, damit `test_dashboard_script_is_loaded_from_asset`
+   wieder grün wird.
+4. **Chat-Panel-Regressionstest** mit echten, vollständigen `decks.json`/
    `collection.json` (jetzt dank IL2CPP-Fix verlässlich) end-to-end
    durchklicken — weitere stille Brüche vor neuen Endpoints finden.
-4. **Deck-Namens-Suchfilter**: Textfeld über der Deck-Liste in `dashboard.js`,
+5. **Deck-Namens-Suchfilter**: Textfeld über der Deck-Liste in `dashboard.js`,
    filtert die bereits geladene `decks.json`-Liste client-seitig nach Name.
-5. **`POST /api/advisor/build` als Stub**: Request/Response-Schema exakt wie
+6. **`POST /api/advisor/build` als Stub**: Request/Response-Schema exakt wie
    in `docs/deck-advisor-roadmap.md` (Zeilen 117–153) beschrieben, zunächst
    ohne echte LLM-Logik — nur damit das Builder-Formular dagegen entwickelt
    werden kann.
-6. **New-Deck-Builder-Formular**: Format-Dropdown, Farbwahl, Archetyp,
+7. **New-Deck-Builder-Formular**: Format-Dropdown, Farbwahl, Archetyp,
    `maxRares`, optional Budget/„owned-first" — reiner UI-Baustein gegen den
-   Stub aus Punkt 5.
+   Stub aus Punkt 6.
 
 ## Sprint 2 — Analyze-Flow + Collection-Browser
 
-7. **`POST /api/advisor/analyze`** mit echter Collection-Context-Logik
+8. **`POST /api/advisor/analyze`** mit echter Collection-Context-Logik
    (`missingCards`, `craftPriorities`, `cuts`) — kann Prompt-/Parse-Logik
    aus `advisor/llm_advisor.py` wiederverwenden statt neu zu bauen.
-8. **Advisor Result View**: strukturierte Blöcke (Summary/Core/Missing/
+9. **Advisor Result View**: strukturierte Blöcke (Summary/Core/Missing/
    Craft/Cuts/Mana/Risk) im Frontend.
-9. **Collection/Karten-Browser mit Suche**: neue Ansicht über
-   `/api/collection` (bereits vorhanden) + Karten-DB-Join für
-   Name/Text/Typ/Farbe-Filter. Braucht ggf. eine Erweiterung des
-   Endpoints oder client-seitiges Filtern, falls Kartendetails schon im
-   Payload stecken — vor Implementierung prüfen, was `/api/collection`
-   aktuell tatsächlich zurückgibt (grpId-Liste vs. angereicherte Objekte).
-10. **Analyze/Improve/Export-Schnellaktionen** im Deck-Detail-Panel.
+10. **Collection/Karten-Browser mit Suche**: neue Ansicht über
+    `/api/collection` (bereits vorhanden) + Karten-DB-Join für
+    Name/Text/Typ/Farbe-Filter. Braucht ggf. eine Erweiterung des
+    Endpoints oder client-seitiges Filtern, falls Kartendetails schon im
+    Payload stecken — vor Implementierung prüfen, was `/api/collection`
+    aktuell tatsächlich zurückgibt (grpId-Liste vs. angereicherte Objekte).
+11. **Analyze/Improve/Export-Schnellaktionen** im Deck-Detail-Panel.
 
 ## Sprint 3 — Qualität, Persistenz, UX
 
-11. Entwurf speichern/laden (neues Artefakt, z.B. `out/advisor-drafts/`).
-12. Prompt-Fixtures + Tests für Build-/Analyze-Prompts.
-13. UI-Tests für Rare-Limit/Format-Formular und beide neuen Suchfilter.
-14. Bessere Karten-Rendering-Ansichten (Bilder, Rarity-Farbcodierung) im
+12. Entwurf speichern/laden (neues Artefakt, z.B. `out/advisor-drafts/`).
+13. Prompt-Fixtures + Tests für Build-/Analyze-Prompts.
+14. UI-Tests für Rare-Limit/Format-Formular und beide neuen Suchfilter.
+15. Bessere Karten-Rendering-Ansichten (Bilder, Rarity-Farbcodierung) im
     neuen Collection-Browser.
 
 ## Offene Fragen (vor Sprint 2 zu klären)
