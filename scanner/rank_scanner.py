@@ -40,6 +40,7 @@ from .il2cpp_nav import (
     MemoryReader,
     MockMemory,
     PymemMemoryAdapter,
+    discover_data_segment_base,
     _read_ptr,
     _read_i32,
     _read_u32,
@@ -491,7 +492,9 @@ def scan_ranks_and_account(
     if wrapper_class == 0:
         if type_info_table == 0:
             if data_segment_base == 0:
-                warnings.append("no data_segment_base provided for class discovery")
+                data_segment_base = discover_data_segment_base(mem)
+            if data_segment_base == 0:
+                warnings.append("no data_segment_base could be discovered for class discovery")
                 return FullRankScanResult(warnings=warnings)
             from .il2cpp_nav import IL2CPP_OFFSETS
             type_info_table = _read_ptr(mem, data_segment_base + IL2CPP_OFFSETS["type_info_table_offset"])

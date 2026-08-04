@@ -219,6 +219,66 @@ def _iterate_regions(pm: Pymem) -> list[tuple[int, int]]:
     return regions
 
 
+# vm_region_submap_info_data_64_t.share_mode values that indicate a mapping
+# shared across processes (dyld shared cache, shared libraries) — these never
+# hold GC/managed-heap objects and can be skipped when hunting for live
+# IL2CPP instances.
+SM_SHARED = 4
+SM_TRUESHARED = 5
+SM_SHARED_ALIASED = 7
+_SHARED_SHARE_MODES = frozenset({SM_SHARED, SM_TRUESHARED, SM_SHARED_ALIASED})
+
+
+def _iterate_writable_private_regions(pm: Pymem) -> list[tuple[int, int]]:
+    """Iteriert über beschreibbare, nicht geteilte Speicherregionen.
+
+    Der IL2CPP-verwaltete Heap (Klasseninstanzen) lebt in privatem,
+    beschreibbarem Anwendungsspeicher — nie im read-only dyld Shared Cache
+    oder in gemappten, nur lesbaren Dateien. Dieser Filter reduziert die zu
+    durchsuchende Speichermenge gegenüber `_iterate_regions` erheblich, was
+    Heap-weite Instanz-Suchen deutlich beschleunigt.
+    """
+    lib = _load_mach_lib()
+    _setup_mach_functions(lib)
+
+    regions: list[tuple[int, int]] = []
+    address = ctypes.c_uint64(0)
+    size = ctypes.c_uint64(0)
+    info = vm_region_submap_info_data_64_t()
+    depth = ctypes.c_uint32(0)
+
+    while True:
+        count = ctypes.c_uint32(ctypes.sizeof(vm_region_submap_info_data_64_t) // ctypes.sizeof(ctypes.c_uint32))
+        result = lib.mach_vm_region_recurse(
+            ctypes.c_uint64(_task_port(pm)),
+            ctypes.byref(address),
+            ctypes.byref(size),
+            ctypes.byref(depth),
+            ctypes.byref(info),
+            ctypes.byref(count),
+        )
+
+        if result != KERN_SUCCESS:
+            break
+
+        addr = address.value
+        sz = size.value
+
+        if info.is_submap:
+            depth = ctypes.c_uint32(depth.value + 1)
+            continue
+
+        prot = info.protection
+        writable = bool(prot & VM_PROT_READ) and bool(prot & VM_PROT_WRITE)
+        if writable and info.share_mode not in _SHARED_SHARE_MODES:
+            if 0 < sz < 1024 * 1024 * 1024:  # < 1GB
+                regions.append((addr, sz))
+
+        address = ctypes.c_uint64(addr + sz)
+
+    return regions
+
+
 def _read_bytes_silent(pm: Pymem, addr: int, size: int) -> bytes | None:
     """Liest Prozessspeicher ohne pymem-osx-Fehlerausgaben."""
     lib = _load_mach_lib()

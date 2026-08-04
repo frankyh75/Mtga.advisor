@@ -15,9 +15,15 @@ used by MTGA, as documented in offsets.rs and napi/mod.rs::offsets.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import os
 import struct
+from functools import lru_cache
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
+
+from .pattern_scanner import _iterate_regions_with_error, _iterate_writable_private_regions
 
 # ---------------------------------------------------------------------------
 # IL2CPP structure offsets (Unity 2021.x, MTGA-verified)
@@ -102,6 +108,14 @@ MAX_DICT_ENTRIES = 5000
 MAX_LIST_ELEMENTS = 1000
 MIN_VALID_PTR = 0x100000
 MAX_VALID_PTR = 0x400000000
+
+# Mach-O / dyld constants for macOS IL2CPP images.
+MH_MAGIC_64 = 0xFEEDFACF
+LC_SEGMENT_64 = 0x19
+MACHO_HEADER_64_SIZE = 32
+MACHO_HEADER_SCAN_SIZE = 0x8000
+GAME_ASSEMBLY_HINTS = ("GameAssembly", "libGameAssembly")
+DATA_SEGMENT_NAMES = ("__DATA_CONST", "__DATA", "__DATA_DIRTY")
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +472,283 @@ def find_papa_instance(mem: MemoryReader, papa_class: int) -> int | None:
                     return obj_addr
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Backref-based class & instance discovery (metadata-driven)
+#
+# The TypeInfoTable/data_segment_base approach above assumes IL2CPP class
+# metadata lives inside GameAssembly.dylib's own __DATA segment at a fixed
+# offset. On macOS that assumption does not hold: Il2CppClass structs and
+# their FieldInfo arrays are heap-allocated at runtime, in a separate arena
+# outside GameAssembly's Mach-O segments entirely (verified live, see
+# docs/deck-scan-problem-report.md). This section finds classes by the
+# opposite direction — starting from a known field/class *name string* in
+# global-metadata.dat's string pool and following pointers back to the
+# structure that references it — instead of assuming any fixed offset.
+# ---------------------------------------------------------------------------
+
+# FieldInfo arrays for this game build were found consistently within these
+# heap ranges across multiple process launches (same ranges historically
+# used for the PAPA instance heap-scan above). Live *instances*, in contrast,
+# are scattered across the general managed heap and are not confined here —
+# see _find_instance_by_klass, which scans writable process memory broadly.
+FIELDINFO_HEAP_REGIONS = PAPA_HEAP_REGIONS
+
+
+def _bulk_read(mem: MemoryReader, base: int, size: int, chunk_size: int = 0x400000) -> bytes:
+    """Read a large region in bounded chunks (single huge reads can fail)."""
+    buf = bytearray()
+    offset = 0
+    while offset < size:
+        n = min(chunk_size, size - offset)
+        buf.extend(mem.read_bytes(base + offset, n))
+        offset += n
+    return bytes(buf)
+
+
+def _find_metadata_regions(pm: Any) -> list[tuple[int, int]]:
+    """Locate global-metadata.dat's mapped region(s) in the live process."""
+    regions, _ = _iterate_regions_with_error(pm)
+    pid = _process_pid(pm) or 0
+    result = []
+    for addr, size in regions:
+        fname = _region_filename(pid, addr)
+        if fname and "global-metadata" in fname:
+            result.append((addr, size))
+    return result
+
+
+def _find_string_in_metadata_regions(
+    mem: MemoryReader,
+    metadata_regions: list[tuple[int, int]],
+    name: str,
+) -> int | None:
+    """Find the runtime address of a NUL-delimited string within the given
+    global-metadata.dat region(s), without relying on a hardcoded file
+    offset (which shifts between game builds/patches).
+    """
+    needle = b"\x00" + name.encode("ascii") + b"\x00"
+    for addr, size in metadata_regions:
+        buf = _bulk_read(mem, addr, size)
+        idx = buf.find(needle)
+        if idx != -1:
+            return addr + idx + 1  # skip the leading NUL
+    return None
+
+
+def _region_containing(regions: list[tuple[int, int]], addr: int) -> tuple[int, int] | None:
+    """Return the (base, size) of the region in `regions` that contains addr."""
+    for r_addr, r_size in regions:
+        if r_addr <= addr < r_addr + r_size:
+            return r_addr, r_size
+    return None
+
+
+def _validate_class_struct(mem: MemoryReader, klass: int, expected_name: str | None = None) -> bool:
+    """Sanity-check that `klass` looks like a real Il2CppClass structure."""
+    if klass < MIN_VALID_PTR:
+        return False
+    name_ptr = _read_ptr(mem, klass + IL2CPP_OFFSETS["class_name"])
+    if not (MIN_VALID_PTR < name_ptr < MAX_VALID_PTR):
+        return False
+    name = _read_string_ascii(mem, name_ptr)
+    if not name:
+        return False
+    if expected_name is not None and name != expected_name:
+        return False
+
+    fields_ptr = _read_ptr(mem, klass + IL2CPP_OFFSETS["class_fields"])
+    if not (MIN_VALID_PTR < fields_ptr < MAX_VALID_PTR):
+        return False
+
+    field_count_raw = mem.read_bytes(klass + IL2CPP_OFFSETS["class_field_count"], 4)
+    field_count = struct.unpack_from("<I", field_count_raw)[0]
+    return 0 < field_count < 200
+
+
+def _find_class_by_field_backref_in_regions(
+    mem: MemoryReader,
+    metadata_regions: list[tuple[int, int]],
+    fieldinfo_regions: list[tuple[int, int]],
+    field_name: str,
+) -> int | None:
+    """Find the Il2CppClass that declares a field named `field_name`.
+
+    FieldInfo layout (confirmed live against MTGA's IL2CPP build):
+      +0x00: name (const char*)
+      +0x08: type (Il2CppType*)
+      +0x10: parent (Il2CppClass*)
+      +0x18: offset (i32) + token (u32)
+
+    We locate the field name's string address in global-metadata.dat, then
+    search the FieldInfo heap arena for an 8-byte-aligned pointer equal to
+    that address — the start of the matching FieldInfo entry — and read its
+    `parent` field directly.
+
+    Note: `fieldinfo_regions` uses (start, end) pairs (matching
+    FIELDINFO_HEAP_REGIONS/PAPA_HEAP_REGIONS), unlike `metadata_regions`
+    and most other region lists in this module, which use (addr, size).
+    """
+    name_addr = _find_string_in_metadata_regions(mem, metadata_regions, field_name)
+    if name_addr is None:
+        return None
+
+    needle = struct.pack("<Q", name_addr)
+    for region_start, region_end in fieldinfo_regions:
+        buf = _bulk_read(mem, region_start, region_end - region_start)
+        idx = buf.find(needle)
+        while idx != -1:
+            entry_addr = region_start + idx
+            if entry_addr % 8 == 0:
+                parent = _read_ptr(mem, entry_addr + IL2CPP_OFFSETS["field_parent"])
+                if _validate_class_struct(mem, parent):
+                    return parent
+            idx = buf.find(needle, idx + 1)
+
+    return None
+
+
+def _find_class_by_name_in_arena(
+    mem: MemoryReader,
+    metadata_regions: list[tuple[int, int]],
+    arena_addr: int,
+    arena_size: int,
+    class_name: str,
+) -> int | None:
+    """Find an Il2CppClass by name within a known class-descriptor heap
+    arena (Il2CppClass structs for a build are allocated together in one
+    contiguous heap region, so once one class is found the rest can be
+    located by searching that same region for their name-string address).
+    """
+    name_addr = _find_string_in_metadata_regions(mem, metadata_regions, class_name)
+    if name_addr is None:
+        return None
+
+    needle = struct.pack("<Q", name_addr)
+    buf = _bulk_read(mem, arena_addr, arena_size)
+    idx = buf.find(needle)
+    while idx != -1:
+        hit_addr = arena_addr + idx
+        if hit_addr % 8 == 0:
+            candidate = hit_addr - IL2CPP_OFFSETS["class_name"]
+            if _validate_class_struct(mem, candidate, expected_name=class_name):
+                return candidate
+        idx = buf.find(needle, idx + 1)
+
+    return None
+
+
+def _find_instance_by_klass_in_regions(
+    mem: MemoryReader,
+    regions: list[tuple[int, int]],
+    klass: int,
+    *,
+    validate: Callable[[int], bool] | None = None,
+    budget: int = 4_000_000_000,
+) -> int | None:
+    """Find a live object instance whose header klass-pointer equals `klass`.
+
+    IL2CPP object headers start with the class pointer at offset 0. Live
+    instances are scattered across the general managed heap (not confined
+    to any small fixed range), so this scans the given regions — smallest
+    first, up to `budget` bytes total — for an 8-byte-aligned occurrence of
+    the class pointer value. `validate` should reject coincidental byte
+    matches, e.g. by checking a known field resolves to a plausible object.
+    """
+    needle = struct.pack("<Q", klass)
+    ordered = sorted(regions, key=lambda r: r[1])
+
+    remaining = budget
+    for addr, size in ordered:
+        if remaining <= 0:
+            break
+        read_size = min(size, remaining)
+        buf = _bulk_read(mem, addr, read_size)
+        remaining -= read_size
+
+        idx = buf.find(needle)
+        while idx != -1:
+            hit_addr = addr + idx
+            if hit_addr % 8 == 0 and (validate is None or validate(hit_addr)):
+                return hit_addr
+            idx = buf.find(needle, idx + 1)
+
+    return None
+
+
+def discover_decks_manager_via_backref(
+    reader: Il2CppReader | MemoryReader | Any,
+) -> tuple[int, int] | None:
+    """Locate a live DecksManager instance without data_segment_base/TypeInfoTable.
+
+    Empirically verified end-to-end against a live MTGA process (see
+    docs/deck-scan-problem-report.md): Il2CppClass structs are heap-allocated
+    outside GameAssembly.dylib's own segments, so the TypeInfoTable-based
+    discovery above cannot find them reliably on macOS. Instead:
+
+      1. Find DeckDataProvider's Il2CppClass via a FieldInfo backref to the
+         "_allDecks" field name (FieldInfo arrays live in FIELDINFO_HEAP_REGIONS).
+      2. Find DecksManager's Il2CppClass in the *same* class-descriptor heap
+         arena as DeckDataProvider (classes for a build are allocated together).
+      3. Read DecksManager's real "_deckDataProvider" field offset from its
+         own FieldInfo array (no hardcoded offset).
+      4. Scan writable heap memory for a live object whose header klass
+         pointer equals DecksManager's class, validated by checking that its
+         _deckDataProvider field points to an object of the confirmed
+         DeckDataProvider class.
+
+    Returns:
+        (decks_manager_instance, decks_manager_class), or None if any step
+        fails.
+    """
+    mem = _coerce_safe_reader(reader)
+    if mem is None:
+        return None
+    pm = getattr(reader, "pm", reader)
+    if not hasattr(pm, "task"):
+        # Not a live process handle (e.g. a bare MockMemory in tests) —
+        # region enumeration needs a real task port.
+        return None
+
+    metadata_regions = _find_metadata_regions(pm)
+    if not metadata_regions:
+        return None
+
+    ddp_class = _find_class_by_field_backref_in_regions(
+        mem, metadata_regions, FIELDINFO_HEAP_REGIONS, "_allDecks",
+    )
+    if ddp_class is None:
+        return None
+
+    readable_regions, _ = _iterate_regions_with_error(pm)
+    arena = _region_containing(readable_regions, ddp_class)
+    if arena is None:
+        return None
+
+    dm_class = _find_class_by_name_in_arena(mem, metadata_regions, arena[0], arena[1], "DecksManager")
+    if dm_class is None:
+        return None
+
+    ddp_field = next(
+        (f for f in get_class_fields(mem, dm_class) if f.name == "_deckDataProvider"),
+        None,
+    )
+    if ddp_field is None:
+        return None
+
+    def _validate(candidate: int) -> bool:
+        ddp_ptr = _read_ptr(mem, candidate + ddp_field.offset)
+        if not (MIN_VALID_PTR < ddp_ptr < MAX_VALID_PTR):
+            return False
+        return _read_ptr(mem, ddp_ptr) == ddp_class
+
+    writable_regions = _iterate_writable_private_regions(pm)
+    dm_instance = _find_instance_by_klass_in_regions(mem, writable_regions, dm_class, validate=_validate)
+    if dm_instance is None:
+        return None
+
+    return dm_instance, dm_class
 
 
 # ---------------------------------------------------------------------------
@@ -852,11 +1143,43 @@ def scan_decks_il2cpp(
 
     warnings: list[str] = []
 
+    # Fast path: locate a live DecksManager instance directly via metadata
+    # string backrefs (see discover_decks_manager_via_backref), bypassing
+    # data_segment_base/TypeInfoTable discovery entirely. Only attempted
+    # when the caller hasn't pre-supplied explicit PAPA addresses.
+    if papa_instance == 0 and papa_class == 0:
+        via_backref = discover_decks_manager_via_backref(reader)
+        if via_backref is not None:
+            dm_instance, dm_class = via_backref
+            nav_result = navigate_to_all_decks(
+                mem, dm_instance, dm_class, path=["_deckDataProvider", "_allDecks"],
+            )
+            if nav_result is not None and nav_result.entries:
+                decks: list[Il2CppDeckResult] = []
+                for deck_id, deck_ptr in nav_result.entries:
+                    deck = read_deck(mem, deck_ptr)
+                    if deck is not None:
+                        deck.deck_id = deck_id
+                        decks.append(deck)
+                if decks:
+                    return Il2CppScanResult(
+                        decks=decks,
+                        warnings=warnings,
+                        papa_instance=dm_instance,
+                        all_decks_addr=nav_result.dict_addr,
+                    )
+                warnings.append("backref discovery found _allDecks but no decks could be parsed")
+            else:
+                warnings.append("backref discovery found DecksManager but _allDecks navigation failed")
+
+    # Fallback: legacy TypeInfoTable / PAPA heap-scan discovery path.
     # Discover PAPA class if not provided
     if papa_class == 0:
         if type_info_table == 0:
             if data_segment_base == 0:
-                warnings.append("no data_segment_base provided for class discovery")
+                data_segment_base = discover_data_segment_base(mem)
+            if data_segment_base == 0:
+                warnings.append("no data_segment_base could be discovered for class discovery")
                 return Il2CppScanResult(warnings=warnings)
             type_info_table = _read_ptr(mem, data_segment_base + IL2CPP_OFFSETS["type_info_table_offset"])
             if type_info_table == 0:
@@ -956,6 +1279,11 @@ class PymemMemoryAdapter:
     def __init__(self, pm: Any) -> None:
         self.pm = pm
 
+    @property
+    def pid(self) -> int:
+        pid = _process_pid(self.pm)
+        return pid or 0
+
     def read_bytes(self, addr: int, size: int) -> bytes:
         from . import pattern_scanner as _ps
         raw = _ps._read_bytes_silent(self.pm, addr, size)
@@ -985,3 +1313,277 @@ class PymemMemoryAdapter:
         if end == -1:
             end = len(raw)
         return raw[:end].decode("ascii", errors="replace")
+
+
+@dataclass(frozen=True)
+class _MachOSegmentInfo:
+    name: str
+    vmaddr: int
+    vmsize: int
+
+
+def _process_pid(pm: Any) -> int | None:
+    """Best-effort extraction of a PID from a Pymem-like object."""
+    for attr in ("pid", "process_id"):
+        value = getattr(pm, attr, None)
+        if isinstance(value, int) and value > 0:
+            return value
+        if hasattr(value, "value"):
+            try:
+                pid = int(value.value)
+            except (TypeError, ValueError):
+                pid = 0
+            if pid > 0:
+                return pid
+
+    process = getattr(pm, "process", None)
+    if process is not None:
+        for attr in ("pid", "process_id"):
+            value = getattr(process, attr, None)
+            if isinstance(value, int) and value > 0:
+                return value
+            if hasattr(value, "value"):
+                try:
+                    pid = int(value.value)
+                except (TypeError, ValueError):
+                    pid = 0
+                if pid > 0:
+                    return pid
+
+    return None
+
+
+@lru_cache(maxsize=1)
+def _load_proc_lib() -> Any:
+    """Load libproc once for proc_regionfilename lookups."""
+    lib_name = ctypes.util.find_library("proc") or "libproc.dylib"
+    return ctypes.cdll.LoadLibrary(lib_name)
+
+
+def _region_filename(pid: int, addr: int) -> str:
+    """Return the filesystem path for a mapped region, if available."""
+    try:
+        lib = _load_proc_lib()
+    except OSError:
+        return ""
+
+    if not hasattr(lib, "proc_regionfilename"):
+        return ""
+
+    func = lib.proc_regionfilename
+    func.argtypes = [ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32]
+    func.restype = ctypes.c_int
+
+    buf = ctypes.create_string_buffer(1024)
+    rc = func(ctypes.c_int(pid), ctypes.c_uint64(addr), ctypes.cast(buf, ctypes.c_void_p), ctypes.c_uint32(len(buf)))
+    if rc <= 0:
+        return ""
+
+    raw = buf.value.decode("utf-8", errors="ignore")
+    return raw
+
+
+def _read_macho_segments(mem: MemoryReader, image_base: int) -> list[_MachOSegmentInfo]:
+    """Parse LC_SEGMENT_64 entries from a Mach-O image header."""
+    header = mem.read_bytes(image_base, MACHO_HEADER_SCAN_SIZE)
+    if len(header) < MACHO_HEADER_64_SIZE:
+        return []
+
+    magic = struct.unpack_from("<I", header, 0)[0]
+    if magic != MH_MAGIC_64:
+        return []
+
+    ncmds = struct.unpack_from("<I", header, 16)[0]
+    offset = MACHO_HEADER_64_SIZE
+    segments: list[_MachOSegmentInfo] = []
+
+    for _ in range(ncmds):
+        if offset + 8 > len(header):
+            break
+        cmd, cmdsize = struct.unpack_from("<II", header, offset)
+        if cmdsize < 8 or offset + cmdsize > len(header):
+            break
+        if cmd == LC_SEGMENT_64 and cmdsize >= 72:
+            segname_raw = header[offset + 8: offset + 24]
+            segname = segname_raw.split(b"\x00", 1)[0].decode("ascii", errors="ignore")
+            vmaddr = struct.unpack_from("<Q", header, offset + 24)[0]
+            vmsize = struct.unpack_from("<Q", header, offset + 32)[0]
+            segments.append(_MachOSegmentInfo(segname, vmaddr, vmsize))
+        offset += cmdsize
+
+    return segments
+
+
+def _looks_like_type_info_table(mem: MemoryReader, data_segment_base: int) -> bool:
+    """Check whether a candidate data segment exposes a valid TypeInfoTable."""
+    type_info_table = _read_ptr(mem, data_segment_base + IL2CPP_OFFSETS["type_info_table_offset"])
+    if type_info_table <= MIN_VALID_PTR:
+        return False
+
+    for i in range(256):
+        class_ptr = _read_ptr(mem, type_info_table + i * 8)
+        if class_ptr == 0 or class_ptr < MIN_VALID_PTR:
+            continue
+
+        name_ptr = _read_ptr(mem, class_ptr + IL2CPP_OFFSETS["class_name"])
+        if name_ptr == 0 or name_ptr < MIN_VALID_PTR:
+            continue
+
+        class_name = _read_string_ascii(mem, name_ptr)
+        if class_name in {"WrapperController", "PAPA"}:
+            return True
+    return False
+
+
+def _discover_data_segment_base_from_image(mem: MemoryReader, image_base: int) -> int:
+    """Derive the runtime base of the IL2CPP data segment from Mach-O metadata."""
+    segments = _read_macho_segments(mem, image_base)
+    if not segments:
+        return 0
+
+    text_seg = next((seg for seg in segments if seg.name in {"__TEXT", "__TEXT_EXEC"}), None)
+    if text_seg is None:
+        return 0
+
+    slide = image_base - text_seg.vmaddr
+    candidates: list[int] = []
+
+    for seg in segments:
+        if seg.name == "__TEXT" or seg.name == "__TEXT_EXEC":
+            continue
+        if seg.name in DATA_SEGMENT_NAMES:
+            runtime_base = seg.vmaddr + slide
+            if runtime_base > MIN_VALID_PTR:
+                candidates.append(runtime_base)
+
+    for candidate in candidates:
+        if _looks_like_type_info_table(mem, candidate):
+            return candidate
+
+    return 0
+
+
+def _discover_data_segment_base_from_regions(mem: MemoryReader, pm: Any) -> int:
+    """Probe readable regions and inspect any Mach-O images that start there."""
+    regions, _ = _iterate_regions_with_error(pm)
+    for addr, _size in regions:
+        if _read_u32(mem, addr) != MH_MAGIC_64:
+            continue
+        data_base = _discover_data_segment_base_from_image(mem, addr)
+        if data_base != 0:
+            return data_base
+    return 0
+
+
+def _find_game_assembly_base(pm: Any) -> int:
+    """Locate the runtime base address of GameAssembly.dylib."""
+    try:
+        modules = pm.get_modules(extended=True)
+    except Exception:
+        try:
+            modules = pm.get_modules()
+        except Exception:
+            modules = []
+
+    for module in modules:
+        name = ""
+        address = 0
+        sections: list[Any] = []
+        try:
+            name = module.get_name()
+        except Exception:
+            name = getattr(module, "name", "")
+        try:
+            address = int(module.get_address())
+        except Exception:
+            address = int(getattr(module, "address", 0) or 0)
+        try:
+            sections = list(module.get_sections())
+        except Exception:
+            sections = list(getattr(module, "sections", []) or [])
+
+        if address <= 0:
+            continue
+
+        base_name = os.path.basename(name)
+        if any(hint in base_name for hint in GAME_ASSEMBLY_HINTS):
+            for section in sections:
+                try:
+                    section_name = section.get_name()
+                    section_addr = int(section.get_address())
+                except Exception:
+                    section_name = getattr(section, "name", "")
+                    section_addr = int(getattr(section, "address", 0) or 0)
+                if section_name in DATA_SEGMENT_NAMES and section_addr > 0:
+                    return section_addr
+            return address
+
+    pid = _process_pid(pm)
+    if pid is None:
+        return 0
+
+    regions, _ = _iterate_regions_with_error(pm)
+    matches: list[int] = []
+    for addr, _size in regions:
+        filename = _region_filename(pid, addr)
+        if not filename:
+            continue
+        base_name = os.path.basename(filename)
+        if any(hint in base_name for hint in GAME_ASSEMBLY_HINTS):
+            matches.append(addr)
+
+    if not matches:
+        return 0
+    return min(matches)
+
+
+def _coerce_safe_reader(reader: Il2CppReader | MemoryReader | Any) -> MemoryReader | None:
+    """Return a reader that tolerates failed reads instead of raising.
+
+    Live ``pymem`` objects expose ``read_bytes`` directly, but that method
+    raises on short reads. The adapter path uses ``mach_vm_read_overwrite``
+    and returns zero-filled buffers instead, which is safe for probing.
+    """
+    if isinstance(reader, Il2CppReader):
+        return reader.mem
+
+    if hasattr(reader, "pm") and hasattr(reader, "read_bytes"):
+        return reader
+
+    if hasattr(reader, "task") and hasattr(reader, "read_bytes"):
+        return PymemMemoryAdapter(reader)
+
+    if hasattr(reader, "read_bytes"):
+        return reader
+
+    return None
+
+
+def discover_data_segment_base(reader: Il2CppReader | MemoryReader | Any) -> int:
+    """Discover the IL2CPP data segment base for a live MTGA process.
+
+    This is a macOS-specific helper that walks the loaded GameAssembly image,
+    parses its Mach-O load commands, and validates the candidate data segment
+    by checking whether the known TypeInfoTable offset resolves to a usable
+    class table.
+    """
+    mem = _coerce_safe_reader(reader)
+    if mem is None:
+        return 0
+
+    pm = getattr(reader, "pm", reader)
+    if not hasattr(pm, "task"):
+        # Not a live process handle (e.g. a bare MockMemory in tests) —
+        # region/module enumeration needs a real task port, so there is
+        # nothing to discover.
+        return 0
+
+    data_base = _discover_data_segment_base_from_regions(mem, pm)
+    if data_base != 0:
+        return data_base
+
+    image_base = _find_game_assembly_base(pm)
+    if image_base == 0:
+        return 0
+
+    return _discover_data_segment_base_from_image(mem, image_base)

@@ -17,6 +17,13 @@ from scanner.il2cpp_nav import (
     IL2CPP_OFFSETS,
     Il2CppReader,
     MockMemory,
+    _discover_data_segment_base_from_image,
+    _find_game_assembly_base,
+    _find_string_in_metadata_regions,
+    _find_class_by_field_backref_in_regions,
+    _find_class_by_name_in_arena,
+    _find_instance_by_klass_in_regions,
+    _validate_class_struct,
     find_class_by_name,
     find_papa_instance,
     get_class_fields,
@@ -108,6 +115,29 @@ def _make_type_info_table(classes: list[tuple[int, int]]) -> bytes:
     for idx, addr in classes:
         table[idx * 8: idx * 8 + 8] = _pack_ptr(addr)
     return bytes(table)
+
+
+def _make_segment_64(name: str, vmaddr: int, vmsize: int) -> bytes:
+    """Build a minimal LC_SEGMENT_64 load command."""
+    segname = name.encode("ascii")[:16].ljust(16, b"\x00")
+    body = segname + struct.pack("<QQQQIIII", vmaddr, vmsize, 0, 0, 7, 5, 0, 0)
+    return struct.pack("<II", 0x19, 72) + body
+
+
+def _make_macho_header(segments: list[bytes]) -> bytes:
+    """Build a minimal 64-bit Mach-O header with the given load commands."""
+    sizeofcmds = sum(len(seg) for seg in segments)
+    header = struct.pack(
+        "<IiiIIII",
+        0xFEEDFACF,
+        0x01000007,
+        3,
+        6,
+        len(segments),
+        sizeofcmds,
+        0,
+    ) + struct.pack("<I", 0)
+    return header + b"".join(segments)
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +808,82 @@ class TestScanDecksIl2cpp:
         assert main.get(11111) == 2
 
 
+class TestDataSegmentDiscovery:
+    """Tests for automatically finding the IL2CPP data segment base."""
+
+    class _FakeSection:
+        def __init__(self, name: str, address: int) -> None:
+            self._name = name
+            self._address = address
+
+        def get_name(self) -> str:
+            return self._name
+
+        def get_address(self) -> int:
+            return self._address
+
+    class _FakeModule:
+        def __init__(self, name: str, address: int, sections: list["TestDataSegmentDiscovery._FakeSection"]) -> None:
+            self._name = name
+            self._address = address
+            self._sections = sections
+
+        def get_name(self) -> str:
+            return self._name
+
+        def get_address(self) -> int:
+            return self._address
+
+        def get_sections(self) -> list["TestDataSegmentDiscovery._FakeSection"]:
+            return self._sections
+
+    class _FakePm:
+        def __init__(self, modules: list["TestDataSegmentDiscovery._FakeModule"]) -> None:
+            self._modules = modules
+
+        def get_modules(self, extended: bool = False):
+            return self._modules
+
+    def test_discover_data_segment_base_from_macho_header(self):
+        mem = MockMemory()
+        image_base = 0x100000000
+        data_base = image_base + 0x200000
+        type_info_table_ptr = data_base + IL2CPP_OFFSETS["type_info_table_offset"]
+        type_info_table = 0x220000
+
+        header = _make_macho_header([
+            _make_segment_64("__TEXT", image_base, 0x100000),
+            _make_segment_64("__DATA_CONST", data_base, 0x80000),
+            _make_segment_64("__LINKEDIT", image_base + 0x300000, 0x20000),
+        ])
+        mem.write(image_base, header)
+
+        papa_name = 0x200000
+        papa_class = 0x210000
+        mem.write(papa_name, b"PAPA\x00")
+        mem.write(papa_class, _make_class(name_ptr=papa_name, fields_ptr=0, field_count=0))
+        mem.write(type_info_table, _pack_ptr(papa_class))
+        mem.write(type_info_table_ptr, _pack_ptr(type_info_table))
+
+        result = _discover_data_segment_base_from_image(mem, image_base)
+
+        assert result == data_base
+
+    def test_find_game_assembly_base_prefers_data_section(self):
+        pm = self._FakePm([
+            self._FakeModule(
+                "/Applications/MTGA.app/Contents/MacOS/GameAssembly.dylib",
+                0x100000000,
+                [
+                    self._FakeSection("__TEXT", 0x100000000),
+                    self._FakeSection("__DATA_CONST", 0x100200000),
+                ],
+            )
+        ])
+
+        assert _find_game_assembly_base(pm) == 0x100200000
+
+
 # ---------------------------------------------------------------------------
 # IL2CPP offsets constants
 # ---------------------------------------------------------------------------
@@ -826,3 +932,213 @@ class TestIl2CppOffsets:
 
     def test_list_size_offset(self):
         assert IL2CPP_OFFSETS["list_size"] == 0x18
+
+
+# ---------------------------------------------------------------------------
+# Backref-based class & instance discovery (metadata-driven)
+# ---------------------------------------------------------------------------
+
+class TestFindStringInMetadataRegions:
+    """Tests for locating a NUL-delimited string in global-metadata.dat."""
+
+    def test_finds_string_between_nuls(self):
+        mem = MockMemory()
+        region_addr = 0x900000
+        mem.write(region_addr, b"\x00garbage\x00_allDecks\x00more\x00")
+        result = _find_string_in_metadata_regions(mem, [(region_addr, 64)], "_allDecks")
+        assert result == region_addr + len(b"\x00garbage\x00")
+
+    def test_returns_none_when_missing(self):
+        mem = MockMemory()
+        region_addr = 0x900000
+        mem.write(region_addr, b"\x00SomethingElse\x00")
+        result = _find_string_in_metadata_regions(mem, [(region_addr, 32)], "_allDecks")
+        assert result is None
+
+    def test_searches_multiple_regions_in_order(self):
+        mem = MockMemory()
+        region1 = 0x900000
+        region2 = 0xA00000
+        mem.write(region1, b"\x00NoMatchHere\x00")
+        mem.write(region2, b"\x00DecksManager\x00")
+        result = _find_string_in_metadata_regions(mem, [(region1, 32), (region2, 32)], "DecksManager")
+        assert result == region2 + 1
+
+
+class TestValidateClassStruct:
+    """Tests for the Il2CppClass sanity-check used by backref discovery."""
+
+    def test_accepts_well_formed_class(self):
+        mem = MockMemory()
+        name_addr = 0x110000
+        mem.write(name_addr, b"DecksManager\x00")
+        class_addr = 0x200000
+        mem.write(class_addr, _make_class(name_ptr=name_addr, fields_ptr=0x300000, field_count=6))
+        assert _validate_class_struct(mem, class_addr) is True
+        assert _validate_class_struct(mem, class_addr, expected_name="DecksManager") is True
+
+    def test_rejects_wrong_expected_name(self):
+        mem = MockMemory()
+        name_addr = 0x110000
+        mem.write(name_addr, b"DecksManager\x00")
+        class_addr = 0x200000
+        mem.write(class_addr, _make_class(name_ptr=name_addr, fields_ptr=0x300000, field_count=6))
+        assert _validate_class_struct(mem, class_addr, expected_name="PAPA") is False
+
+    def test_rejects_implausible_field_count(self):
+        mem = MockMemory()
+        name_addr = 0x110000
+        mem.write(name_addr, b"Bogus\x00")
+        class_addr = 0x200000
+        mem.write(class_addr, _make_class(name_ptr=name_addr, fields_ptr=0x300000, field_count=99999))
+        assert _validate_class_struct(mem, class_addr) is False
+
+    def test_rejects_missing_fields_ptr(self):
+        mem = MockMemory()
+        name_addr = 0x110000
+        mem.write(name_addr, b"Bogus\x00")
+        class_addr = 0x200000
+        mem.write(class_addr, _make_class(name_ptr=name_addr, fields_ptr=0, field_count=3))
+        assert _validate_class_struct(mem, class_addr) is False
+
+
+class TestFindClassByFieldBackref:
+    """Tests for resolving a class via a FieldInfo.name backref."""
+
+    def test_finds_parent_class_via_field_name(self):
+        mem = MockMemory()
+
+        # global-metadata.dat string pool (mocked)
+        metadata_addr = 0x900000
+        mem.write(metadata_addr, b"\x00garbage\x00_allDecks\x00")
+        field_name_addr = metadata_addr + len(b"\x00garbage\x00")
+
+        # Parent class ("DeckDataProvider") — must pass _validate_class_struct
+        class_name_addr = 0xA00000
+        mem.write(class_name_addr, b"DeckDataProvider\x00")
+        class_addr = 0xB00000
+        mem.write(class_addr, _make_class(name_ptr=class_name_addr, fields_ptr=0xB10000, field_count=5))
+
+        # FieldInfo entry referencing the field name and the parent class
+        fieldinfo_region_addr = 0xC00000
+        fieldinfo_entry = fieldinfo_region_addr + 0x40  # 8-byte aligned offset within region
+        mem.write(fieldinfo_entry, _make_field_info(name_ptr=field_name_addr, offset=0x28))
+        # _make_field_info leaves parent=0; patch it in directly.
+        mem.write(fieldinfo_entry + 0x10, _pack_ptr(class_addr))
+
+        result = _find_class_by_field_backref_in_regions(
+            mem,
+            metadata_regions=[(metadata_addr, 64)],
+            fieldinfo_regions=[(fieldinfo_region_addr, fieldinfo_region_addr + 0x1000)],
+            field_name="_allDecks",
+        )
+        assert result == class_addr
+
+    def test_returns_none_when_field_name_not_in_metadata(self):
+        mem = MockMemory()
+        metadata_addr = 0x900000
+        mem.write(metadata_addr, b"\x00Unrelated\x00")
+        result = _find_class_by_field_backref_in_regions(
+            mem,
+            metadata_regions=[(metadata_addr, 32)],
+            fieldinfo_regions=[(0xC00000, 0xC01000)],
+            field_name="_allDecks",
+        )
+        assert result is None
+
+    def test_returns_none_when_no_fieldinfo_references_string(self):
+        mem = MockMemory()
+        metadata_addr = 0x900000
+        mem.write(metadata_addr, b"\x00_allDecks\x00")
+        result = _find_class_by_field_backref_in_regions(
+            mem,
+            metadata_regions=[(metadata_addr, 32)],
+            fieldinfo_regions=[(0xC00000, 0xC01000)],
+            field_name="_allDecks",
+        )
+        assert result is None
+
+
+class TestFindClassByNameInArena:
+    """Tests for finding a sibling class within a known class-heap arena."""
+
+    def test_finds_class_by_name_string_xref(self):
+        mem = MockMemory()
+
+        metadata_addr = 0x900000
+        mem.write(metadata_addr, b"\x00garbage\x00DecksManager\x00")
+        name_addr = metadata_addr + len(b"\x00garbage\x00")
+
+        arena_addr = 0xD00000
+        arena_size = 0x100000
+        class_addr = arena_addr + 0x2000
+        # class_name field (+0x10) holds a pointer to name_addr
+        mem.write(class_addr + IL2CPP_OFFSETS["class_name"], _pack_ptr(name_addr))
+        mem.write(class_addr + IL2CPP_OFFSETS["class_fields"], _pack_ptr(0xE00000))
+        mem.write(class_addr + IL2CPP_OFFSETS["class_field_count"], _pack_u32(6))
+
+        result = _find_class_by_name_in_arena(
+            mem, [(metadata_addr, 64)], arena_addr, arena_size, "DecksManager",
+        )
+        assert result == class_addr
+
+    def test_returns_none_outside_arena_bounds(self):
+        mem = MockMemory()
+        metadata_addr = 0x900000
+        mem.write(metadata_addr, b"\x00DecksManager\x00")
+        name_addr = metadata_addr + 1
+
+        # Class lives OUTSIDE the searched arena bounds.
+        class_addr = 0xF00000
+        mem.write(class_addr + IL2CPP_OFFSETS["class_name"], _pack_ptr(name_addr))
+        mem.write(class_addr + IL2CPP_OFFSETS["class_fields"], _pack_ptr(0xE00000))
+        mem.write(class_addr + IL2CPP_OFFSETS["class_field_count"], _pack_u32(6))
+
+        result = _find_class_by_name_in_arena(
+            mem, [(metadata_addr, 32)], 0xD00000, 0x1000, "DecksManager",
+        )
+        assert result is None
+
+
+class TestFindInstanceByKlass:
+    """Tests for the writable-heap wide instance scan."""
+
+    def test_finds_instance_with_matching_klass_pointer(self):
+        mem = MockMemory()
+        klass = 0xAABBCC00
+        region_addr = 0x1000000
+        instance_addr = region_addr + 0x40
+        mem.write(instance_addr, _pack_ptr(klass))
+
+        result = _find_instance_by_klass_in_regions(mem, [(region_addr, 0x1000)], klass)
+        assert result == instance_addr
+
+    def test_validate_callback_rejects_false_positive(self):
+        mem = MockMemory()
+        klass = 0xAABBCC00
+        region_addr = 0x1000000
+        bad_addr = region_addr + 0x40
+        good_addr = region_addr + 0x100
+        mem.write(bad_addr, _pack_ptr(klass))
+        mem.write(good_addr, _pack_ptr(klass))
+
+        result = _find_instance_by_klass_in_regions(
+            mem, [(region_addr, 0x1000)], klass,
+            validate=lambda addr: addr == good_addr,
+        )
+        assert result == good_addr
+
+    def test_returns_none_when_not_found(self):
+        mem = MockMemory()
+        result = _find_instance_by_klass_in_regions(mem, [(0x1000000, 0x1000)], 0xDEADBEEF)
+        assert result is None
+
+    def test_ignores_misaligned_matches(self):
+        mem = MockMemory()
+        klass = 0xAABBCC00
+        region_addr = 0x1000000
+        # Write the pointer at a non-8-byte-aligned offset within the region.
+        mem.write(region_addr + 3, _pack_ptr(klass))
+
+        result = _find_instance_by_klass_in_regions(mem, [(region_addr, 0x1000)], klass)
+        assert result is None
