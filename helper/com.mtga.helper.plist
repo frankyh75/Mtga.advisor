@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mtga.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/mtga-helper</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>UserName</key>
+    <string>root</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/mtga-helper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/mtga-helper.log</string>
+    <key>WatchPaths</key>
+    <array>
+        <string>/tmp/mtga-helper.sock</string>
+    </array>
+</dict>
+</plist>
