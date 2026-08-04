@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Code-Signing-Entitlements für das mtga-helper Binary.
+
+      Ein LaunchDaemon, der unter root läuft, braucht keine speziellen
+      Entitlements — root hat bereits vollen Zugriff.  Diese Datei ist
+      dennoch Bestandteil des Signing-Workflows, damit der Signer
+      reproduzierbare Parameter bekommt.
+
+      com.apple.security.cs.allow-unsigned-executable-memory wird
+      nicht gesetzt, da der Helper keinen JIT lädt.
+
+      Falls später task_for_pid() trotz root noch durch SIP
+      blockiert wird, kann „com.apple.security.cs.debugger" hier
+      ergänzt werden (benötigt trotzdem eine Debugger-Entitlement-
+      Freigabe durch den User).
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+</dict>
+</plist>

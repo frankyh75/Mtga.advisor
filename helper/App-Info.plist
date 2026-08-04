@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      SMPrivilegedExecutables — Referenz-Eintrag für die rufende App.
+
+      Diese plist ist VORLAGE für die Info.plist der Mac App / CLI.
+      Sie wird nicht direkt vom Helper-Bundle verwendet, sondern von
+      der App, die SMJobBless() aufruft (Menubar-App oder ein
+      separates Installer-Binary).
+
+      Der Schlüssel SMPrivilegedExecutables mapt den Bundle-Identifier
+      des Helpers auf das Designated Requirement, das das Helper-Bundle
+      erfüllen muss.  SMJobBless prüft beim Blessen beide Seiten:
+
+        1.  Die App-Info.plist muss den Helper unter
+            SMPrivilegedExecutables mit korrektem DR referenzieren.
+        2.  Die Helper-Info.plist muss die App unter
+            SMAuthorizedClients mit korrektem DR referenzieren.
+
+      Sind beide konsistent, installiert SMJobBless das Helper-Bundle
+      nach /Library/PrivilegedHelperTools/ und registriert die
+      LaunchDaemon-plist unter /Library/LaunchDaemons/.
+    -->
+
+    <key>CFBundleIdentifier</key>
+    <string>com.mtga.advisor</string>
+
+    <key>CFBundleName</key>
+    <string>MTGA Advisor</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <!--
+      SMPrivilegedExecutables: Key = Helper-Bundle-Identifier,
+      Value = Designated Requirement des Helper-Bundles.
+    -->
+    <key>SMPrivilegedExecutables</key>
+    <dict>
+        <key>com.mtga.helper</key>
+        <string>identifier "com.mtga.helper" AND certificate leaf[subject.CN] = "MTGA Helper Dev"</string>
+    </dict>
+</dict>
+</plist>
