@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_export import export_deck_to_arena_text, load_deck_by_id, DeckNotFoundError, DeckExportError
@@ -771,18 +771,26 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
         print("📖 Lade Karten-DB...")
         card_db = load_card_database()
 
-    # --- IL2CPP Navigation Scan ---
+    # --- IL2CPP Navigation Scan (mit Retry) ---
     il2cpp_result: Il2CppScanResult | None = None
     if method in ("il2cpp", "auto"):
         print("🧭 IL2CPP-Navigation: Suche PAPA → DecksManager → _allDecks...")
         adapter = PymemMemoryAdapter(pm)
-        il2cpp_result = scan_decks_il2cpp(adapter, debug=args.debug)
-        if il2cpp_result and il2cpp_result.decks:
-            print(f"✅ IL2CPP: {len(il2cpp_result.decks)} Decks gefunden")
-        elif il2cpp_result:
-            print(f"⚠ IL2CPP: keine Decks — {', '.join(il2cpp_result.warnings) or 'unbekannt'}")
-        else:
-            print("⚠ IL2CPP: Scan fehlgeschlagen")
+        for attempt in range(1, 4):
+            il2cpp_result = scan_decks_il2cpp(adapter, debug=args.debug)
+            if il2cpp_result and il2cpp_result.decks:
+                print(f"✅ IL2CPP: {len(il2cpp_result.decks)} Decks gefunden (Versuch {attempt})")
+                break
+            if attempt < 3:
+                import time
+                pause = 1.5 if attempt == 1 else 2.0
+                print(f"⏳ IL2CPP: kein Ergebnis (Versuch {attempt}) — erneuter Versuch in {pause:.0f}s...")
+                time.sleep(pause)
+            else:
+                if il2cpp_result:
+                    print(f"⚠ IL2CPP: keine Decks nach 3 Versuchen — {', '.join(il2cpp_result.warnings) or 'unbekannt'}")
+                else:
+                    print("⚠ IL2CPP: Scan nach 3 Versuchen fehlgeschlagen")
 
     # --- Pattern-based Scan ---
     # In "auto" mode, only skip the fallback when IL2CPP was clean.
@@ -841,6 +849,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
             all_decks.append({
                 "deckId": deck_id,
                 "name": deck.name or "Unknown Deck",
+                "format": deck.format or "Unknown",
                 "source": "il2cpp",
                 "cards": _piles_to_card_dict(deck.piles, card_db),
                 "cardsById": _piles_to_cards_by_id(deck.piles),
@@ -905,6 +914,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
             {
                 "deckId": d["deckId"],
                 "name": d["name"],
+                "format": d.get("format", "Unknown"),
                 "source": d["source"],
                 "cards": d["cards"],
             }
@@ -923,6 +933,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
             {
                 "deckId": d["deckId"],
                 "name": d["name"],
+                "format": d.get("format", "Unknown"),
                 "source": d["source"],
                 "cards": d["cards"],
                 "cardsById": d["cardsById"],

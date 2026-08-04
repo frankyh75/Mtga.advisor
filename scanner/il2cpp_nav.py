@@ -1042,6 +1042,7 @@ class Il2CppDeckResult:
     """A single deck read via IL2CPP navigation."""
     deck_id: int = 0
     name: str = ""
+    format: str = ""
     piles: dict[int, dict[int, int]] = field(default_factory=dict)
     raw_address: int = 0
 
@@ -1115,6 +1116,20 @@ def read_deck(
             piles = _read_deck_piles(mem, contents_ptr)
             if piles:
                 result.piles = piles
+
+    # Read format — dynamically find a field that looks like a format/type
+    # Candidates: Format, _format, FormatType, DeckFormat, _deckFormat
+    FORMAT_CANDIDATES = {"Format", "_format", "FormatType", "DeckFormat", "_deckFormat"}
+    format_field = next(
+        (f for f in fields if f.name in FORMAT_CANDIDATES),
+        None,
+    )
+    if format_field is not None:
+        format_ptr = _read_ptr(mem, deck_addr + format_field.offset)
+        if format_ptr > MIN_VALID_PTR:
+            fmt = read_il2cpp_string(mem, format_ptr)
+            if fmt:
+                result.format = fmt
 
     return result
 
