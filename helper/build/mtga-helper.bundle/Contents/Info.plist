@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Info.plist für das mtga-helper Bundle (PrivilegedHelperTools).
+
+      Diese plist liegt im Bundle unter Contents/Info.plist und wird
+      von SMJobBless ausgewertet.  Sie MUSS folgende Schlüssel
+      enthalten, damit launchd den Daemon korrekt registriert:
+
+        • CFBundleIdentifier          — Reverse-DNS, identisch mit dem
+                                        Label in launchd.plist
+        • CFBundleExecutable         — Name des kompilierten Binaries
+                                        (ohne Pfad)
+        • SMAuthorizedClients        — Designated Requirements der
+                                        Apps, die den Helper blessen
+                                        dürfen (die Menubar-App / CLI)
+        • CFBundleName / Version     — Metadaten
+
+      DerGegenstück-Schlüssel „SMPrivilegedExecutables" liegt in der
+      Info.plist der rufenden App (siehe helper/App-Info.plist).
+    -->
+
+    <key>CFBundleIdentifier</key>
+    <string>com.mtga.helper</string>
+
+    <key>CFBundleExecutable</key>
+    <string>mtga-helper</string>
+
+    <key>CFBundleName</key>
+    <string>MTGA Helper</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!--
+      SMAuthorizedClients: Designated Requirements der Client-Apps,
+      die diesen Helper via SMJobBless installieren dürfen.
+
+      Für Development mit einem self-signed Zertifikat namens
+      „MTGA Helper Dev" genügt die certificate name-Bedingung.
+      Für Distribution müssen die echten Developer-ID-Requirements
+      eingetragen werden (Team-ID + certificate leaf).
+    -->
+    <key>SMAuthorizedClients</key>
+    <array>
+        <string>identifier "com.mtga.advisor" AND certificate leaf[subject.CN] = "MTGA Helper Dev"</string>
+        <string>identifier "com.mtga.menubar" AND certificate leaf[subject.CN] = "MTGA Helper Dev"</string>
+    </array>
+</dict>
+</plist>

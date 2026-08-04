@@ -46,7 +46,7 @@
 /* --- Constants --- */
 
 #define VERSION "1.0.0"
-#define DEFAULT_SOCK_PATH "/tmp/mtga-helper.sock"
+#define DEFAULT_SOCK_PATH "/var/run/mtga-helper.sock"
 #define MAX_CLIENTS 8
 #define BUF_SIZE 65536
 #define MAX_RESPONSE 1048576    /* 1 MB */
@@ -905,20 +905,23 @@ static int setup_socket(void) {
         return -1;
     }
 
+    /* Set restrictive umask BEFORE bind — no race window */
+    mode_t old_umask = umask(0077);
+
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, g_sock_path, sizeof(addr.sun_path) - 1);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        umask(old_umask);
         perror("bind");
         close(server_fd);
         server_fd = -1;
         return -1;
     }
 
-    /* Socket permissions: owner-only (root when running as LaunchDaemon) */
-    chmod(g_sock_path, 0600);
+    umask(old_umask);
 
     if (listen(server_fd, MAX_CLIENTS) < 0) {
         perror("listen");

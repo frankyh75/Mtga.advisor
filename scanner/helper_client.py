@@ -21,7 +21,7 @@ from typing import Any, Callable, Sequence
 from .memory_scanner import MemoryScanResult
 
 # Standard-Socket-Pfad (mit helper/tests/test_e2e.sh kompatibel)
-DEFAULT_SOCK_PATH = "/tmp/mtga-helper.sock"
+DEFAULT_SOCK_PATH = "/var/run/mtga-helper.sock"
 
 # Timeout für Socket-Verbindung (Sekunden)
 CONNECT_TIMEOUT = 3

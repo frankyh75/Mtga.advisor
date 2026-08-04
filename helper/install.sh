@@ -33,7 +33,7 @@ BUNDLE_DST="/Library/PrivilegedHelperTools/mtga-helper.bundle"
 PLIST_SRC="$SCRIPT_DIR/launchd.plist"
 PLIST_DST="/Library/LaunchDaemons/com.mtga.helper.plist"
 DAEMON_LABEL="com.mtga.helper"
-SOCK_PATH="/tmp/mtga-helper.sock"
+SOCK_PATH="/var/run/mtga-helper.sock"
 HELPER_LOG="/var/log/mtga-helper.log"
 HELPER_ERR="/var/log/mtga-helper.err.log"
 

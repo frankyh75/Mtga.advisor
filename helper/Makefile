@@ -91,7 +91,7 @@ verify: $(BUNDLE)
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(BIN_NAME)
-	rm -f /tmp/mtga-helper.sock
+	rm -f /var/run/mtga-helper.sock
 	rm -f /tmp/mtga-helper-test.sock
 	@echo "Build-Verzeichnis entfernt."
 

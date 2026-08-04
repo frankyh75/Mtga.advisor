@@ -554,7 +554,7 @@ def main() -> int:
         "--sock",
         type=str,
         default=None,
-        help="Pfad zum Helper-UNIX-Socket (default: /tmp/mtga-helper.sock).",
+        help="Pfad zum Helper-UNIX-Socket (default: /var/run/mtga-helper.sock).",
     )
     args = parser.parse_args()
 

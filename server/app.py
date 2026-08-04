@@ -906,7 +906,7 @@ def _call_llm_chat(config: LLMConfig, prompt: str) -> dict[str, Any]:
 _HELPER_BUNDLE_PATH = Path(__file__).resolve().parents[1] / "helper" / "build" / "mtga-helper.bundle"
 _HELPER_INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "helper" / "install.sh"
 _HELPER_PLIST_PATH = "/Library/LaunchDaemons/com.mtga.helper.plist"
-_HELPER_SOCK_PATH = "/tmp/mtga-helper.sock"
+_HELPER_SOCK_PATH = "/var/run/mtga-helper.sock"
 
 
 def _helper_status_response() -> dict[str, Any]:

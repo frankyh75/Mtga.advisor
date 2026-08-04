@@ -26,7 +26,7 @@
     <array>
         <string>/Library/PrivilegedHelperTools/mtga-helper</string>
         <string>--sock</string>
-        <string>/tmp/mtga-helper.sock</string>
+        <string>/var/run/mtga-helper.sock</string>
     </array>
 
     <!-- Bei Bedarf starten (Socket-triggered) -->
@@ -41,7 +41,7 @@
             <key>SockType</key>
             <string>stream</string>
             <key>SockPathName</key>
-            <string>/tmp/mtga-helper.sock</string>
+            <string>/var/run/mtga-helper.sock</string>
             <key>SockPathMode</key>
             <integer>432</integer>  <!-- 0660 in decimal -->
         </dict>
