@@ -53,7 +53,6 @@ document.addEventListener("DOMContentLoaded", () => {
       companions: [],
     };
 
-<<<<<<< Updated upstream
     if (cardsField && typeof cardsField === "object" && !Array.isArray(cardsField)) {
       for (const [pileKey] of PILE_LABELS) {
         const pile = cardsField[pileKey];
@@ -65,129 +64,6 @@ document.addEventListener("DOMContentLoaded", () => {
             name: `ID:${cardId}`,
             count,
           }));
-=======
-  const renderDeckCards = (deckData) => {
-    if (!deckCardsGrid) return;
-    deckCardsGrid.replaceChildren();
-
-    const cards = deckData.cards || {};
-    let totalCards = 0;
-
-    // IntersectionObserver for lazy-loading card thumbnails
-    const thumbObserver = new IntersectionObserver(
-      (entries, observer) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            const placeholder = entry.target;
-            const cardId = placeholder.dataset.cardId;
-            if (cardId) {
-              const img = document.createElement("img");
-              img.className = "card-thumb";
-              img.alt = placeholder.dataset.cardName || "";
-              img.loading = "lazy";
-              img.src = `/api/card-image/${encodeURIComponent(cardId)}`;
-              img.onerror = () => {
-                // Keep placeholder on error
-                img.replaceWith(placeholder);
-                placeholder.textContent = "?";
-              };
-              placeholder.replaceWith(img);
-            }
-            observer.unobserve(placeholder);
-          }
-        }
-      },
-      { rootMargin: "100px" }
-    );
-
-    for (const [key, label] of PILE_LABELS) {
-      const pile = cards[key];
-      if (!pile || !Array.isArray(pile) || pile.length === 0) continue;
-
-      const pileDiv = document.createElement("div");
-      pileDiv.className = "deck-pile";
-
-      const h3 = document.createElement("h3");
-      h3.textContent = `${label} (${pile.length})`;
-      pileDiv.appendChild(h3);
-
-      const ul = document.createElement("ul");
-      for (const card of pile) {
-        const li = document.createElement("li");
-        li.className = "with-thumb";
-
-        const cardId = card.cardId || card.grpId || "";
-        const cardName = card.name || `ID:${cardId || "?"}`;
-        const count = card.count || 1;
-
-        // Thumbnail placeholder (lazy-loaded via IntersectionObserver)
-        const thumbDiv = document.createElement("div");
-        thumbDiv.className = "card-thumb-placeholder";
-        thumbDiv.dataset.cardId = String(cardId);
-        thumbDiv.dataset.cardName = cardName;
-        thumbDiv.textContent = "?";
-        if (cardId) {
-          thumbObserver.observe(thumbDiv);
-        }
-
-        const infoDiv = document.createElement("div");
-        infoDiv.className = "card-info";
-
-        const nameSpan = document.createElement("span");
-        nameSpan.className = "card-name";
-        nameSpan.textContent = cardName;
-
-        const qtySpan = document.createElement("span");
-        qtySpan.className = "qty";
-        qtySpan.textContent = `${count}x`;
-
-        infoDiv.appendChild(nameSpan);
-        infoDiv.appendChild(qtySpan);
-        li.appendChild(thumbDiv);
-        li.appendChild(infoDiv);
-        ul.appendChild(li);
-        totalCards += count;
-      }
-      pileDiv.appendChild(ul);
-      deckCardsGrid.appendChild(pileDiv);
-    }
-
-    if (deckCardsGrid.children.length === 0) {
-      const p = document.createElement("p");
-      p.className = "meta";
-      p.textContent = "Keine Karten in diesem Deck.";
-      deckCardsGrid.appendChild(p);
-    }
-
-    if (deckDetailMeta) {
-      const source = deckData.source || "unknown";
-      const deckId = deckData.deckId || "?";
-      deckDetailMeta.textContent = `Quelle: ${source} · Deck-ID: ${deckId} · ${totalCards} Karten`;
-    }
-  };
-
-  const loadDeckDetail = async (deckId, deckName) => {
-    if (deckDetail) deckDetail.classList.add("active");
-    if (deckDetailName) deckDetailName.textContent = deckName || "Unnamed";
-    if (deckCardsGrid) {
-      deckCardsGrid.replaceChildren();
-      const loadingP = document.createElement("p");
-      loadingP.className = "meta";
-      loadingP.textContent = "Lade Karten...";
-      deckCardsGrid.appendChild(loadingP);
-    }
-
-    try {
-      const resp = await fetch(`/api/deck/${encodeURIComponent(deckId)}`);
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        if (deckCardsGrid) {
-          deckCardsGrid.replaceChildren();
-          const p = document.createElement("p");
-          p.className = "meta";
-          p.textContent = `Keine Karten verfügbar (${err.message || resp.status})`;
-          deckCardsGrid.appendChild(p);
->>>>>>> Stashed changes
         }
       }
     } else if (Array.isArray(cardsField)) {
@@ -610,9 +486,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-<<<<<<< Updated upstream
   applyDeckFilter();
-=======
   // --- History controls ---
   const historySaveBtn = document.getElementById("history-save-btn");
   const historyDiffBtn = document.getElementById("history-diff-btn");
@@ -625,7 +499,7 @@ document.addEventListener("DOMContentLoaded", () => {
       historySaveBtn.textContent = "Speichere...";
       try {
         const resp = await fetch("/api/history/save", { method: "POST" });
-        const data = await resp.json();
+        await resp.json().catch(() => ({}));
         if (resp.ok) {
           historySaveBtn.textContent = "✓ Gespeichert";
           window.setTimeout(() => location.reload(), 800);
@@ -652,7 +526,6 @@ document.addEventListener("DOMContentLoaded", () => {
           historyDiffContent.innerHTML = `<p class="meta">${data.error}</p>`;
         } else {
           let html = "";
-          // Collection diff
           const cd = data.collectionDiff;
           if (cd && !cd.error) {
             const s = cd.summary;
@@ -695,7 +568,7 @@ document.addEventListener("DOMContentLoaded", () => {
               html += "</ul>";
             }
           }
-          // Decks diff
+
           const dd = data.decksDiff;
           if (dd) {
             const s = dd.summary;
@@ -723,6 +596,7 @@ document.addEventListener("DOMContentLoaded", () => {
               html += "</ul>";
             }
           }
+
           historyDiffContent.innerHTML = html || "<p class='meta'>Keine Änderungen.</p>";
         }
       } catch (err) {
@@ -750,10 +624,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         let html = "";
 
-        // Rank summary cards
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">';
-
-        // Constructed
         html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;">';
         html += '<h3 style="margin:0 0 .5rem;">Constructed</h3>';
         if (constructed.class && constructed.class !== "None") {
@@ -765,9 +636,8 @@ document.addEventListener("DOMContentLoaded", () => {
         } else {
           html += '<p class="meta">Unranked</p>';
         }
-        html += '</div>';
+        html += "</div>";
 
-        // Limited
         html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;">';
         html += '<h3 style="margin:0 0 .5rem;">Limited</h3>';
         if (limited.class && limited.class !== "None") {
@@ -779,10 +649,9 @@ document.addEventListener("DOMContentLoaded", () => {
         } else {
           html += '<p class="meta">Unranked</p>';
         }
-        html += '</div>';
-        html += '</div>';
+        html += "</div>";
+        html += "</div>";
 
-        // Account info
         if (account.displayName || account.accountId) {
           html += '<div style="padding:1rem;border:1px solid var(--border);border-radius:8px;margin-bottom:1rem;">';
           html += '<h3 style="margin:0 0 .5rem;">Account</h3>';
@@ -791,21 +660,19 @@ document.addEventListener("DOMContentLoaded", () => {
           if (account.accountId) html += `<p class="meta">Account ID: ${account.accountId}</p>`;
           if (account.personaId) html += `<p class="meta">Persona ID: ${account.personaId}</p>`;
           if (account.gameId) html += `<p class="meta">Game ID: ${account.gameId}</p>`;
-          html += '</div>';
+          html += "</div>";
         }
 
-        // Player ID
         if (ranks.playerId) {
           html += `<p class="meta">Player ID: ${ranks.playerId}</p>`;
         }
 
-        // Warnings
         if (warnings.length > 0) {
           html += '<div class="warning"><h3>Warnings</h3><ul>';
           for (const w of warnings) {
             html += `<li>${w}</li>`;
           }
-          html += '</ul></div>';
+          html += "</ul></div>";
         }
 
         if (!html) {
@@ -835,20 +702,16 @@ document.addEventListener("DOMContentLoaded", () => {
         const fetchedAt = data.fetchedAt || "?";
 
         let html = "";
-
-        // Header
         html += `<p class="meta">Format: <strong>${fmt}</strong> · Quelle: MTGGoldfish · Abgerufen: ${fetchedAt}</p>`;
 
-        // Warnings
         if (warnings.length > 0) {
           html += '<div class="warning"><h3>Warnings</h3><ul>';
           for (const w of warnings) {
             html += `<li>${w}</li>`;
           }
-          html += '</ul></div>';
+          html += "</ul></div>";
         }
 
-        // Top Decks table
         if (topDecks.length > 0) {
           html += '<h3>Top-Decks</h3>';
           html += '<table style="width:100%;border-collapse:collapse;">';
@@ -858,7 +721,7 @@ document.addEventListener("DOMContentLoaded", () => {
           html += '<th style="padding:.3rem;">Meta%</th>';
           html += '<th style="padding:.3rem;">Decks</th>';
           html += '<th style="padding:.3rem;">Top-Karten</th>';
-          html += '</tr></thead><tbody>';
+          html += "</tr></thead><tbody>";
           topDecks.forEach((deck, i) => {
             const cards = (deck.topCards || []).slice(0, 3).join(", ");
             const colors = deck.colors ? ` <span style="font-size:.8rem;color:var(--text-dim);">(${deck.colors})</span>` : "";
@@ -868,21 +731,20 @@ document.addEventListener("DOMContentLoaded", () => {
             html += `<td style="padding:.3rem;">${deck.metaShare.toFixed(1)}%</td>`;
             html += `<td style="padding:.3rem;">${deck.deckCount}</td>`;
             html += `<td style="padding:.3rem;font-size:.85rem;">${cards}</td>`;
-            html += '</tr>';
+            html += "</tr>";
           });
-          html += '</tbody></table>';
+          html += "</tbody></table>";
         }
 
-        // Top Cards
         if (topCards.length > 0) {
           html += '<h3>Häufigste Karten</h3>';
           html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.5rem;">';
           for (const card of topCards.slice(0, 15)) {
             html += `<div style="padding:.5rem;border:1px solid var(--border);border-radius:6px;">`;
             html += `<strong>${card.name}</strong><br><span class="meta">${card.decks} Decks</span>`;
-            html += `</div>`;
+            html += "</div>";
           }
-          html += '</div>';
+          html += "</div>";
         }
 
         if (!html) {
@@ -895,5 +757,4 @@ document.addEventListener("DOMContentLoaded", () => {
         metaContent.innerHTML = `<p class="meta">Meta-Daten nicht verfügbar — ${err.message}.</p>`;
       });
   }
->>>>>>> Stashed changes
 });
