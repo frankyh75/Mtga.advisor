@@ -32,6 +32,35 @@ document.addEventListener("DOMContentLoaded", () => {
 
   let selectedDeck = null;
 
+  // Lazy-loads card thumbnails as they scroll into view (single shared
+  // observer for all card lists, restored from a WIP fix whose merge
+  // conflict had discarded it in favor of a text-only rendering).
+  const thumbObserver = new IntersectionObserver(
+    (entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) {
+          continue;
+        }
+        const placeholder = entry.target;
+        const cardId = placeholder.dataset.cardId;
+        if (cardId) {
+          const img = document.createElement("img");
+          img.className = "card-thumb";
+          img.alt = placeholder.dataset.cardName || "";
+          img.loading = "lazy";
+          img.src = `/api/card-image/${encodeURIComponent(cardId)}`;
+          img.onerror = () => {
+            img.replaceWith(placeholder);
+            placeholder.textContent = "?";
+          };
+          placeholder.replaceWith(img);
+        }
+        observer.unobserve(placeholder);
+      }
+    },
+    { rootMargin: "100px" }
+  );
+
   const addMessage = (role, text) => {
     if (!chatMessages) {
       return;
@@ -116,7 +145,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const renderCardSection = (title, cards) => {
     const section = document.createElement("div");
-    section.className = "deck-card-section";
+    // "deck-pile" pulls in the thumbnail/flex-row styling (.deck-pile ul,
+    // .deck-pile li.with-thumb, .card-name, .qty) already defined in app.py.
+    section.className = "deck-card-section deck-pile";
 
     const heading = document.createElement("h5");
     heading.textContent = title;
@@ -131,9 +162,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const list = document.createElement("ul");
-    list.className = "deck-list";
     cards.forEach((card) => {
       const item = document.createElement("li");
+      item.className = "with-thumb";
       const name = card.name || card.cardName || card.title || card.arenaId || card.cardId || "?";
       const count = card.count ?? card.quantity ?? 1;
       const extra = [];
@@ -143,7 +174,32 @@ document.addEventListener("DOMContentLoaded", () => {
       if (card.set) {
         extra.push(card.set);
       }
-      item.textContent = extra.length ? `${name} x${count} (${extra.join(", ")})` : `${name} x${count}`;
+
+      const cardId = card.cardId ?? card.grpId ?? "";
+      const thumb = document.createElement("div");
+      thumb.className = "card-thumb-placeholder";
+      thumb.textContent = "?";
+      if (cardId) {
+        thumb.dataset.cardId = String(cardId);
+        thumb.dataset.cardName = name;
+        thumbObserver.observe(thumb);
+      }
+
+      const info = document.createElement("div");
+      info.className = "card-info";
+
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "card-name";
+      nameSpan.textContent = extra.length ? `${name} (${extra.join(", ")})` : name;
+
+      const qtySpan = document.createElement("span");
+      qtySpan.className = "qty";
+      qtySpan.textContent = `${count}x`;
+
+      info.appendChild(nameSpan);
+      info.appendChild(qtySpan);
+      item.appendChild(thumb);
+      item.appendChild(info);
       list.appendChild(item);
     });
     section.appendChild(list);
@@ -291,7 +347,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     try {
-      const response = await fetch(`/api/decks/${encodeURIComponent(deckKey)}`);
+      const response = await fetch(`/api/deck/${encodeURIComponent(deckKey)}`);
       const payload = await response.json();
       if (!response.ok || payload.error) {
         chatDeckCards.replaceChildren();
@@ -325,7 +381,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     try {
-      const response = await fetch(`/api/decks/${encodeURIComponent(deckKey)}`);
+      const response = await fetch(`/api/deck/${encodeURIComponent(deckKey)}`);
       const payload = await response.json();
       if (!response.ok || payload.error) {
         deckDetailEmpty.textContent = payload.message || payload.error || "Deck konnte nicht geladen werden.";
