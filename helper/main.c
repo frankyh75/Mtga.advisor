@@ -218,6 +218,7 @@ static void sb_appendf(sb_t *sb, const char *fmt, ...) {
     sb->len += n;
 }
 
+static void sb_free(sb_t *sb) __attribute__((unused));
 static void sb_free(sb_t *sb) {
     free(sb->buf);
     sb->buf = NULL;
@@ -274,6 +275,7 @@ static pid_t find_process_by_name(const char *name) {
 
 /* Find first matching process from a list of names.
  * Returns PID > 0 or 0 if none found. */
+static pid_t find_process(const char *process_names[], int n_names) __attribute__((unused));
 static pid_t find_process(const char *process_names[], int n_names) {
     for (int i = 0; i < n_names; i++) {
         pid_t pid = find_process_by_name(process_names[i]);

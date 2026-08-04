@@ -4,10 +4,12 @@
 #   make            — kompiliert das Binary und erzeugt das .app-Bundle
 #   make build      — nur das Binary kompilieren (ohne Bundle/Signing)
 #   make bundle     — Bundle-Struktur erstellen und Binary/Info.plist hineinlegen
-#   make sign       — Bundle mit self-signed Zertifikat signieren
+#   make sign       — Bundle signieren (Certificate oder ad-hoc Fallback)
+#   make sign-check — Prüfen ob ein Code-Signing-Zertifikat existiert
 #   make clean      — Build-Produkte entfernen
 #   make install    — Bundle via install.sh installieren (sudo erforderlich)
 #   make verify     — Code-Signing und Bundle-Struktur verifizieren
+#   make test       — Binary für E2E-Test bereitstellen
 #
 # Variablen (über Override anpassbar):
 #   CERT_NAME       — Name des Code-Signing-Zertifikats (Keychain)
@@ -42,7 +44,7 @@ BUNDLE_CONTENTS   := $(BUNDLE)/Contents
 BUNDLE_MACOS      := $(BUNDLE_CONTENTS)/MacOS
 
 # Default: alles bauen
-.PHONY: all build bundle sign clean install verify test
+.PHONY: all build bundle sign clean install verify test sign-check
 
 all: bundle sign
 
@@ -63,13 +65,23 @@ $(BUNDLE): $(BIN) Info.plist
 	@echo "Bundle erstellt: $(BUNDLE)"
 
 # --- Sign: Bundle mit Code-Signing-Zertifikat signieren ---
+# Fallback auf ad-hoc Signing (-), wenn keine Identity gefunden wird.
+# Ad-hoc signierte Bundles laufen lokal, werden aber von SMJobBless abgelehnt.
 sign: bundle
-	@echo "Signiere Bundle mit Zertifikat: $(CERT_NAME)"
-	codesign --force --sign "$(CERT_NAME)" \
-		--entitlements Entitlements.plist \
-		--requirements "identifier \"$(BUNDLE_ID)\"" \
-		$(BUNDLE)
-	@echo "Signatur fertig."
+	@if security find-identity -v -p codesigning 2>/dev/null | grep -q "$(CERT_NAME)"; then \
+		echo "Signiere Bundle mit Zertifikat: $(CERT_NAME)"; \
+		codesign --force --sign "$(CERT_NAME)" \
+			--entitlements Entitlements.plist \
+			--requirements "identifier \"$(BUNDLE_ID)\"" \
+			$(BUNDLE); \
+		echo "Signatur fertig (Certificate)."; \
+	else \
+		echo "WARN: Zertifikat '$(CERT_NAME)' nicht gefunden — ad-hoc Signatur."; \
+		codesign --force --sign - \
+			--entitlements Entitlements.plist \
+			$(BUNDLE); \
+		echo "Signatur fertig (ad-hoc). SMJobBless benötigt ein echtes Zertifikat."; \
+	fi
 
 # --- Install: Bundle + LaunchDaemon installieren ---
 install: all
@@ -83,17 +95,33 @@ verify: $(BUNDLE)
 	@test -f $(BUNDLE_MACOS)/$(BIN_NAME) || { echo "FAIL: Binary fehlt"; exit 1; }
 	@echo "OK: Bundle-Struktur intakt"
 	@echo "Prüfe Code-Signing..."
-	@codesign -dv $(BUNDLE) 2>&1 || { echo "WARN: Bundle nicht signiert (run 'make sign')"; }
-	@echo "Prüfe Designated Requirement..."
-	@codesign -d -r- $(BUNDLE) 2>&1 || true
+	@if codesign -dv $(BUNDLE) 2>/dev/null; then \
+		echo "OK: Bundle ist signiert"; \
+		codesign -d -r- $(BUNDLE) 2>&1 || true; \
+	else \
+		echo "WARN: Bundle nicht signiert (run 'make sign')"; \
+	fi
+
+# --- Sign-Check: Prüfen ob ein echtes Signaturzertifikat existiert ---
+sign-check:
+	@echo "Verfügbare Code-Signing-Identities:"
+	@security find-identity -v -p codesigning 2>/dev/null || true
+	@echo ""
+	@if security find-identity -v -p codesigning 2>/dev/null | grep -q "$(CERT_NAME)"; then \
+		echo "OK: Zertifikat '$(CERT_NAME)' gefunden"; \
+	else \
+		echo "WARN: Zertifikat '$(CERT_NAME)' nicht gefunden."; \
+		echo "      'make sign' verwendet ad-hoc Signatur (kein SMJobBless)."; \
+		echo "      Für SMJobBless: Zertifikat in Keychain erzeugen oder CERT_NAME override."; \
+	fi
 
 # --- Clean: Build-Produkte entfernen ---
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(BIN_NAME)
-	rm -f /var/run/mtga-helper.sock
 	rm -f /tmp/mtga-helper-test.sock
 	@echo "Build-Verzeichnis entfernt."
+	@echo "(Hinweis: /var/run/mtga-helper.sock wird vom Daemon verwaltet — sudo rm -f /var/run/mtga-helper.sock)"
 
 # --- Test: Binary für E2E-Test bereitstellen ---
 test: build

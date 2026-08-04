@@ -8,15 +8,14 @@
       Wird installiert unter:
         /Library/LaunchDaemons/com.mtga.helper.plist
 
-      Der Daemon läuft als root (UserName=root ist implizit für
-      LaunchDaemons in /Library/LaunchDaemons/), startet bei Bedarf
-      (OnDemand) und lauscht auf dem UNIX Socket.
+      Der Daemon läuft als root (implizit für LaunchDaemons in
+      /Library/LaunchDaemons/) und lauscht auf dem UNIX Socket.
 
       KeepAlive=false → der Daemon startet nur, wenn ein Client
-      sich zum Socket verbindet (Mach-Service-OnDemand).  Das
-      spart Ressourcen, wenn kein Scan läuft.
+      sich zum Socket verbindet (socket-triggered OnDemand).
+      Das spart Ressourcen, wenn kein Scan läuft.
 
-      Falls der Helper immer laufen soll, setze KeepAlive=true.
+      Falls der Helper dauerhaft laufen soll, setze KeepAlive=true.
     -->
 
     <key>Label</key>
@@ -29,9 +28,9 @@
         <string>/var/run/mtga-helper.sock</string>
     </array>
 
-    <!-- Bei Bedarf starten (Socket-triggered) -->
-    <key>OnDemand</key>
-    <true/>
+    <!-- Socket-triggered OnDemand: Startet nur bei Verbindung -->
+    <key>KeepAlive</key>
+    <false/>
 
     <!-- Socket-Definition: UNIX Domain Socket -->
     <key>Sockets</key>
