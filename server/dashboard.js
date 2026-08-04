@@ -1344,6 +1344,226 @@ document.addEventListener("DOMContentLoaded", () => {
   if (cbCmc) cbCmc.addEventListener("input", cbApplyFilter);
   if (cbReset) cbReset.addEventListener("click", cbResetFilters);
 
+  // --- Advisor Result View (T8): structured analysis renderer ---
+
+  /**
+   * Renders a structured advisor analysis response into blocks.
+   * Blocks: Summary, Core Cards, Missing Cards, Craft Priorities, Cuts,
+   *         Mana Curve, Risk Assessment.
+   * Falls back to a <pre> with raw text if no structured data is present.
+   *
+   * @param {Object} data — the JSON response from /api/advisor/analyze
+   * @param {HTMLElement} container — the DOM element to render into
+   */
+  function renderAdvisorResult(data, container) {
+    if (!container) return;
+    container.replaceChildren();
+    container.style.display = "block";
+
+    var structured = data.structured;
+    var hasStructured = structured && Object.keys(structured).length > 0;
+
+    if (!hasStructured) {
+      // Fallback: raw text in <pre>
+      var heading = el("h4", { text: "Analyse" });
+      var pre = document.createElement("pre");
+      pre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:30rem;overflow-y:auto;";
+      pre.textContent = data.analysis || "";
+      container.appendChild(heading);
+      container.appendChild(pre);
+      return;
+    }
+
+    var wrapper = el("div", { className: "advisor-result" });
+
+    // --- Summary ---
+    if (structured.summary) {
+      var s = structured.summary;
+      var block = el("div", { className: "advisor-result-block" });
+      block.appendChild(el("h4", { text: "Summary" }));
+      var sumDiv = el("div", { className: "advisor-result-summary" });
+
+      if (s.topPriority) {
+        sumDiv.appendChild(el("span", { className: "top-priority", text: s.topPriority }));
+      }
+      if (s.confidence) {
+        var conf = s.confidence.toLowerCase();
+        var confClass = "confidence-badge " + (["high", "medium", "low"].includes(conf) ? conf : "low");
+        sumDiv.appendChild(el("span", { className: confClass, text: s.confidence }));
+      }
+      if (s.notes) {
+        sumDiv.appendChild(el("p", { text: s.notes }));
+      }
+      block.appendChild(sumDiv);
+      wrapper.appendChild(block);
+    }
+
+    // --- Core Cards ---
+    if (structured.coreCards && structured.coreCards.length > 0) {
+      var coreBlock = el("div", { className: "advisor-result-block" });
+      coreBlock.appendChild(el("h4", { text: "Core Cards" }));
+      var coreList = el("ul", { className: "advisor-result-card-list" });
+      structured.coreCards.forEach(function (card) {
+        var li = el("li");
+        li.appendChild(el("span", { className: "card-count", text: card.count + "x" }));
+        li.appendChild(el("span", { className: "card-name", text: card.name }));
+        if (card.role) {
+          li.appendChild(el("span", { className: "card-role", text: "— " + card.role }));
+        }
+        coreList.appendChild(li);
+      });
+      coreBlock.appendChild(coreList);
+      wrapper.appendChild(coreBlock);
+    }
+
+    // --- Missing Cards ---
+    if (structured.missingCards && structured.missingCards.length > 0) {
+      var missBlock = el("div", { className: "advisor-result-block" });
+      missBlock.appendChild(el("h4", { text: "Missing Cards" }));
+      var missList = el("ul", { className: "advisor-result-card-list" });
+      structured.missingCards.forEach(function (card) {
+        var li = el("li");
+        li.appendChild(el("span", { className: "card-count", text: card.count + "x" }));
+        li.appendChild(el("span", { className: "card-name", text: card.name }));
+        if (card.rarity && card.rarity !== "?") {
+          var rarityClass = "card-rarity " + card.rarity.toLowerCase();
+          li.appendChild(el("span", { className: rarityClass, text: card.rarity }));
+        }
+        if (card.reason) {
+          li.appendChild(el("span", { className: "card-reason", text: "— " + card.reason }));
+        }
+        missList.appendChild(li);
+      });
+      missBlock.appendChild(missList);
+      wrapper.appendChild(missBlock);
+    }
+
+    // --- Craft Priorities ---
+    if (structured.craftPriorities && structured.craftPriorities.length > 0) {
+      var craftBlock = el("div", { className: "advisor-result-block" });
+      craftBlock.appendChild(el("h4", { text: "Craft Priorities" }));
+      structured.craftPriorities.forEach(function (group) {
+        var groupDiv = el("div", { className: "advisor-craft-group" });
+        groupDiv.appendChild(el("h5", { text: group.reason }));
+        if (group.cards && group.cards.length > 0) {
+          var cardList = el("ul", { className: "advisor-result-card-list" });
+          group.cards.forEach(function (card) {
+            var li = el("li");
+            li.appendChild(el("span", { className: "card-count", text: card.count + "x" }));
+            li.appendChild(el("span", { className: "card-name", text: card.name }));
+            if (card.rarity && card.rarity !== "?") {
+              var rarityClass = "card-rarity " + card.rarity.toLowerCase();
+              li.appendChild(el("span", { className: rarityClass, text: card.rarity }));
+            }
+            if (card.forDecks && card.forDecks.length > 0) {
+              li.appendChild(el("span", { className: "for-decks", text: "für " + card.forDecks.join(", ") }));
+            }
+            cardList.appendChild(li);
+          });
+          groupDiv.appendChild(cardList);
+        }
+        craftBlock.appendChild(groupDiv);
+      });
+      wrapper.appendChild(craftBlock);
+    }
+
+    // --- Cuts ---
+    if (structured.cuts && structured.cuts.length > 0) {
+      var cutsBlock = el("div", { className: "advisor-result-block" });
+      cutsBlock.appendChild(el("h4", { text: "Cuts" }));
+      var cutsList = el("ul", { className: "advisor-result-card-list advisor-cuts-list" });
+      structured.cuts.forEach(function (card) {
+        var li = el("li");
+        li.appendChild(el("span", { className: "card-count", text: "-" + card.count }));
+        li.appendChild(el("span", { className: "card-name", text: card.name }));
+        if (card.reason) {
+          li.appendChild(el("span", { className: "card-reason", text: "— " + card.reason }));
+        }
+        cutsList.appendChild(li);
+      });
+      cutsBlock.appendChild(cutsList);
+      wrapper.appendChild(cutsBlock);
+    }
+
+    // --- Mana Curve ---
+    if (structured.manaCurve) {
+      var curve = structured.manaCurve;
+      var curveBlock = el("div", { className: "advisor-result-block" });
+      curveBlock.appendChild(el("h4", { text: "Mana Curve" }));
+      var curveBars = el("div", { className: "advisor-mana-curve" });
+
+      var maxCount = 0;
+      var cmcKeys = ["cmc0", "cmc1", "cmc2", "cmc3", "cmc4", "cmc5", "cmc6plus"];
+      var cmcLabels = ["0", "1", "2", "3", "4", "5", "6+"];
+      for (var i = 0; i < cmcKeys.length; i++) {
+        maxCount = Math.max(maxCount, curve[cmcKeys[i]] || 0);
+      }
+      if (maxCount === 0) maxCount = 1;
+
+      for (var j = 0; j < cmcKeys.length; j++) {
+        var count = curve[cmcKeys[j]] || 0;
+        var heightPct = Math.round((count / maxCount) * 100);
+        var barDiv = el("div", { className: "advisor-mana-curve-bar" });
+        var bar = el("div", { className: "bar" });
+        bar.style.height = heightPct + "%";
+        barDiv.appendChild(bar);
+        barDiv.appendChild(el("span", { className: "count", text: String(count) }));
+        barDiv.appendChild(el("span", { className: "label", text: cmcLabels[j] }));
+        curveBars.appendChild(barDiv);
+      }
+      curveBlock.appendChild(curveBars);
+      wrapper.appendChild(curveBlock);
+    }
+
+    // --- Risk Assessment ---
+    if (structured.riskAssessment) {
+      var risk = structured.riskAssessment;
+      var riskBlock = el("div", { className: "advisor-result-block" });
+      riskBlock.appendChild(el("h4", { text: "Risk Assessment" }));
+      var riskGrid = el("div", { className: "advisor-risk-grid" });
+
+      var riskLabels = {
+        lands: "Lands",
+        curve: "Mana Curve",
+        synergy: "Synergy",
+        sideboard: "Sideboard",
+      };
+      Object.keys(riskLabels).forEach(function (key) {
+        if (!risk[key]) return;
+        var item = el("div", { className: "advisor-risk-item" });
+        item.appendChild(el("div", { className: "risk-label", text: riskLabels[key] }));
+        var valueText = risk[key];
+        var valueClass = "risk-value";
+        var lower = valueText.toLowerCase();
+        if (lower.indexOf("good") >= 0 || lower.indexOf("ok") >= 0 || lower.indexOf("solid") >= 0) {
+          valueClass += " good";
+        } else if (lower.indexOf("risk") >= 0 || lower.indexOf("low") >= 0 || lower.indexOf("issue") >= 0) {
+          valueClass += " warning";
+        } else if (lower.indexOf("critical") >= 0 || lower.indexOf("bad") >= 0 || lower.indexOf("problem") >= 0) {
+          valueClass += " critical";
+        }
+        item.appendChild(el("div", { className: valueClass, text: valueText }));
+        riskGrid.appendChild(item);
+      });
+      riskBlock.appendChild(riskGrid);
+      wrapper.appendChild(riskBlock);
+    }
+
+    // --- Raw text (collapsible, always present as fallback) ---
+    if (data.analysis && data.analysis.trim()) {
+      var rawBlock = el("div", { className: "advisor-result-block" });
+      var rawHeading = el("h4", { text: "Raw Analysis Text" });
+      rawBlock.appendChild(rawHeading);
+      var rawPre = document.createElement("pre");
+      rawPre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:20rem;overflow-y:auto;font-size:.82rem;";
+      rawPre.textContent = data.analysis;
+      rawBlock.appendChild(rawPre);
+      wrapper.appendChild(rawBlock);
+    }
+
+    container.appendChild(wrapper);
+  }
+
   // --- Quick Actions (T10): Export, Analyze, Improve ---
 
   function setActionStatus(msg, isError) {
@@ -1450,14 +1670,7 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           setActionStatus("Analyse fertig (" + (data.model || "?") + ").", false);
           if (deckAnalyzeResult) {
-            deckAnalyzeResult.style.display = "block";
-            deckAnalyzeResult.replaceChildren();
-            const heading = el("h4", { text: "Analyse" });
-            const pre = document.createElement("pre");
-            pre.style.cssText = "white-space:pre-wrap;word-wrap:break-word;max-height:30rem;overflow-y:auto;";
-            pre.textContent = data.analysis || "";
-            deckAnalyzeResult.appendChild(heading);
-            deckAnalyzeResult.appendChild(pre);
+            renderAdvisorResult(data, deckAnalyzeResult);
           }
         })
         .catch((err) => {

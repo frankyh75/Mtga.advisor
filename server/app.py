@@ -857,6 +857,146 @@ def _build_chat_prompt(deck: dict[str, Any], collection: dict[str, Any] | None, 
     return "\n".join(lines)
 
 
+def _parse_structured_analysis(raw_text: str) -> dict[str, Any]:
+    """Try to parse an LLM analysis response as JSON and extract structured fields.
+
+    The advisor-analyze.v2 schema supports these optional blocks:
+      - summary: {topPriority, confidence, notes}
+      - coreCards: [{name, count, role}]
+      - missingCards: [{name, count, rarity, reason}]
+      - craftPriorities: [{reason, cards: [{name, count, rarity, forDecks}]}]
+      - cuts: [{name, count, reason}]
+      - manaCurve: {cmc0, cmc1, cmc2, cmc3, cmc4, cmc5, cmc6plus}
+      - riskAssessment: {lands, curve, synergy, sideboard}
+
+    If the LLM returns plain text (not JSON), returns {} — the caller
+    falls back to rendering the raw text in a <pre>.
+    """
+    import re as _re
+
+    text = raw_text.strip()
+
+    # Strip ```json ... ``` or ``` ... ``` fencing
+    code_block = _re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, _re.DOTALL)
+    if code_block:
+        text = code_block.group(1).strip()
+
+    # Try direct JSON parse
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Try to find outermost JSON object
+        brace_start = text.find("{")
+        brace_end = text.rfind("}")
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                data = json.loads(text[brace_start : brace_end + 1])
+            except json.JSONDecodeError:
+                return {}
+        else:
+            return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    result: dict[str, Any] = {}
+
+    # summary
+    summary = data.get("summary")
+    if isinstance(summary, dict):
+        result["summary"] = {
+            "topPriority": str(summary.get("topPriority", "")),
+            "confidence": str(summary.get("confidence", "")),
+            "notes": str(summary.get("notes", "")),
+        }
+
+    # coreCards
+    core_cards = data.get("coreCards")
+    if isinstance(core_cards, list):
+        result["coreCards"] = [
+            {
+                "name": str(c.get("name", "?")),
+                "count": int(c.get("count", 1)),
+                "role": str(c.get("role", "")),
+            }
+            for c in core_cards
+            if isinstance(c, dict)
+        ]
+
+    # missingCards
+    missing = data.get("missingCards")
+    if isinstance(missing, list):
+        result["missingCards"] = [
+            {
+                "name": str(c.get("name", "?")),
+                "count": int(c.get("count", 1)),
+                "rarity": str(c.get("rarity", "?")),
+                "reason": str(c.get("reason", "")),
+            }
+            for c in missing
+            if isinstance(c, dict)
+        ]
+
+    # craftPriorities
+    craft = data.get("craftPriorities")
+    if isinstance(craft, list):
+        result["craftPriorities"] = [
+            {
+                "reason": str(p.get("reason", "?")),
+                "cards": [
+                    {
+                        "name": str(c.get("name", "?")),
+                        "count": int(c.get("count", 1)),
+                        "rarity": str(c.get("rarity", "?")),
+                        "forDecks": list(c.get("forDecks", [])),
+                    }
+                    for c in p.get("cards", [])
+                    if isinstance(c, dict)
+                ],
+            }
+            for p in craft
+            if isinstance(p, dict)
+        ]
+
+    # cuts
+    cuts = data.get("cuts")
+    if isinstance(cuts, list):
+        result["cuts"] = [
+            {
+                "name": str(c.get("name", "?")),
+                "count": int(c.get("count", 1)),
+                "reason": str(c.get("reason", "")),
+            }
+            for c in cuts
+            if isinstance(c, dict)
+        ]
+
+    # manaCurve
+    curve = data.get("manaCurve")
+    if isinstance(curve, dict):
+        result["manaCurve"] = {
+            "cmc0": int(curve.get("cmc0", 0)),
+            "cmc1": int(curve.get("cmc1", 0)),
+            "cmc2": int(curve.get("cmc2", 0)),
+            "cmc3": int(curve.get("cmc3", 0)),
+            "cmc4": int(curve.get("cmc4", 0)),
+            "cmc5": int(curve.get("cmc5", 0)),
+            "cmc6plus": int(curve.get("cmc6plus", curve.get("cmc6+", 0))),
+        }
+
+    # riskAssessment
+    risk = data.get("riskAssessment")
+    if isinstance(risk, dict):
+        result["riskAssessment"] = {
+            "lands": str(risk.get("lands", "")),
+            "curve": str(risk.get("curve", "")),
+            "synergy": str(risk.get("synergy", "")),
+            "sideboard": str(risk.get("sideboard", "")),
+        }
+
+    return result
+
+
 def _call_llm_chat(config: LLMConfig, prompt: str) -> dict[str, Any]:
     """Rufe LLM für Chat auf. Returns dict with response or error."""
     payload = {
@@ -999,6 +1139,47 @@ def _render_index(
     .action-status { font-size: .82rem; color: var(--muted); margin-left: .4rem; }
     .action-status.error { color: #b91c1c; }
     .action-status.ok { color: var(--green); }
+
+    /* Advisor Result View (T8) — structured analysis blocks */
+    .advisor-result { margin-top: .6rem; }
+    .advisor-result-block { background: rgba(255,250,240,.7); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .8rem; margin-bottom: .6rem; }
+    .advisor-result-block h4 { margin: .2rem 0 .4rem; font-size: .95rem; color: var(--accent); border-bottom: 1px solid var(--line); padding-bottom: .2rem; }
+    .advisor-result-block .meta { font-size: .82rem; color: var(--muted); }
+    .advisor-result-summary { font-size: .9rem; line-height: 1.5; }
+    .advisor-result-summary .top-priority { font-weight: bold; color: var(--ink); }
+    .advisor-result-summary .confidence-badge { display: inline-block; padding: .1rem .5rem; border-radius: 8px; font-size: .78rem; font-weight: bold; margin-left: .4rem; }
+    .advisor-result-summary .confidence-badge.high { background: #d4edda; color: #155724; }
+    .advisor-result-summary .confidence-badge.medium { background: #fff3cd; color: #856404; }
+    .advisor-result-summary .confidence-badge.low { background: #f8d7da; color: #721c24; }
+    .advisor-result-card-list { list-style: none; padding: 0; margin: .2rem 0; }
+    .advisor-result-card-list li { padding: .2rem .4rem; border-bottom: 1px solid rgba(216,207,192,.4); font-size: .88rem; display: flex; gap: .4rem; align-items: baseline; }
+    .advisor-result-card-list li:last-child { border-bottom: none; }
+    .advisor-result-card-list .card-count { color: var(--accent); font-weight: bold; min-width: 2.2rem; }
+    .advisor-result-card-list .card-name { font-weight: 500; }
+    .advisor-result-card-list .card-role, .advisor-result-card-list .card-reason { color: var(--muted); font-size: .82rem; }
+    .advisor-result-card-list .card-rarity { font-size: .78rem; font-weight: bold; padding: .05rem .3rem; border-radius: 4px; }
+    .advisor-result-card-list .card-rarity.common { color: #333; }
+    .advisor-result-card-list .card-rarity.uncommon { color: #777; }
+    .advisor-result-card-list .card-rarity.rare { color: #b8860b; }
+    .advisor-result-card-list .card-rarity.mythic { color: #c45a18; }
+    .advisor-craft-group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; margin-bottom: .4rem; }
+    .advisor-craft-group h5 { margin: .15rem 0 .25rem; font-size: .88rem; color: var(--ink); }
+    .advisor-craft-group .for-decks { font-size: .8rem; color: var(--muted); }
+    .advisor-mana-curve { display: flex; gap: .5rem; align-items: flex-end; height: 80px; padding: .4rem 0; }
+    .advisor-mana-curve-bar { display: flex; flex-direction: column; align-items: center; flex: 1; max-width: 60px; }
+    .advisor-mana-curve-bar .bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .2s; }
+    .advisor-mana-curve-bar .label { font-size: .75rem; color: var(--muted); margin-top: .2rem; }
+    .advisor-mana-curve-bar .count { font-size: .72rem; color: var(--ink); font-weight: bold; }
+    .advisor-risk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: .5rem; margin-top: .3rem; }
+    .advisor-risk-item { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; }
+    .advisor-risk-item .risk-label { font-size: .8rem; color: var(--muted); margin-bottom: .15rem; }
+    .advisor-risk-item .risk-value { font-size: .85rem; font-weight: 500; }
+    .advisor-risk-item .risk-value.good { color: var(--green); }
+    .advisor-risk-item .risk-value.warning { color: #856404; }
+    .advisor-risk-item .risk-value.critical { color: var(--danger); }
+    .advisor-no-data { color: var(--muted); font-size: .85rem; font-style: italic; padding: .3rem 0; }
+    .advisor-cuts-list li { color: var(--danger); }
+    .advisor-cuts-list .card-reason { color: var(--muted); }
     .deck-cards-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .5rem; }
     @media (max-width: 700px) { .deck-cards-grid { grid-template-columns: 1fr; } }
     .deck-pile h3 { margin: .2rem 0 .4rem; font-size: 1rem; }
@@ -1955,13 +2136,20 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 _json_response(self, result, status=HTTPStatus.OK)
                 return
 
-            _json_response(self, {
+            # Try to parse structured blocks from LLM response (T8)
+            analysis_text = result.get("response", "")
+            structured = _parse_structured_analysis(analysis_text)
+
+            response_payload: dict[str, Any] = {
                 "schema": "advisor-analyze.v1",
                 "deckName": deck_payload.get("name", "Unnamed"),
-                "analysis": result.get("response", ""),
+                "analysis": analysis_text,
                 "model": result.get("model", config.model_name),
                 "warnings": [],
-            }, status=HTTPStatus.OK)
+            }
+            if structured:
+                response_payload["structured"] = structured
+            _json_response(self, response_payload, status=HTTPStatus.OK)
             return
 
         if self.path == "/api/advisor/improve":
