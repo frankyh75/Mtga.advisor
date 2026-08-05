@@ -209,6 +209,37 @@ Die CLI erkennt automatisch, ob der Helper läuft:
 - **Helper aktiv:** Scan läuft über Helper (kein sudo nötig)
 - **Helper inaktiv:** Warnung + Fallback auf direkten sudo-Weg
 
+## Kombinierter Scan (scan --all)
+
+`scan --all` führt Collection-, Deck- und Rank-Scan in einem einzigen
+Durchlauf aus. Wenn der Helper-Daemon verfügbar ist, öffnet die CLI eine
+**einzige persistente Socket-Verbindung** zum Helper und führt alle drei
+Scans darüber aus — ohne drei separate Verbindungen aufzubauen.
+
+```bash
+# Alle drei Scans (Collection + Decks + Ranks) in einem Durchlauf:
+.venv/bin/python -m cli.main scan --all --output out
+
+# Nur Decks und Ränge (Collection überspringen):
+.venv/bin/python -m cli.main scan --all --no-collection --output out
+
+# Nur Collection:
+.venv/bin/python -m cli.main scan --all --no-decks --no-ranks --output out
+```
+
+Ausgabe-Artefakte im `--output`-Verzeichnis:
+- `collection.json` + `run-report.json` (Collection-Scan)
+- `decks.json` (Deck-Scan)
+- `ranks.json` (Rank-Scan, falls Ränge gefunden)
+
+### Persistente Verbindung (Keep-Alive)
+
+Der Helper-Daemon unterstützt Keep-Alive: mehrere JSON-Requests werden über
+eine einzelne Socket-Verbindung abgewickelt. `scanner/combined_scanner.py`
+nutzt das über `_PersistentConnection` — eine Verbindung für alle Scans.
+Das reduziert Overhead und sorgt dafür, dass der `task_for_pid()`-Aufruf
+nur einmal pro kombinierter Scan stattfindet.
+
 ## Dashboard-Status
 
 Im lokalen Dashboard (`http://127.0.0.1:8000/`) wird der Helper-Status

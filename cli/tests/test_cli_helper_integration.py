@@ -17,24 +17,36 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from cli.main import main  # noqa: E402
 
 
+def _make_result(cards: dict[int, int]) -> object:
+    """Erstellt ein MemoryScanResult-Mock für die CLI-Tests."""
+    from scanner.memory_scanner import MemoryScanResult
+    return MemoryScanResult(
+        collection=cards,
+        anchors=[],
+        anchor_matches={},
+        validation={
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "cardsCount": len(cards),
+            "totalCards": sum(cards.values()),
+        },
+    )
+
+
 def test_scan_command_uses_helper_when_available(tmp_path, monkeypatch):
     """Wenn der Helper verfügbar ist, wird der Scan über den Helper ausgeführt."""
     import cli.main as cli_module
-    from scanner.memory_scanner import MemoryScanResult
+    import scanner.memory_scanner as ms_mod
 
     # Helper als verfügbar mocken
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
 
-    # Helper-Scan mocken
-    helper_result = MemoryScanResult(
-        collection={100: 4, 200: 1},
-        anchors=[],
-        anchor_matches={},
-        validation={"valid": True, "errors": [], "warnings": [], "cardsCount": 2, "totalCards": 5},
-    )
+    # scan_collection_detailed mocken (wird von _run_scan_via_helper aufgerufen)
     monkeypatch.setattr(
-        "scanner.helper_client.helper_scan_collection_detailed",
-        lambda debug=False: helper_result,
+        ms_mod,
+        "scan_collection_detailed",
+        lambda **kwargs: _make_result({100: 4, 200: 1}),
     )
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
@@ -49,7 +61,6 @@ def test_scan_command_uses_helper_when_available(tmp_path, monkeypatch):
 def test_scan_command_falls_back_to_direct_when_helper_unavailable(tmp_path, monkeypatch):
     """Wenn der Helper nicht verfügbar ist, wird der direkte Scan verwendet (mit Warnung)."""
     import cli.main as cli_module
-    from scanner.memory_scanner import MemoryScanResult
 
     # Helper als nicht verfügbar mocken
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: False)
@@ -58,12 +69,7 @@ def test_scan_command_falls_back_to_direct_when_helper_unavailable(tmp_path, mon
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: MemoryScanResult(
-            collection={100: 4},
-            anchors=[],
-            anchor_matches={},
-            validation={"valid": True, "errors": [], "warnings": [], "cardsCount": 1, "totalCards": 4},
-        ),
+        lambda debug=False: _make_result({100: 4}),
     )
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
@@ -74,18 +80,12 @@ def test_scan_command_falls_back_to_direct_when_helper_unavailable(tmp_path, mon
 def test_scan_command_warns_when_helper_unavailable(tmp_path, monkeypatch, capsys):
     """Bei Fallback auf direkten Scan wird eine Warnung auf stderr ausgegeben."""
     import cli.main as cli_module
-    from scanner.memory_scanner import MemoryScanResult
 
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: False)
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: MemoryScanResult(
-            collection={100: 4},
-            anchors=[],
-            anchor_matches={},
-            validation={"valid": True, "errors": [], "warnings": [], "cardsCount": 1, "totalCards": 4},
-        ),
+        lambda debug=False: _make_result({100: 4}),
     )
 
     main(["scan", "--output", str(tmp_path / "out")])
@@ -97,20 +97,15 @@ def test_scan_command_warns_when_helper_unavailable(tmp_path, monkeypatch, capsy
 def test_run_command_uses_helper_on_macos(tmp_path, monkeypatch):
     """Der 'run' Befehl nutzt auf macOS den Helper, wenn verfügbar."""
     import cli.main as cli_module
-    from scanner.memory_scanner import MemoryScanResult
+    import scanner.memory_scanner as ms_mod
 
     monkeypatch.setattr(cli_module, "detect_platform", lambda: "macos")
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
 
-    helper_result = MemoryScanResult(
-        collection={100: 4, 200: 1},
-        anchors=[],
-        anchor_matches={},
-        validation={"valid": True, "errors": [], "warnings": [], "cardsCount": 2, "totalCards": 5},
-    )
     monkeypatch.setattr(
-        "scanner.helper_client.helper_scan_collection_detailed",
-        lambda debug=False: helper_result,
+        ms_mod,
+        "scan_collection_detailed",
+        lambda **kwargs: _make_result({100: 4, 200: 1}),
     )
 
     exit_code = main(["run", "--output", str(tmp_path / "out")])
@@ -121,19 +116,13 @@ def test_run_command_uses_helper_on_macos(tmp_path, monkeypatch):
 def test_run_command_falls_back_on_macos_without_helper(tmp_path, monkeypatch):
     """Der 'run' Befehl fällt auf direkten Scan zurück, wenn Helper fehlt."""
     import cli.main as cli_module
-    from scanner.memory_scanner import MemoryScanResult
 
     monkeypatch.setattr(cli_module, "detect_platform", lambda: "macos")
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: False)
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: MemoryScanResult(
-            collection={100: 4},
-            anchors=[],
-            anchor_matches={},
-            validation={"valid": True, "errors": [], "warnings": [], "cardsCount": 1, "totalCards": 4},
-        ),
+        lambda debug=False: _make_result({100: 4}),
     )
 
     exit_code = main(["run", "--output", str(tmp_path / "out")])
@@ -155,12 +144,10 @@ def test_scan_command_returns_error_when_helper_fails_and_direct_fails(tmp_path,
 def test_scan_command_returns_error_when_helper_available_but_scan_fails(tmp_path, monkeypatch):
     """Wenn Helper verfügbar aber Helper-Scan None liefert, exit code 1."""
     import cli.main as cli_module
+    import scanner.memory_scanner as ms_mod
 
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
-    monkeypatch.setattr(
-        "scanner.helper_client.helper_scan_collection_detailed",
-        lambda debug=False: None,
-    )
+    monkeypatch.setattr(ms_mod, "scan_collection_detailed", lambda **kwargs: None)
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
     assert exit_code == 1

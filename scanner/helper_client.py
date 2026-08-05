@@ -316,6 +316,196 @@ def helper_scan_ranks(
         return None
 
 
+# --- Persistent Connection (ein Socket für alle Scans) ---
+
+class _PersistentConnection:
+    """Hält eine einzelne UNIX-Socket-Verbindung zum Helper offen.
+
+    Der Helper-Daemon unterstützt Keep-Alive: mehrere newline-terminierte
+    JSON-Requests können über dieselbe Connection gesendet werden.  Das
+    reduziert den Overhead für kombinierte Scans (Collection + Decks + Ranks)
+    von bisher 3 Verbindungen auf eine einzige.
+    """
+
+    def __init__(self, sock_path: str, *, timeout: float = RECV_TIMEOUT) -> None:
+        self._sock_path = sock_path
+        self._timeout = timeout
+        self._sock: socket.socket | None = None
+
+    def _ensure_connected(self) -> socket.socket:
+        if self._sock is not None:
+            return self._sock
+        if not os.path.exists(self._sock_path):
+            raise HelperConnectionError(f"Helper-Socket nicht gefunden: {self._sock_path}")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(CONNECT_TIMEOUT)
+        s.connect(self._sock_path)
+        s.settimeout(self._timeout)
+        self._sock = s
+        return s
+
+    def request(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Sendet ein Request über die persistente Verbindung und liefert die Response."""
+        req_bytes = (json.dumps(req) + "\n").encode("utf-8")
+        try:
+            s = self._ensure_connected()
+            s.sendall(req_bytes)
+            # newline-terminierte Response lesen
+            chunks: list[bytes] = []
+            while True:
+                try:
+                    data = s.recv(RECV_BUF)
+                    if not data:
+                        break
+                    chunks.append(data)
+                    if b"\n" in data or len(data) < RECV_BUF:
+                        break
+                except socket.timeout:
+                    break
+            if not chunks:
+                raise HelperProtocolError("Leere Response vom Helper")
+            raw = b"".join(chunks).strip()
+            return json.loads(raw.decode("utf-8"))
+        except (HelperConnectionError, HelperProtocolError):
+            self.close()
+            raise
+        except (OSError, ConnectionError) as exc:
+            self.close()
+            raise HelperConnectionError(f"Verbindung zu Helper fehlgeschlagen: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            self.close()
+            raise HelperProtocolError(f"Ungültige JSON-Response: {exc}") from exc
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class PersistentHelperBackend:
+    """MemoryBackend über eine persistente Helper-Verbindung.
+
+    Wie HelperBackend, aber nutzt eine bestehende _PersistentConnection
+    statt für jedes read_bytes/list_regions eine neue Verbindung aufzubauen.
+    """
+
+    def __init__(self, conn: _PersistentConnection) -> None:
+        self._conn = conn
+
+    def read_bytes(self, addr: int, size: int) -> bytes | None:
+        try:
+            resp = self._conn.request(
+                {"action": "read_memory", "address": addr, "size": size}
+            )
+            if "error" in resp:
+                return None
+            data_b64 = resp.get("data")
+            if data_b64 is None:
+                return None
+            return base64.b64decode(data_b64)
+        except (HelperConnectionError, HelperProtocolError, HelperError):
+            return None
+
+    def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+        resp = self._conn.request({"action": "list_regions"})
+        if "error" in resp:
+            raise HelperError(resp["error"])
+        regions = resp.get("regions", [])
+        return [(r["address"], r["size"]) for r in regions]
+
+    def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+        resp = self._conn.request({"action": "list_regions"})
+        if "error" in resp:
+            raise HelperError(resp["error"])
+        regions = resp.get("regions", [])
+        return ([(r["address"], r["size"]) for r in regions], None)
+
+
+class PersistentRemoteMemoryAdapter:
+    """RemoteMemoryAdapter über eine persistente Helper-Verbindung.
+
+    Wie RemoteMemoryAdapter, aber nutzt eine bestehende _PersistentConnection.
+    """
+
+    def __init__(self, conn: _PersistentConnection) -> None:
+        self._conn = conn
+        self._pid: int | None = None
+
+    @property
+    def pid(self) -> int:
+        if self._pid is None:
+            resp = self._conn.request({"action": "status"})
+            if resp.get("status") == "ok":
+                self._pid = resp.get("pid") or 0
+            else:
+                self._pid = 0
+        return self._pid  # type: ignore[return-value]
+
+    def read_bytes(self, addr: int, size: int) -> bytes:
+        try:
+            resp = self._conn.request(
+                {"action": "read_memory", "address": addr, "size": size}
+            )
+            if "error" in resp:
+                return b"\x00" * size
+            data_b64 = resp.get("data")
+            if data_b64 is None:
+                return b"\x00" * size
+            return base64.b64decode(data_b64)
+        except (HelperConnectionError, HelperProtocolError, HelperError):
+            return b"\x00" * size
+
+    def read_ptr(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 8)
+        return struct.unpack_from("<Q", raw)[0]
+
+    def read_u32(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 4)
+        return struct.unpack_from("<I", raw)[0]
+
+    def read_i32(self, addr: int) -> int:
+        raw = self.read_bytes(addr, 4)
+        return struct.unpack_from("<i", raw)[0]
+
+    def read_string(self, addr: int) -> str:
+        if addr == 0:
+            return ""
+        raw = self.read_bytes(addr, 256)
+        end = raw.find(b"\x00")
+        if end == -1:
+            end = len(raw)
+        return raw[:end].decode("ascii", errors="replace")
+
+
+def open_helper_connection(
+    sock_path: str = DEFAULT_SOCK_PATH,
+    *,
+    timeout: float = RECV_TIMEOUT,
+) -> _PersistentConnection:
+    """Öffnet eine persistente Helper-Verbindung.
+
+    Für kombinierte Scans (Collection + Decks + Ranks) kann dieselbe
+    Verbindung an alle Scanner übergeben werden, statt für jeden Scan
+    eine eigene Verbindung aufzubauen.
+    """
+    conn = _PersistentConnection(sock_path, timeout=timeout)
+    # Mit Ping prüfen, dass die Verbindung funktioniert
+    resp = conn.request({"action": "ping"})
+    if resp.get("status") != "ok":
+        conn.close()
+        raise HelperConnectionError(f"Helper-Ping fehlgeschlagen: {resp}")
+    return conn
+
+
 # --- Exceptions ---
 
 class HelperError(Exception):

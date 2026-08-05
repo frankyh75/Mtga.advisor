@@ -213,6 +213,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ausgabeverzeichnis (Standard: ./out-memory).",
     )
     scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken pro Anker aus.")
+    scan.add_argument(
+        "--all",
+        action="store_true",
+        help="Kombinierter Scan: Collection + Decks + Ranks in einem Durchlauf (über eine Helper-Verbindung).",
+    )
+    scan.add_argument(
+        "--no-collection",
+        action="store_true",
+        help="Mit --all: Collection-Scan überspringen.",
+    )
+    scan.add_argument(
+        "--no-decks",
+        action="store_true",
+        help="Mit --all: Deck-Scan überspringen.",
+    )
+    scan.add_argument(
+        "--no-ranks",
+        action="store_true",
+        help="Mit --all: Rank-Scan überspringen.",
+    )
+    scan.add_argument(
+        "--no-account",
+        action="store_true",
+        help="Mit --all: Account-Info im Rank-Scan überspringen.",
+    )
 
     deck_scan = subparsers.add_parser(
         "deck-scan",
@@ -720,7 +745,7 @@ def _is_helper_available() -> bool:
 
 def _run_scan_via_helper(args: argparse.Namespace) -> int:
     """Führt den Memory-Scan über den Helper-Daemon aus (sudo-frei)."""
-    from .memory_scanner import scan_collection_detailed
+    from scanner.memory_scanner import scan_collection_detailed
 
     result = scan_collection_detailed(debug=args.debug, use_helper=True)
     if result is None:
@@ -733,7 +758,79 @@ def _run_scan_via_helper(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_scan_all(args: argparse.Namespace) -> int:
+    """Kombinierter Scan: Collection + Decks + Ranks in einem Durchlauf.
+
+    Wenn der Helper-Daemon verfügbar ist, wird eine einzige persistente
+    Socket-Verbindung für alle drei Scans verwendet (sudo-frei).
+    """
+    from scanner.combined_scanner import scan_all
+
+    result = scan_all(
+        debug=args.debug,
+        scan_collection=not args.no_collection,
+        scan_decks=not args.no_decks,
+        scan_ranks=not args.no_ranks,
+        read_account=not args.no_account,
+        print_fn=print,
+    )
+
+    if result.errors and not result.collection and not result.decks and not result.ranks:
+        print(f"❌ Kombinierter Scan fehlgeschlagen: {'; '.join(result.errors)}")
+        return 1
+
+    # Collection-Artefakte schreiben
+    if result.collection is not None:
+        collection_path, run_report_path = write_collection_artifacts(
+            result.collection.collection, args.output, scan_result=result.collection
+        )
+        print(f"\nCollection exportiert: {collection_path}")
+        print(f"Run-Report: {run_report_path}")
+    elif not args.no_collection:
+        print("⚠ Collection-Scan: keine Daten")
+
+    # Deck-Artefakte schreiben
+    if result.decks:
+        import json as _json
+        decks_path = args.output / "decks.json"
+        args.output.mkdir(parents=True, exist_ok=True)
+        decks_path.write_text(
+            _json.dumps(result.decks, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Decks exportiert: {decks_path} ({len(result.decks)} Decks)")
+    elif not args.no_decks:
+        print("⚠ Deck-Scan: keine Decks gefunden")
+
+    # Rank-Artefakte schreiben
+    if result.ranks or result.account:
+        import json as _json
+        rank_data = {
+            "ranks": result.ranks,
+            "account": result.account,
+            "warnings": result.rank_warnings,
+        }
+        rank_path = args.output / "ranks.json"
+        args.output.mkdir(parents=True, exist_ok=True)
+        rank_path.write_text(
+            _json.dumps(rank_data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Ränge exportiert: {rank_path}")
+    elif not args.no_ranks:
+        print("⚠ Rank-Scan: keine Ränge gefunden")
+
+    if result.errors:
+        print(f"\nWarnungen: {'; '.join(result.errors)}")
+
+    return 0
+
+
 def _run_scan(args: argparse.Namespace) -> int:
+    # Kombinierter Scan (Collection + Decks + Ranks in einem Durchlauf)
+    if getattr(args, "all", False):
+        return _run_scan_all(args)
+
     # Auto-Detect: Helper → direkt (sudo-frei), sonst Fallback mit Warnung
     if _is_helper_available():
         return _run_scan_via_helper(args)

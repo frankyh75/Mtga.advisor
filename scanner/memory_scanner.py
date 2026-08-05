@@ -362,6 +362,7 @@ def scan_collection_detailed(
     debug: bool = False,
     use_helper: bool | None = None,
     sock_path: str | None = None,
+    backend: MemoryBackend | None = None,
 ) -> MemoryScanResult | None:
     """Hauptfunktion: Scannt den MTGA-Speicher nach der Collection.
 
@@ -373,6 +374,9 @@ def scan_collection_detailed(
         use_helper: True → Helper erzwingen; False → direkter Scan;
                      None → auto-detect (Helper wenn verfügbar).
         sock_path: Pfad zum Helper-UNIX-Socket (sonst Default).
+        backend:   Wenn gesetzt, wird dieses Backend verwendet statt ein
+                   neues zu erstellen.  Erlaubt es, eine persistente
+                   Helper-Verbindung für mehrere Scans wiederzuverwenden.
 
     Returns:
         MemoryScanResult oder None bei Fehler.
@@ -384,22 +388,30 @@ def scan_collection_detailed(
     if sock_path is None:
         sock_path = _default_sock
 
-    if use_helper is None:
-        use_helper = is_helper_available(sock_path)
+    sudo_hint = "   - Der Helper-Daemon läuft (sudo-frei)"
 
-    if use_helper:
-        print_fn("🔄 Scan über Helper-Daemon (sudo-frei)...")
-        backend: MemoryBackend = HelperBackend(sock_path)
-        sudo_hint = "   - Der Helper-Daemon läuft (sudo-frei)"
+    if backend is not None:
+        # Externes Backend (z.B. PersistentHelperBackend für kombinierten Scan)
+        pass
     else:
-        candidate_names = tuple(process_names) if process_names is not None else get_macos_mtga_process_names()
-        if not candidate_names:
-            candidate_names = (get_macos_mtga_process_name(),)
-        pm = _attach_process(candidate_names, print_fn=print_fn)
-        if pm is None:
-            return None
-        backend = PymemBackend(pm)
-        sudo_hint = "   - Das Script mit sudo läuft"
+        if use_helper is None:
+            use_helper = is_helper_available(sock_path)
+
+        if use_helper:
+            print_fn("🔄 Scan über Helper-Daemon (sudo-frei)...")
+            backend = HelperBackend(sock_path)
+            sudo_hint = "   - Der Helper-Daemon läuft (sudo-frei)"
+        else:
+            candidate_names = tuple(process_names) if process_names is not None else get_macos_mtga_process_names()
+            if not candidate_names:
+                candidate_names = (get_macos_mtga_process_name(),)
+            pm = _attach_process(candidate_names, print_fn=print_fn)
+            if pm is None:
+                return None
+            backend = PymemBackend(pm)
+            sudo_hint = "   - Das Script mit sudo läuft"
+
+    assert backend is not None  # durch einen der obigen Zweige gesetzt
 
     # --- Gemeinsamer Code ---
     if db_loader is None:

@@ -553,6 +553,49 @@ static int check_peer_credentials(int client_fd) {
     return -1;
 }
 
+/* Process a single JSON request and send the response back on client_fd.
+ * Returns 0 on success, -1 on read error / connection closed, 1 if the
+ * client requested "shutdown" (so the caller can stop the server loop). */
+static int process_request(int client_fd, const char *buf) {
+    char *response = NULL;
+
+    char *action = json_get_string(buf, "action");
+    if (!action) {
+        response = build_error("Missing 'action' field");
+    } else if (strcmp(action, "ping") == 0) {
+        response = build_ok();
+    } else if (strcmp(action, "status") == 0) {
+        response = handle_status();
+    } else if (strcmp(action, "shutdown") == 0) {
+        response = build_ok();
+        free(action);
+        if (response) {
+            size_t rlen = strlen(response);
+            ssize_t written = write(client_fd, response, rlen);
+            (void)written;
+            free(response);
+        }
+        return 1;  /* signal shutdown */
+    } else if (strcmp(action, "list_regions") == 0) {
+        response = handle_list_regions();
+    } else if (strcmp(action, "read_memory") == 0) {
+        response = handle_read_memory(buf);
+    } else {
+        char err[160];
+        snprintf(err, sizeof(err), "Unknown action: %s", action);
+        response = build_error(err);
+    }
+    free(action);
+
+    if (response) {
+        size_t rlen = strlen(response);
+        ssize_t written = write(client_fd, response, rlen);
+        (void)written;
+        free(response);
+    }
+    return 0;
+}
+
 static void handle_client(int client_fd) {
     /* Peer credential check — reject unauthorized clients early */
     if (check_peer_credentials(client_fd) != 0) {
@@ -563,56 +606,33 @@ static void handle_client(int client_fd) {
     }
 
     char buf[BUF_SIZE];
-    ssize_t total = 0;
 
-    /* Read until we have a complete JSON object (simplified: read all available) */
-    while (total < (ssize_t)sizeof(buf) - 1) {
-        ssize_t n = read(client_fd, buf + total, sizeof(buf) - 1 - total);
-        if (n <= 0) break;
-        total += n;
-        buf[total] = '\0';
-        /* Check if we've read a complete JSON line */
-        if (buf[total - 1] == '\n' || buf[total - 1] == '}') break;
-    }
-    if (total <= 0) return;
-    buf[total] = '\0';
+    /* Keep-alive loop: the client may send multiple JSON requests on the
+     * same connection (e.g. a combined collection+deck+rank scan uses one
+     * socket for all three). We read newline-terminated JSON lines and
+     * dispatch them one by one until the client closes or sends shutdown. */
+    while (running) {
+        ssize_t total = 0;
 
-    char *response = NULL;
+        while (total < (ssize_t)sizeof(buf) - 1) {
+            ssize_t n = read(client_fd, buf + total, sizeof(buf) - 1 - total);
+            if (n <= 0) return;  /* client closed or error */
+            total += n;
+            buf[total] = '\0';
+            if (buf[total - 1] == '\n') break;
+        }
+        if (total <= 0) return;
+        /* Strip trailing newline for the parser */
+        while (total > 0 && (buf[total - 1] == '\n' || buf[total - 1] == '\r')) {
+            buf[--total] = '\0';
+        }
+        if (total == 0) continue;
 
-    /* Parse action */
-    char *action = json_get_string(buf, "action");
-    if (!action) {
-        response = build_error("Missing 'action' field");
-        goto send_response;
-    }
-
-    if (strcmp(action, "ping") == 0) {
-        response = build_ok();
-    } else if (strcmp(action, "status") == 0) {
-        response = handle_status();
-    } else if (strcmp(action, "shutdown") == 0) {
-        response = build_ok();
-        running = 0;
-    } else if (strcmp(action, "list_regions") == 0) {
-        response = handle_list_regions();
-    } else if (strcmp(action, "read_memory") == 0) {
-        response = handle_read_memory(buf);
-    } else {
-        char err[160];
-        snprintf(err, sizeof(err), "Unknown action: %s", action);
-        response = build_error(err);
-    }
-
-    free(action);
-
-send_response:
-    if (response) {
-        /* Write response + newline (Python client expects newline-terminated or
-         * just reads until connection close) */
-        size_t rlen = strlen(response);
-        ssize_t written = write(client_fd, response, rlen);
-        (void)written;
-        free(response);
+        int rc = process_request(client_fd, buf);
+        if (rc == 1) {  /* shutdown requested */
+            running = 0;
+            return;
+        }
     }
 }
 
