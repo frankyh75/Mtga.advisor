@@ -785,29 +785,38 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
             print("⚠ IL2CPP: Scan fehlgeschlagen")
 
     # --- Pattern-based Scan ---
-    # In "auto" mode, pattern-scan is a fallback for when IL2CPP fails to
-    # find decks — it's redundant (and, on this codebase, memory-hungry
-    # enough to get OOM-killed) once IL2CPP already succeeded, so skip it
-    # entirely in that case rather than deriving anchors from IL2CPP's own
-    # results just to re-scan for the same decks.
-    il2cpp_already_succeeded = bool(il2cpp_result and il2cpp_result.decks)
+    # In "auto" mode, only skip the fallback when IL2CPP was clean.
+    # If IL2CPP produced warnings, let pattern-scan try to recover the
+    # missing or partially parsed decks.
+    il2cpp_clean_success = bool(il2cpp_result and il2cpp_result.decks and not il2cpp_result.warnings)
     pattern_result: DeckScanResult | None = None
-    if method == "pattern" or (method == "auto" and not il2cpp_already_succeeded):
+    if method == "pattern" or (method == "auto" and not il2cpp_clean_success):
         anchor_ids = args.anchors or []
         if not anchor_ids and method == "pattern":
             _error("--anchors erforderlich für Pattern-Scan (oder --method auto verwenden)")
             return 1
         if not anchor_ids and method == "auto":
-            # Versuche gespeicherte Anker oder Collection
-            from scanner.memory_scanner import _anchor_file
-            anchor_file = _anchor_file()
-            if anchor_file.exists():
-                import json as _json
-                try:
-                    saved = _json.loads(anchor_file.read_text(encoding="utf-8"))
-                    anchor_ids = [a[0] for a in saved if isinstance(a, (list, tuple)) and len(a) >= 1]
-                except (OSError, ValueError):
-                    pass
+            # Derive a bounded anchor set from IL2CPP results when the
+            # fallback is actually needed. This preserves the old recovery
+            # path without paying for a pattern scan on clean successes.
+            if il2cpp_result and il2cpp_result.decks:
+                anchor_ids = list({
+                    grp_id
+                    for deck in il2cpp_result.decks
+                    for pile in deck.piles.values()
+                    for grp_id in pile
+                })[:20]
+            if not anchor_ids:
+                # Fallback: previously persisted anchors from a collection scan.
+                from scanner.memory_scanner import _anchor_file
+                anchor_file = _anchor_file()
+                if anchor_file.exists():
+                    import json as _json
+                    try:
+                        saved = _json.loads(anchor_file.read_text(encoding="utf-8"))
+                        anchor_ids = [a[0] for a in saved if isinstance(a, (list, tuple)) and len(a) >= 1]
+                    except (OSError, ValueError):
+                        pass
             if not anchor_ids:
                 _error("Keine Anker für Pattern-Scan verfügbar. Verwende --anchors oder führe vorher 'scan' aus.")
                 return 1
@@ -885,10 +894,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
             "cards": deck_entry["cards"],
             "cardsById": deck_entry["cardsById"],
         }
-        deck_path.write_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        _write_json_artifact_safe(deck_path, payload, all_decks, print_fn=print)
 
     # Container file (decks-container.v1)
     container_path = output_dir / "decks-container.json"
@@ -906,10 +912,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
         ],
         "warnings": warnings_all,
     }
-    container_path.write_text(
-        json.dumps(container_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_artifact_safe(container_path, container_payload, all_decks, print_fn=print)
 
     # Also write decks.json (compatible with dashboard/advisor which expect this format)
     decks_json_path = output_dir / "decks.json"
@@ -928,10 +931,7 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
         ],
         "warnings": warnings_all,
     }
-    decks_json_path.write_text(
-        json.dumps(decks_json_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_artifact_safe(decks_json_path, decks_json_payload, all_decks, print_fn=print)
 
     print(f"\n📊 {len(all_decks)} Decks gescannt")
     print(f"Container: {container_path}")
@@ -943,6 +943,40 @@ def _run_deck_scan(args: argparse.Namespace) -> int:
 def _iso_now_cli() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _write_json_artifact_safe(
+    path: Path,
+    payload: dict[str, Any],
+    all_decks: list[dict[str, Any]],
+    *,
+    print_fn: Callable[..., None] = print,
+) -> None:
+    """Write a JSON artifact with a small plausibility guard.
+
+    If a scan looks suspicious and the target file already exists, keep a
+    backup of the previous file before writing the new result.
+    """
+    min_cards_per_deck = 40
+    plausible = bool(all_decks) and any(
+        len(d.get("cards", {}).get("Main", [])) >= min_cards_per_deck
+        for d in all_decks
+    )
+
+    if path.exists() and not plausible:
+        bak_path = path.with_suffix(path.suffix + ".bak")
+        import shutil
+        shutil.copy2(str(path), str(bak_path))
+        print_fn(
+            f"⚠ Neues Ergebnis scheint unplausibel (keine ausreichende Deckgröße).\n"
+            f"  Alte Datei gesichert nach: {bak_path}\n"
+            f"  Neues Ergebnis wird trotzdem geschrieben — prüfe es manuell."
+        )
+
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _piles_to_card_dict(

@@ -1,5 +1,8 @@
 # Deck Advisor Roadmap v2 — Ist-Zustand + Sprint-Plan
 
+Status: historisch / weitgehend superseded. Die aktive Planung liegt in
+`docs/deck-advisor-roadmap-v4.md`.
+
 Datum: 2026-08-04
 
 ## Verhältnis zu anderen Docs
@@ -80,7 +83,7 @@ auch nicht als Stub.
 Funktioniert: `out/collection.json` (via `scanner/memory_scanner.py`),
 `out/decks.json` (via `cli/main.py`, jetzt mit vollständiger IL2CPP-Navigation).
 
-## Neue Anforderungen (dieser Runde)
+## Neue Anforderungen (historisch; in v4 überführt)
 
 1. **Deck-Suchfilter** — Textfeld über der Deck-Liste, filtert nach
    Deckname (Client-seitig, kein neuer Endpoint nötig — `decks.json` ist

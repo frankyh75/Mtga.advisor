@@ -143,6 +143,68 @@ def test_scan_command_exports_memory_scan_result(tmp_path: Path, monkeypatch: py
     assert payload["cards"] == {"100": 4, "200": 1}
 
 
+def test_deck_scan_auto_runs_pattern_on_il2cpp_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli.main as cli_module
+    from scanner.deck_scanner import DeckScanResult
+    from scanner.il2cpp_nav import Il2CppDeckResult, Il2CppScanResult
+
+    calls: list[list[int]] = []
+
+    monkeypatch.setattr(cli_module, "scan_decks_il2cpp", lambda adapter, debug=False: Il2CppScanResult(
+        decks=[Il2CppDeckResult(deck_id=1, name="Tiny Deck", piles={1: {100: 1}}, raw_address=0)],
+        warnings=["partial parse"],
+    ))
+    monkeypatch.setattr(
+        cli_module,
+        "scan_decks",
+        lambda pm, anchor_ids: calls.append(list(anchor_ids)) or DeckScanResult(decks=[], warnings=["fallback"]),
+    )
+    monkeypatch.setattr("scanner.memory_scanner._attach_process", lambda names: object())
+
+    exit_code = main(["deck-scan", "--method", "auto", "--output", str(tmp_path / "out")])
+
+    assert exit_code == 0
+    assert calls == [[100]]
+
+
+def test_deck_scan_backups_existing_outputs_on_unplausible_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli.main as cli_module
+    from scanner.il2cpp_nav import Il2CppDeckResult, Il2CppScanResult
+
+    out = tmp_path / "out"
+    decks_dir = out / "decks"
+    decks_dir.mkdir(parents=True)
+    (out / "decks-container.json").write_text("old container", encoding="utf-8")
+    (out / "decks.json").write_text("old decks", encoding="utf-8")
+    (decks_dir / "deck-1.json").write_text("old deck", encoding="utf-8")
+
+    monkeypatch.setattr(
+        cli_module,
+        "scan_decks_il2cpp",
+        lambda adapter, debug=False: Il2CppScanResult(
+            decks=[Il2CppDeckResult(deck_id=1, name="Tiny Deck", piles={1: {100: 1}}, raw_address=0)],
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(cli_module, "scan_decks", lambda pm, anchor_ids: pytest.fail("pattern scan should not run"))
+    monkeypatch.setattr("scanner.memory_scanner._attach_process", lambda names: object())
+
+    exit_code = main(["deck-scan", "--method", "auto", "--output", str(out)])
+
+    assert exit_code == 0
+    assert (out / "decks-container.json.bak").read_text(encoding="utf-8") == "old container"
+    assert (out / "decks.json.bak").read_text(encoding="utf-8") == "old decks"
+    assert (decks_dir / "deck-1.json.bak").read_text(encoding="utf-8") == "old deck"
+    container = json.loads((out / "decks-container.json").read_text(encoding="utf-8"))
+    assert container["schema"] == "decks-container.v1"
+
+
 def test_run_command_uses_memory_scan_on_macos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cli.main as cli_module
 

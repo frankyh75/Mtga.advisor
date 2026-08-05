@@ -1,5 +1,8 @@
 # Deck Advisor Roadmap
 
+Status: historische Zielbeschreibung. Die aktive Planung liegt jetzt in
+`docs/deck-advisor-roadmap-v4.md`.
+
 Datum: 2026-08-04
 
 ## Ziel
@@ -356,4 +359,3 @@ Der Advisor gilt als brauchbar, wenn ein Nutzer in der GUI:
 - keine Winrate-Versprechen ohne belastbare Daten
 - keine Empfehlung außerhalb der gewählten Farbidentität
 - keine harte Craft-Empfehlung ohne ausreichende Evidenz
-
