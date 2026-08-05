@@ -2,34 +2,38 @@
 #
 # install.sh — Installiert den mtga-helper als LaunchDaemon unter root.
 #
+# Ersetzt das alte SMJobBless-Verfahren (deprecated seit macOS 13)
+# durch den direkten launchctl-Weg: Binary + Plist kopieren, dann
+# 'launchctl load'.
+#
 # Was dieses Skript macht:
-#   1.  Bundle nach /Library/PrivilegedHelperTools/ kopieren
-#   2.  LaunchDaemon-plist nach /Library/LaunchDaemons/ kopieren
-#   3.  Daemon laden (launchctl bootstrap / load)
+#   1.  Binary nach /Library/PrivilegedHelperTools/mtga-helper kopieren
+#   2.  LaunchDaemon-plist nach /Library/LaunchDaemons/com.mtga.helper.plist kopieren
+#   3.  Daemon laden (launchctl load)
 #   4.  Daemon-Status verifizieren
 #   5.  Socket-Verfügbarkeit prüfen
 #
 # Voraussetzungen:
-#   - make -C helper wurde erfolgreich ausgeführt (Bundle existiert)
+#   - make -C helper wurde erfolgreich ausgeführt (Binary existiert)
 #   - Skript wird mit sudo ausgeführt (root-Rechte für /Library)
 #
 # Usage:
 #   sudo ./helper/install.sh
 #   sudo ./helper/install.sh --uninstall
+#   sudo ./helper/install.sh --status
 #
 # Exit codes:
-#   0 — Installation erfolgreich
+#   0 — Erfolg (bzw. Status-Check: Daemon läuft)
 #   1 — Voraussetzungen nicht erfüllt oder Installation fehlgeschlagen
-#
+#   2 — Status-Check: Daemon läuft nicht (nur bei --status)
 
 set -euo pipefail
 
 # --- Konstanten ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BUNDLE_SRC="$SCRIPT_DIR/build/mtga-helper.bundle"
-BUNDLE_DST="/Library/PrivilegedHelperTools/mtga-helper.bundle"
+BIN_SRC="$SCRIPT_DIR/build/mtga-helper"
+BIN_DST="/Library/PrivilegedHelperTools/mtga-helper"
 PLIST_SRC="$SCRIPT_DIR/launchd.plist"
 PLIST_DST="/Library/LaunchDaemons/com.mtga.helper.plist"
 DAEMON_LABEL="com.mtga.helper"
@@ -60,12 +64,12 @@ check_root() {
 check_prerequisites() {
     info "Prüfe Voraussetzungen..."
 
-    if [[ ! -d "$BUNDLE_SRC" ]]; then
-        fail "Helper-Bundle nicht gefunden: $BUNDLE_SRC"
+    if [[ ! -f "$BIN_SRC" ]]; then
+        fail "Helper-Binary nicht gefunden: $BIN_SRC"
         echo "  Bitte zuerst ausführen: make -C helper"
         exit 1
     fi
-    pass "Helper-Bundle gefunden: $BUNDLE_SRC"
+    pass "Helper-Binary gefunden: $BIN_SRC"
 
     if [[ ! -f "$PLIST_SRC" ]]; then
         fail "LaunchDaemon-plist nicht gefunden: $PLIST_SRC"
@@ -73,13 +77,38 @@ check_prerequisites() {
     fi
     pass "LaunchDaemon-plist gefunden: $PLIST_SRC"
 
-    # Code-Signing prüfen (Warnung, kein Fehler)
-    if ! codesign -dv "$BUNDLE_SRC" 2>/dev/null; then
-        info "WARN: Bundle ist nicht signiert. SMJobBless wird fehlschlagen."
-        info "      Bitte ausführen: make -C helper sign"
-    else
-        pass "Bundle ist signiert"
+    if [[ ! -x "$BIN_SRC" ]]; then
+        fail "Helper-Binary ist nicht ausführbar: $BIN_SRC"
+        echo "  Bitte ausführen: chmod +x $BIN_SRC"
+        exit 1
     fi
+    pass "Helper-Binary ist ausführbar"
+}
+
+# --- Daemon entladen (Hilfsfunktion) ---
+unload_daemon() {
+    # Primär: launchctl unload (wie im Task gefordert)
+    if launchctl unload "$PLIST_DST" 2>/dev/null; then
+        return 0
+    fi
+    # Fallback für neuere macOS-Versionen
+    if launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# --- Daemon laden (Hilfsfunktion) ---
+load_daemon() {
+    # Primär: launchctl load (wie im Task gefordert)
+    if launchctl load "$PLIST_DST" 2>/dev/null; then
+        return 0
+    fi
+    # Fallback für neuere macOS-Versionen
+    if launchctl bootstrap system "$PLIST_DST" 2>/dev/null; then
+        return 0
+    fi
+    return 1
 }
 
 # --- Deinstallation ---
@@ -88,20 +117,81 @@ uninstall() {
 
     # Daemon entladen
     if launchctl list "$DAEMON_LABEL" &>/dev/null; then
-        launchctl bootout system/"$DAEMON_LABEL" 2>/dev/null || \
-        launchctl unload "$PLIST_DST" 2>/dev/null || true
-        pass "Daemon entladen: $DAEMON_LABEL"
+        if unload_daemon; then
+            pass "Daemon entladen: $DAEMON_LABEL"
+        else
+            fail "Daemon konnte nicht entladen werden"
+            echo "  Manuell versuchen: sudo launchctl unload $PLIST_DST"
+        fi
     else
         info "Daemon war nicht geladen"
     fi
 
     # Dateien entfernen
     rm -f "$PLIST_DST" && pass "plist entfernt: $PLIST_DST" || true
-    rm -rf "$BUNDLE_DST" && pass "Bundle entfernt: $BUNDLE_DST" || true
+    rm -f "$BIN_DST" && pass "Binary entfernt: $BIN_DST" || true
     rm -f "$SOCK_PATH" && pass "Socket entfernt: $SOCK_PATH" || true
     rm -f "$HELPER_LOG" "$HELPER_ERR" 2>/dev/null || true
 
     pass "Deinstallation abgeschlossen"
+}
+
+# --- Status-Check ---
+status() {
+    info "Status-Check für $DAEMON_LABEL"
+    echo ""
+
+    local daemon_running=false
+    local socket_present=false
+
+    # launchctl list | grep com.mtga.helper
+    if launchctl list "$DAEMON_LABEL" &>/dev/null; then
+        local pid
+        pid="$(launchctl list "$DAEMON_LABEL" 2>/dev/null | awk '/"PID"/ {gsub(/[^0-9]/, "", $0); print}')" || pid="-"
+        pass "Daemon geladen: $DAEMON_LABEL (PID: ${pid:--})"
+        launchctl list "$DAEMON_LABEL" 2>/dev/null | head -20
+        daemon_running=true
+    else
+        fail "Daemon ist nicht geladen"
+        info "  LaunchDaemon-Liste (Filter):"
+        launchctl list 2>/dev/null | grep -i mtga || echo "  (kein Eintrag mit 'mtga' gefunden)"
+    fi
+
+    echo ""
+
+    # ls -la /var/run/mtga-helper.sock
+    if [[ -S "$SOCK_PATH" ]]; then
+        pass "Socket vorhanden:"
+        ls -la "$SOCK_PATH"
+        socket_present=true
+    else
+        fail "Socket nicht vorhanden: $SOCK_PATH"
+    fi
+
+    echo ""
+
+    # Binary im Ziel?
+    if [[ -f "$BIN_DST" ]]; then
+        pass "Binary installiert: $BIN_DST"
+    else
+        fail "Binary nicht installiert: $BIN_DST"
+    fi
+
+    # Plist im Ziel?
+    if [[ -f "$PLIST_DST" ]]; then
+        pass "Plist installiert: $PLIST_DST"
+    else
+        fail "Plist nicht installiert: $PLIST_DST"
+    fi
+
+    echo ""
+    if $daemon_running && $socket_present; then
+        pass "Helper ist betriebsbereit."
+        return 0
+    else
+        fail "Helper ist NICHT betriebsbereit."
+        return 2
+    fi
 }
 
 # --- Installation ---
@@ -117,18 +207,18 @@ install() {
     # 2. Alte Version stoppen und entfernen
     if launchctl list "$DAEMON_LABEL" &>/dev/null; then
         info "Alter Daemon läuft — wird entladen..."
-        launchctl bootout system/"$DAEMON_LABEL" 2>/dev/null || \
-        launchctl unload "$PLIST_DST" 2>/dev/null || true
+        unload_daemon || true
         sleep 1
     fi
-    rm -rf "$BUNDLE_DST"
+    rm -f "$BIN_DST"
     rm -f "$PLIST_DST"
     rm -f "$SOCK_PATH"
 
-    # 3. Bundle kopieren
-    cp -R "$BUNDLE_SRC" "$BUNDLE_DST"
-    chmod 755 "$BUNDLE_DST"
-    pass "Bundle kopiert: $BUNDLE_DST"
+    # 3. Binary kopieren
+    cp "$BIN_SRC" "$BIN_DST"
+    chmod 755 "$BIN_DST"
+    chown root:wheel "$BIN_DST"
+    pass "Binary kopiert: $BIN_DST"
 
     # 4. LaunchDaemon-plist kopieren
     cp "$PLIST_SRC" "$PLIST_DST"
@@ -136,18 +226,15 @@ install() {
     chown root:wheel "$PLIST_DST"
     pass "plist installiert: $PLIST_DST"
 
-    # 5. Daemon laden (macOS 13+: bootstrap, Fallback: load)
+    # 5. Daemon laden (launchctl load)
     info "Lade LaunchDaemon..."
-    if launchctl bootstrap system "$PLIST_DST" 2>/dev/null; then
-        pass "Daemon via bootstrap geladen"
-    elif launchctl load "$PLIST_DST" 2>/dev/null; then
-        pass "Daemon via load geladen"
-    else
+    if ! load_daemon; then
         fail "Daemon konnte nicht geladen werden"
-        echo "  Manuell versuchen: launchctl load $PLIST_DST"
+        echo "  Manuell versuchen: sudo launchctl load $PLIST_DST"
         echo "  Logs: log show --predicate 'process == \"mtga-helper\"' --last 5m"
         exit 1
     fi
+    pass "Daemon geladen via launchctl load"
 
     # 6. Daemon-Status verifizieren
     sleep 2
@@ -189,6 +276,9 @@ install() {
     echo "Testen:"
     echo "  echo '{\"action\":\"ping\"}' | nc -U $SOCK_PATH"
     echo ""
+    echo "Status prüfen:"
+    echo "  sudo $0 --status"
+    echo ""
     echo "Deinstallieren:"
     echo "  sudo $0 --uninstall"
 }
@@ -197,11 +287,22 @@ install() {
 main() {
     check_root
 
-    if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
-        uninstall
-    else
-        install
-    fi
+    case "${1:-}" in
+        --uninstall|-u)
+            uninstall
+            ;;
+        --status|-s)
+            status
+            ;;
+        ""|install|--install|-i)
+            install
+            ;;
+        *)
+            fail "Unbekannter Parameter: $1"
+            echo "Usage: sudo $0 [--uninstall|--status]"
+            exit 1
+            ;;
+    esac
 }
 
 main "$@"

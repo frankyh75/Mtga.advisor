@@ -55,5 +55,14 @@
 
     <key>RunAtLoad</key>
     <false/>
+
+    <!-- In welchen Session-Typen der Daemon geladen wird.
+         Aqua = GUI-Session, Background = Hintergrunddienste.
+         Beide erlauben, dass CLI-Tools und GUI-App den Daemon erreichen. -->
+    <key>LimitLoadToSessionType</key>
+    <array>
+        <string>Aqua</string>
+        <string>Background</string>
+    </array>
 </dict>
 </plist>

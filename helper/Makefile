@@ -83,9 +83,13 @@ sign: bundle
 		echo "Signatur fertig (ad-hoc). SMJobBless benötigt ein echtes Zertifikat."; \
 	fi
 
-# --- Install: Bundle + LaunchDaemon installieren ---
-install: all
+# --- Install: Binary + LaunchDaemon installieren ---
+# Da install.sh launchctl load nutzt (kein SMJobBless mehr), wird nur das
+# nackte Binary benötigt — nicht das signierte Bundle. Daher Abhängigkeit
+# von 'build' statt von 'all' (welches bundle+sign ausführt).
+install: build
 	@echo "Installiere mtga-helper (erfordert sudo)..."
+	@chmod +x ./install.sh
 	./install.sh
 
 # --- Verify: Code-Signing und Bundle prüfen ---
