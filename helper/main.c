@@ -366,7 +366,6 @@ static mach_port_t attach_to_process(pid_t pid);
 static int get_writable_regions(mach_port_t task, region_t *regions, int max_regions);
 static void *read_memory(mach_port_t task, mach_vm_address_t addr,
                          mach_vm_size_t size, mach_vm_size_t *out_size);
-static char *handle_mock_scan(const char *action);
 
 /* Max bytes per read_memory request (16 MB) */
 #define MAX_READ_SIZE (16 * 1024 * 1024)
@@ -477,48 +476,6 @@ static char *handle_read_memory(const char *request) {
 }
 
 /* --- Mock scan handler (test-mode only) --- */
-
-/* Returns mock JSON for scan/deck_scan/rank_scan actions.
- * Only called when g_test_mode is true. Caller frees. */
-static char *handle_mock_scan(const char *action) {
-    if (strcmp(action, "scan") == 0) {
-        /* Mock collection scan: a handful of well-known card IDs */
-        return strdup(
-            "{\"status\":\"ok\","
-            "\"cards\":{\"79156\":4,\"79157\":3,\"79158\":2,\"79159\":1,"
-            "\"79000\":2,\"79001\":4,\"79002\":3,\"79003\":2,"
-            "\"78500\":1,\"78501\":4,\"78502\":3,\"78503\":2},"
-            "\"anchor_matches\":{\"79156\":4,\"79001\":4},"
-            "\"validation\":{\"valid\":true,\"total_cards\":31,\"unique_cards\":12},"
-            "\"scan_stats\":{\"regions\":2,\"bytes_scanned\":3145728,"
-            "\"read_failures\":0,\"matches\":12,\"region_error\":\"\"}"
-            "}");
-    }
-    if (strcmp(action, "deck_scan") == 0) {
-        /* Mock deck scan: two sample decks */
-        return strdup(
-            "{\"status\":\"ok\","
-            "\"decks\":["
-            "{\"name\":\"Mock Deck A\",\"cards\":[{\"grpId\":79156,\"quantity\":4},"
-            "{\"grpId\":79157,\"quantity\":3}],\"sideboard\":[]},"
-            "{\"name\":\"Mock Deck B\",\"cards\":[{\"grpId\":79000,\"quantity\":2},"
-            "{\"grpId\":79001,\"quantity\":4}],\"sideboard\":[]}"
-            "]}");
-    }
-    if (strcmp(action, "rank_scan") == 0) {
-        /* Mock rank/season scan */
-        return strdup(
-            "{\"status\":\"ok\","
-            "\"ranks\":{\"constructed\":{\"rank\":1,\"tier\":0,\"step\":0,"
-            "\"season_rank\":\"Mythic\",\"season_percentile\":99.5},"
-            "\"limited\":{\"rank\":2,\"tier\":0,\"step\":0,"
-            "\"season_rank\":\"Diamond\",\"season_percentile\":85.2}},"
-            "\"account\":{\"player_name\":\"MockPlayer\",\"player_id\":12345,"
-            "\"screen_name\":\"MockPlayer\"}"
-            "}");
-    }
-    return build_error("Unknown mock action");
-}
 
 /* --- Socket server --- */
 
@@ -640,11 +597,6 @@ static void handle_client(int client_fd) {
         response = handle_list_regions();
     } else if (strcmp(action, "read_memory") == 0) {
         response = handle_read_memory(buf);
-    } else if (g_test_mode &&
-               (strcmp(action, "scan") == 0 ||
-                strcmp(action, "deck_scan") == 0 ||
-                strcmp(action, "rank_scan") == 0)) {
-        response = handle_mock_scan(action);
     } else {
         char err[160];
         snprintf(err, sizeof(err), "Unknown action: %s", action);

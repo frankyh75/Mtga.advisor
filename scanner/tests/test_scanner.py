@@ -179,47 +179,35 @@ def test_scan_process_memory_scans_full_regions(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(pattern_scanner, "REGION_SCAN_CHUNK_SIZE", 8)
     region_size = 16
 
-    class FakePm:
-        task = 1
-
-        def read_bytes(self, addr: int, size: int) -> bytes:
+    class FakeBackend:
+        def read_bytes(self, addr: int, size: int) -> bytes | None:
             if addr == base_addr + 5:
                 return b"x" + needle + b"y" * (size - 5)
             return b"x" * size
 
-    def fake_read_bytes_silent(pm: object, addr: int, size: int) -> bytes:
-        return pm.read_bytes(addr, size)
+        def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+            return [(base_addr, region_size)]
 
-    monkeypatch.setattr(
-        pattern_scanner,
-        "_iterate_regions_with_error",
-        lambda pm: ([(base_addr, region_size)], None),
-    )
-    monkeypatch.setattr(pattern_scanner, "_read_bytes_silent", fake_read_bytes_silent)
+        def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+            return ([(base_addr, region_size)], None)
 
-    found = pattern_scanner.scan_process_memory(FakePm(), needle)
+    found = pattern_scanner.scan_process_memory(FakeBackend(), needle)
 
     assert found == [base_addr + 6]
 
 
 def test_scan_process_memory_with_stats_reports_scan_scope(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakePm:
-        task = 1
-
-        def read_bytes(self, addr: int, size: int) -> bytes:
+    class FakeBackend:
+        def read_bytes(self, addr: int, size: int) -> bytes | None:
             return b"abcMTGAxyz"
 
-    def fake_read_bytes_silent(pm: object, addr: int, size: int) -> bytes:
-        return pm.read_bytes(addr, size)
+        def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+            return [(0x5000, 10)]
 
-    monkeypatch.setattr(
-        pattern_scanner,
-        "_iterate_regions_with_error",
-        lambda pm: ([(0x5000, 10)], None),
-    )
-    monkeypatch.setattr(pattern_scanner, "_read_bytes_silent", fake_read_bytes_silent)
+        def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+            return ([(0x5000, 10)], None)
 
-    result = pattern_scanner.scan_process_memory_with_stats(FakePm(), b"MTGA")
+    result = pattern_scanner.scan_process_memory_with_stats(FakeBackend(), b"MTGA")
 
     assert result.addresses == [0x5003]
     assert result.stats.regions == 1
@@ -232,25 +220,19 @@ def test_scan_process_memory_with_stats_reports_scan_scope(monkeypatch: pytest.M
 def test_scan_process_memory_many_reads_region_once(monkeypatch: pytest.MonkeyPatch) -> None:
     reads: list[tuple[int, int]] = []
 
-    class FakePm:
-        task = 1
-
-        def read_bytes(self, addr: int, size: int) -> bytes:
+    class FakeBackend:
+        def read_bytes(self, addr: int, size: int) -> bytes | None:
             reads.append((addr, size))
             return b"aaaONEbbbTWOccc"
 
-    def fake_read_bytes_silent(pm: object, addr: int, size: int) -> bytes:
-        return pm.read_bytes(addr, size)
+        def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+            return [(0x7000, 15)]
 
-    monkeypatch.setattr(
-        pattern_scanner,
-        "_iterate_regions_with_error",
-        lambda pm: ([(0x7000, 15)], None),
-    )
-    monkeypatch.setattr(pattern_scanner, "_read_bytes_silent", fake_read_bytes_silent)
+        def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+            return ([(0x7000, 15)], None)
 
     result = pattern_scanner.scan_process_memory_many_with_stats(
-        FakePm(),
+        FakeBackend(),
         {1: b"ONE", 2: b"TWO"},
     )
 

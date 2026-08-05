@@ -20,6 +20,7 @@ import json
 import os
 import socket
 import base64
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence

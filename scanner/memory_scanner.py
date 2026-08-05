@@ -377,7 +377,7 @@ def scan_collection_detailed(
     Returns:
         MemoryScanResult oder None bei Fehler.
     """
-    # --- Helper-Pfad (sudo-frei) ---
+    # --- Backend bestimmen ---
     from .helper_client import is_helper_available, HelperBackend
     from .helper_client import DEFAULT_SOCK_PATH as _default_sock
 
@@ -389,95 +389,19 @@ def scan_collection_detailed(
 
     if use_helper:
         print_fn("🔄 Scan über Helper-Daemon (sudo-frei)...")
-        backend = HelperBackend(sock_path)
-        # Gleicher Code wie direkter Pfad, nur mit HelperBackend
-        if db_loader is None:
-            db_loader = load_card_database
-        if memory_scanner is None:
-            memory_scanner = scan_process_memory
-        if block_parser is None:
-            block_parser = find_blocks
-
-        db = db_loader()
-        if not db:
-            print_fn("❌ Karten-DB konnte nicht geladen werden.")
+        backend: MemoryBackend = HelperBackend(sock_path)
+        sudo_hint = "   - Der Helper-Daemon läuft (sudo-frei)"
+    else:
+        candidate_names = tuple(process_names) if process_names is not None else get_macos_mtga_process_names()
+        if not candidate_names:
+            candidate_names = (get_macos_mtga_process_name(),)
+        pm = _attach_process(candidate_names, print_fn=print_fn)
+        if pm is None:
             return None
+        backend = PymemBackend(pm)
+        sudo_hint = "   - Das Script mit sudo läuft"
 
-        name_to_id = {v["name"].lower(): k for k, v in db.items()}
-        anchors = get_user_anchors(name_to_id, input_fn=input_fn, print_fn=print_fn)
-        if not anchors:
-            print_fn("❌ Keine Anker-Karten angegeben.")
-            return None
-
-        print_fn("\n🔍 Scanne Speicher nach Collection-Daten...")
-        matches: list[int] = []
-        total = len(anchors)
-        anchor_matches: dict[int, int] = {}
-        aggregate_stats: ScanStats | None = None
-
-        if memory_scanner is scan_process_memory:
-            needles = {aid: struct.pack("<I", aid) for aid, _, _ in anchors}
-            multi_result = scan_process_memory_many_with_stats(backend, needles)
-            aggregate_stats = multi_result.stats
-            for i, (aid, _aqty, aname) in enumerate(anchors, 1):
-                display = (aname[:15] + "..") if len(aname) > 15 else aname
-                found = multi_result.addresses.get(aid, [])
-                anchor_matches[aid] = len(found)
-                print_fn(f"   [{i}/{total}] {display}: {len(found)} Fundstellen")
-                matches.extend(found)
-            if debug:
-                stats = multi_result.stats
-                print_fn(
-                    "   Debug: "
-                    f"{stats.regions} Regionen, "
-                    f"{stats.bytes_scanned / 1024 / 1024:.1f} MB gelesen, "
-                    f"{stats.read_failures} Lesefehler, "
-                    f"{stats.matches} Treffer gesamt, "
-                    f"Region-Stop={stats.region_error}"
-                )
-        else:
-            for i, (aid, _aqty, aname) in enumerate(anchors, 1):
-                display = (aname[:15] + "..") if len(aname) > 15 else aname
-                print_fn(f"   [{i}/{total}] Suche {display}...")
-                needle = struct.pack("<I", aid)
-                found = memory_scanner(backend, needle)
-                anchor_matches[aid] = len(found)
-                print_fn(f"     → {len(found)} Fundstellen")
-                matches.extend(found)
-
-        if not matches:
-            print_fn("❌ Keine Anker-Karten im Speicher gefunden.")
-            print_fn("   Stelle sicher, dass:")
-            print_fn("   - MTGA läuft und du in der 'Decks'-Ansicht bist")
-            print_fn("   - Die Karten existieren und die Mengen stimmen")
-            print_fn("   - Der Helper-Daemon läuft (sudo-frei)")
-            return None
-
-        print_fn("\n📦 Parse Speicherblöcke...")
-        candidates: list[dict[int, int]] = []
-        for m in matches:
-            candidates.extend(block_parser(backend, m))
-
-        if not candidates:
-            print_fn("❌ Keine validen Datenblöcke gefunden.")
-            return None
-
-        collection = max(candidates, key=len)
-        validation = validate_collection(collection, db=db, anchors=anchors)
-        if validation["valid"]:
-            print_fn(f"\n✅ {len(collection)} unique Einträge gefunden!")
-        else:
-            print_fn(f"\n⚠ {len(collection)} unique Einträge gefunden, Validierung mit Fehlern: {', '.join(validation['errors'])}")
-
-        return MemoryScanResult(
-            collection=collection,
-            anchors=list(anchors),
-            anchor_matches=anchor_matches,
-            validation=validation,
-            scan_stats=aggregate_stats,
-        )
-
-    # --- Direkter Scan (pymem-osx, erfordert sudo) ---
+    # --- Gemeinsamer Code ---
     if db_loader is None:
         db_loader = load_card_database
     if memory_scanner is None:
@@ -485,31 +409,17 @@ def scan_collection_detailed(
     if block_parser is None:
         block_parser = find_blocks
 
-    # 1. Karten-DB laden
     db = db_loader()
     if not db:
         print_fn("❌ Karten-DB konnte nicht geladen werden.")
         return None
 
-    # 2. Name → ID Mapping
     name_to_id = {v["name"].lower(): k for k, v in db.items()}
-
-    # 3. An MTGA-Prozess attach-en
-    candidate_names = tuple(process_names) if process_names is not None else get_macos_mtga_process_names()
-    if not candidate_names:
-        candidate_names = (get_macos_mtga_process_name(),)
-    pm = _attach_process(candidate_names, print_fn=print_fn)
-    if pm is None:
-        return None
-    backend = PymemBackend(pm)
-
-    # 4. Anker-Karten eingeben
     anchors = get_user_anchors(name_to_id, input_fn=input_fn, print_fn=print_fn)
     if not anchors:
         print_fn("❌ Keine Anker-Karten angegeben.")
         return None
 
-    # 5. Memory-Scan
     print_fn("\n🔍 Scanne Speicher nach Collection-Daten...")
     matches: list[int] = []
     total = len(anchors)
@@ -540,7 +450,6 @@ def scan_collection_detailed(
         for i, (aid, _aqty, aname) in enumerate(anchors, 1):
             display = (aname[:15] + "..") if len(aname) > 15 else aname
             print_fn(f"   [{i}/{total}] Suche {display}...")
-
             needle = struct.pack("<I", aid)
             found = memory_scanner(backend, needle)
             anchor_matches[aid] = len(found)
@@ -552,10 +461,9 @@ def scan_collection_detailed(
         print_fn("   Stelle sicher, dass:")
         print_fn("   - MTGA läuft und du in der 'Decks'-Ansicht bist")
         print_fn("   - Die Karten existieren und die Mengen stimmen")
-        print_fn("   - Das Script mit sudo läuft")
+        print_fn(sudo_hint)
         return None
 
-    # 6. Blöcke um Fundstellen parsen
     print_fn("\n📦 Parse Speicherblöcke...")
     candidates: list[dict[int, int]] = []
     for m in matches:
@@ -565,7 +473,6 @@ def scan_collection_detailed(
         print_fn("❌ Keine validen Datenblöcke gefunden.")
         return None
 
-    # 7. Besten Block auswählen (meiste Einträge)
     collection = max(candidates, key=len)
     validation = validate_collection(collection, db=db, anchors=anchors)
     if validation["valid"]:
