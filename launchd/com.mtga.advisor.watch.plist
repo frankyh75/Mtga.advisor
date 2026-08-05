@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mtga.advisor.watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>cli.main</string>
+        <string>watch</string>
+        <string>--interval</string>
+        <string>300</string>
+        <string>--output</string>
+        <string>out</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/agent/workspace/Mtga.advisor</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/mtga-advisor-watch.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/mtga-advisor-watch.log</string>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+        <string>Aqua</string>
+    </array>
+</dict>
+</plist>

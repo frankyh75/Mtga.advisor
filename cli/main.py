@@ -500,6 +500,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Gibt das Diff als JSON aus (statt formatiertem Text).",
     )
 
+    # --- watch subcommand ---
+    watch = subparsers.add_parser(
+        "watch",
+        help="Watch-Mode: regelmäßiger Scan, wenn MTGA läuft.",
+    )
+    watch.add_argument(
+        "--interval",
+        type=int,
+        default=300,
+        help="Scan-Intervall in Sekunden (Default: 300 = 5 Min). Minimum: 30.",
+    )
+    watch.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Ausgabeverzeichnis für Scan-Artefakte (Standard: ./out).",
+    )
+    watch.add_argument(
+        "--debug",
+        action="store_true",
+        help="Debug-Output aktivieren.",
+    )
+    watch.add_argument(
+        "--state-file",
+        type=Path,
+        default=None,
+        help="Optional: schreibt den Watch-Status in diese JSON-Datei (für Monitoring).",
+    )
+    watch.add_argument(
+        "--single-shot",
+        action="store_true",
+        help="Führt genau einen Scan aus und beendet (nur wenn MTGA läuft). Für Tests/CI.",
+    )
+
     return parser
 
 
@@ -1454,6 +1488,21 @@ def _run_advisor(args: argparse.Namespace) -> int:
     return 1
 
 
+def _run_watch(args: argparse.Namespace) -> int:
+    """Watch-Mode: regelmäßiger Scan, wenn MTGA läuft."""
+    from scanner.watch import WatchConfig, watch_loop
+
+    config = WatchConfig(
+        interval=args.interval,
+        output_dir=args.output,
+        debug=args.debug,
+        single_shot=args.single_shot,
+        state_file=args.state_file,
+    )
+    state = watch_loop(config)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1480,6 +1529,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_serve(args)
     if args.command == "history":
         return _run_history(args)
+    if args.command == "watch":
+        return _run_watch(args)
     parser.print_help()
     return 1
 
