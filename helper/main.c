@@ -572,6 +572,25 @@ static int check_peer_credentials(int client_fd) {
     return -1;
 }
 
+/* Write the entire buffer to a socket, looping until all bytes are sent.
+ * A single write() on a UNIX socket may send only part of a large buffer
+ * (e.g. a multi-MB base64 read_memory response) and return the partial
+ * count; the rest must be written in subsequent calls. Returns 0 on
+ * success, -1 on error. */
+static int write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
 /* Process a single JSON request and send the response back on client_fd.
  * Returns 0 on success, -1 on read error / connection closed, 1 if the
  * client requested "shutdown" (so the caller can stop the server loop). */
@@ -589,9 +608,7 @@ static int process_request(int client_fd, const char *buf) {
         response = build_ok();
         free(action);
         if (response) {
-            size_t rlen = strlen(response);
-            ssize_t written = write(client_fd, response, rlen);
-            (void)written;
+            write_all(client_fd, response, strlen(response));
             free(response);
         }
         return 1;  /* signal shutdown */
@@ -607,9 +624,7 @@ static int process_request(int client_fd, const char *buf) {
     free(action);
 
     if (response) {
-        size_t rlen = strlen(response);
-        ssize_t written = write(client_fd, response, rlen);
-        (void)written;
+        write_all(client_fd, response, strlen(response));
         free(response);
     }
     return 0;
