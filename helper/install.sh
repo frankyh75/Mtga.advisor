@@ -144,12 +144,15 @@ status() {
     local daemon_running=false
     local socket_present=false
 
-    # launchctl list | grep com.mtga.helper
-    if launchctl list "$DAEMON_LABEL" &>/dev/null; then
+    # launchctl print system/com.mtga.helper — prüft, ob der Job GELADEN ist.
+    # (Nicht `launchctl list <label>`: das schlägt fehl, wenn der OnDemand-Daemon
+    #  keinen laufenden Prozess hat — KeepAlive=false + RunAtLoad=false → der
+    #  Job ist geladen, startet aber erst bei der ersten Socket-Verbindung.)
+    if launchctl print "system/$DAEMON_LABEL" &>/dev/null; then
         local pid
-        pid="$(launchctl list "$DAEMON_LABEL" 2>/dev/null | awk '/"PID"/ {gsub(/[^0-9]/, "", $0); print}')" || pid="-"
+        pid="$(launchctl print "system/$DAEMON_LABEL" 2>/dev/null | awk '/pid =/ {gsub(/[^0-9]/, "", $0); print; exit}')" || pid="-"
         pass "Daemon geladen: $DAEMON_LABEL (PID: ${pid:--})"
-        launchctl list "$DAEMON_LABEL" 2>/dev/null | head -20
+        launchctl print "system/$DAEMON_LABEL" 2>/dev/null | grep -E "state =|pid =" | head -5
         daemon_running=true
     else
         fail "Daemon ist nicht geladen"
@@ -237,11 +240,15 @@ install() {
     pass "Daemon geladen via launchctl load"
 
     # 6. Daemon-Status verifizieren
+    #    OnDemand-Daemon (KeepAlive=false + RunAtLoad=false): der Job ist
+    #    geladen, startet aber erst bei der ersten Socket-Verbindung. Daher
+    #    `launchctl print system/<label>` prüfen (Job geladen), nicht
+    #    `launchctl list <label>` (das verlangt einen laufenden Prozess).
     sleep 2
-    if launchctl list "$DAEMON_LABEL" &>/dev/null; then
-        pass "Daemon läuft: $DAEMON_LABEL"
+    if launchctl print "system/$DAEMON_LABEL" &>/dev/null; then
+        pass "Daemon geladen: $DAEMON_LABEL (OnDemand — startet bei erster Verbindung)"
     else
-        fail "Daemon ist nicht in launchctl list sichtbar"
+        fail "Daemon ist nicht in launchctl geladen"
         echo "  Prüfe Logs: log show --predicate 'process == \"mtga-helper\"' --last 5m"
         exit 1
     fi
