@@ -288,6 +288,7 @@ def test_scan_collection_uses_process_fallback_and_scanner_hooks(
         memory_scanner=fake_memory_scanner,
         block_parser=fake_block_parser,
         print_fn=lambda *args, **kwargs: None,
+        use_helper=False,
     )
 
     assert attempts == ["MTGALauncher", "MTGA"]
