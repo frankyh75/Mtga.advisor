@@ -290,15 +290,30 @@ static mach_port_t attach_to_process(pid_t pid) {
 }
 
 /* Read a chunk of memory from a process.
- * Returns malloc'd buffer (caller frees) or NULL. */
+ * Uses mach_vm_read_overwrite (into a caller-provided malloc'd buffer) instead
+ * of mach_vm_read (which vm_allocates and returns a vm_offset_t handle).
+ *
+ * Why: mach_vm_read fails / returns zeros for read-only or mixed-permission
+ * regions (e.g. the global-metadata.dat mapping, GameAssembly.dylib __DATA),
+ * which is exactly where the IL2CPP FieldInfo arrays and class structs live.
+ * mach_vm_read_overwrite copies into our own buffer regardless of the source
+ * region's protection, so the backref discovery can find them.
+ *
+ * Returns malloc'd buffer (caller frees via free()) or NULL. */
 static void *read_memory(mach_port_t task, mach_vm_address_t addr,
                          mach_vm_size_t size, mach_vm_size_t *out_size) {
-    vm_offset_t data = 0;
-    mach_msg_type_number_t data_count = 0;
-    kern_return_t kr = mach_vm_read(task, addr, size, &data, &data_count);
-    if (kr != KERN_SUCCESS) return NULL;
+    void *buf = malloc(size);
+    if (!buf) return NULL;
+
+    mach_vm_size_t data_count = size;
+    kern_return_t kr = mach_vm_read_overwrite(task, addr, size,
+                                              (mach_vm_address_t)buf, &data_count);
+    if (kr != KERN_SUCCESS) {
+        free(buf);
+        return NULL;
+    }
     *out_size = data_count;
-    return (void *)data;
+    return buf;
 }
 
 /* Region info for scanning */
@@ -460,7 +475,7 @@ static char *handle_read_memory(const char *request) {
 
     /* Base64 encode */
     char *b64 = base64_encode((const unsigned char *)buf, bytes_read);
-    mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)buf, bytes_read);
+    free(buf);  /* buf ist jetzt malloc'd (mach_vm_read_overwrite), nicht vm_allocated */
 
     if (!b64) {
         return build_error("Out of memory for Base64 encoding");
