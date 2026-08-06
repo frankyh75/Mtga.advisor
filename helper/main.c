@@ -488,12 +488,22 @@ static int setup_socket(void) {
         return -1;
     }
 
-    /* Set restrictive umask BEFORE bind — no race window.
-     * umask 0117 → socket created with 0660 (rw-rw----):
-     * owner (root) and group have read/write, others nothing.
-     * The peer-credential check in handle_client() enforces access
-     * based on UID, not just file permissions. */
-    mode_t old_umask = umask(0117);
+    /* Set permissive umask BEFORE bind — no race window.
+     * umask 0111 → socket created with 0666 (rw-rw-rw-):
+     * any local user can connect(). Access control is enforced
+     * entirely by check_peer_credentials() in handle_client(),
+     * which verifies the peer UID via getpeereid() and allows
+     * only root (uid 0) and the console user.
+     *
+     * Rationale: the daemon runs as root. If we restricted the
+     * socket file to 0660 root:daemon, a normal console user
+     * (e.g. frankhermann, who is not in group daemon) could not
+     * even call connect() — the kernel rejects the connection
+     * before check_peer_credentials() ever runs. Making the socket
+     * world-connectable and relying on the in-code UID check is
+     * the standard approach for root daemons with application-level
+     * access control. */
+    mode_t old_umask = umask(0111);
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -509,6 +519,15 @@ static int setup_socket(void) {
     }
 
     umask(old_umask);
+
+    /* Belt-and-suspenders: explicitly chmod the socket to 0666.
+     * umask should already produce 0666, but an inherited umask
+     * from launchd could interfere. This guarantees the mode
+     * regardless of the process umask at start time. */
+    if (chmod(g_sock_path, 0666) != 0) {
+        perror("chmod socket");
+        /* non-fatal — the umask path should have worked */
+    }
 
     if (listen(server_fd, MAX_CLIENTS) < 0) {
         perror("listen");

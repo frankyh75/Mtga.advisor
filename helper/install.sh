@@ -145,9 +145,8 @@ status() {
     local socket_present=false
 
     # launchctl print system/com.mtga.helper — prüft, ob der Job GELADEN ist.
-    # (Nicht `launchctl list <label>`: das schlägt fehl, wenn der OnDemand-Daemon
-    #  keinen laufenden Prozess hat — KeepAlive=false + RunAtLoad=false → der
-    #  Job ist geladen, startet aber erst bei der ersten Socket-Verbindung.)
+    # (Nicht `launchctl list <label>`: das schlägt fehl, wenn der Daemon
+    #  gerade keinen laufenden Prozess hat.)
     if launchctl print "system/$DAEMON_LABEL" &>/dev/null; then
         local pid
         pid="$(launchctl print "system/$DAEMON_LABEL" 2>/dev/null | awk '/pid =/ {gsub(/[^0-9]/, "", $0); print; exit}')" || pid="-"
@@ -166,6 +165,20 @@ status() {
     if [[ -S "$SOCK_PATH" ]]; then
         pass "Socket vorhanden:"
         ls -la "$SOCK_PATH"
+
+        # Socket-Permission-Check: Der Socket muss 0666 sein,
+        # damit der Console-User (ohne sudo) connect() kann.
+        # Die Zugriffskontrolle läuft über check_peer_credentials()
+        # im Daemon (getpeereid), nicht über Dateisystem-Rechte.
+        local sock_mode
+        sock_mode="$(stat -f '%Lp' "$SOCK_PATH" 2>/dev/null || echo "??")"
+        if [[ "$sock_mode" == "666" ]]; then
+            pass "Socket-Modus 0666 (Console-User kann verbinden)"
+        else
+            fail "Socket-Modus ist ${sock_mode}, sollte 0666 sein"
+            echo "  Der Daemon setzt chmod(0666) nach bind(). Falls der Modus"
+            echo "  falsch ist, evtl. alte Daemon-Version — neu installieren."
+        fi
         socket_present=true
     else
         fail "Socket nicht vorhanden: $SOCK_PATH"
@@ -240,25 +253,32 @@ install() {
     pass "Daemon geladen via launchctl load"
 
     # 6. Daemon-Status verifizieren
-    #    OnDemand-Daemon (KeepAlive=false + RunAtLoad=false): der Job ist
-    #    geladen, startet aber erst bei der ersten Socket-Verbindung. Daher
-    #    `launchctl print system/<label>` prüfen (Job geladen), nicht
-    #    `launchctl list <label>` (das verlangt einen laufenden Prozess).
+    #    KeepAlive=true + RunAtLoad=true: der Daemon startet beim Boot
+    #    und läuft dauerhaft. `launchctl print system/<label>` prüft,
+    #    ob der Job geladen ist.
     sleep 2
     if launchctl print "system/$DAEMON_LABEL" &>/dev/null; then
-        pass "Daemon geladen: $DAEMON_LABEL (OnDemand — startet bei erster Verbindung)"
+        pass "Daemon geladen: $DAEMON_LABEL (läuft dauerhaft)"
     else
         fail "Daemon ist nicht in launchctl geladen"
         echo "  Prüfe Logs: log show --predicate 'process == \"mtga-helper\"' --last 5m"
         exit 1
     fi
 
-    # 7. Socket prüfen (nur wenn der Helper OnDemand=false hat)
-    #    Bei OnDemand=true wird der Socket erst bei Verbindung erstellt.
+    # 7. Socket prüfen
+    #    Der Daemon erstellt den Socket selbst (bind() in main.c)
+    #    und setzt chmod(0666), damit der Console-User connect() kann.
     if [[ -S "$SOCK_PATH" ]]; then
         pass "Socket vorhanden: $SOCK_PATH"
+        local sock_mode
+        sock_mode="$(stat -f '%Lp' "$SOCK_PATH" 2>/dev/null || echo "??")"
+        if [[ "$sock_mode" == "666" ]]; then
+            pass "Socket-Modus 0666 (Console-User kann verbinden)"
+        else
+            fail "Socket-Modus ist ${sock_mode}, sollte 0666 sein"
+        fi
     else
-        info "Socket noch nicht vorhanden (OnDemand — wird bei erster Verbindung erstellt)"
+        info "Socket noch nicht vorhanden (Daemon startet evtl. noch)"
     fi
 
     # 8. Ping-Test (falls Socket da ist)

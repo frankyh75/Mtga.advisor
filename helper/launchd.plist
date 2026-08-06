@@ -11,11 +11,15 @@
       Der Daemon läuft als root (implizit für LaunchDaemons in
       /Library/LaunchDaemons/) und lauscht auf dem UNIX Socket.
 
-      KeepAlive=false → der Daemon startet nur, wenn ein Client
-      sich zum Socket verbindet (socket-triggered OnDemand).
-      Das spart Ressourcen, wenn kein Scan läuft.
+      Der Daemon erstellt den Socket selbst (bind() in main.c).
+      KEIN Socket-Activation via launchd — der Sockets-Key wurde
+      entfernt, weil main.c sein eigenes bind() + unlink() macht
+      und die launchd-Socket-Activation damit konfligiert.
 
-      Falls der Helper dauerhaft laufen soll, setze KeepAlive=true.
+      RunAtLoad=true + KeepAlive=true: der Daemon startet beim
+      Boot und läuft dauerhaft (selbst reparierend bei Crash).
+      Das ist nötig, weil ohne Socket-Activation ein OnDemand-
+      Daemon nicht zuverlässig bei Verbindung starten würde.
     -->
 
     <key>Label</key>
@@ -28,23 +32,12 @@
         <string>/var/run/mtga-helper.sock</string>
     </array>
 
-    <!-- Socket-triggered OnDemand: Startet nur bei Verbindung -->
-    <key>KeepAlive</key>
-    <false/>
+    <!-- Daemon startet beim Boot und läuft dauerhaft -->
+    <key>RunAtLoad</key>
+    <true/>
 
-    <!-- Socket-Definition: UNIX Domain Socket -->
-    <key>Sockets</key>
-    <dict>
-        <key>com.mtga.helper.sock</key>
-        <dict>
-            <key>SockType</key>
-            <string>stream</string>
-            <key>SockPathName</key>
-            <string>/var/run/mtga-helper.sock</string>
-            <key>SockPathMode</key>
-            <integer>432</integer>  <!-- 0660 in decimal -->
-        </dict>
-    </dict>
+    <key>KeepAlive</key>
+    <true/>
 
     <!-- Standard-Output/Error in Systemlog -->
     <key>StandardOutPath</key>
@@ -52,9 +45,6 @@
 
     <key>StandardErrorPath</key>
     <string>/var/log/mtga-helper.err.log</string>
-
-    <key>RunAtLoad</key>
-    <false/>
 
     <!-- Kein LimitLoadToSessionType: Für einen System-LaunchDaemon (in
          /Library/LaunchDaemons) ist die Restriktion auf Aqua/Background
