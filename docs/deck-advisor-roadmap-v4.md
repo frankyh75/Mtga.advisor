@@ -109,7 +109,8 @@ dann die GUI stück für stück verbessern.
 1. **Memory-Scanner robust + Sudo-Helper** (Basis — alles andere baut darauf auf)
    - Helper-Daemon auf MacBook Air installieren + Socket verifizieren
    - Scan-Stabilität: Heap-Instabilität, Anker-Zuverlässigkeit, Dedup
-   - `rank_scanner.py` auf Backref-Ansatz migrieren (falls Ranks gehoben werden)
+   - [x] `rank_scanner.py` auf Backref-Ansatz migriert (Fast-Path
+     `discover_wrapper_controller_via_backref`), TypeInfoTable-Weg bleibt Fallback
 2. **New-Deck-Builder** (LLM-gestützt, strukturierte Ausgabe)
 3. **Analyze-Flow** (bestehende Decks bewerten: fehlende Karten, Cuts, Craft)
 4. **Collection-/Karten-Browser** (Suche, Filter)

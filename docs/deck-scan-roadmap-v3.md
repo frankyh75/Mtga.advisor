@@ -26,7 +26,8 @@ Datum: 2026-08-04
 - [x] Retry vor Fallback ist umgesetzt.
 - [x] Schreibschutz/Backup gegen schlechte Scan-Ergebnisse ist umgesetzt.
 - [x] Pattern-Scan-ID-Kollision ist behoben.
-- [ ] `scanner/rank_scanner.py` hängt noch am älteren Entdeckungspfad.
+- [x] `scanner/rank_scanner.py` nutzt den Backref-Ansatz (Fast-Path
+  `discover_wrapper_controller_via_backref`), TypeInfoTable-Weg bleibt Fallback.
 - [ ] Komfortweg ohne jedes Mal `sudo` ist noch nicht gelöst.
 - [ ] Format-Erkennung ist nur dann sinnvoll, wenn die zugrunde liegende
   Struktur verlässlich identifiziert werden kann.
@@ -42,11 +43,9 @@ Datum: 2026-08-04
 
 ## Restliste
 
-1. `rank_scanner.py` auf den Backref-Ansatz migrieren, falls Ranks in den
-   gleichen Privileg-/Stabilitätsstandard wie Decks gehoben werden sollen.
-2. Einen sauberen Privileged-Helper oder Wrapper bauen, damit `sudo`
+1. Einen sauberen Privileged-Helper oder Wrapper bauen, damit `sudo`
    nicht bei jedem manuellen Aufruf eingegeben werden muss.
-3. Die Format-Erkennung nur dann weiterverfolgen, wenn ein verlässliches
+2. Die Format-Erkennung nur dann weiterverfolgen, wenn ein verlässliches
    Feld im Live-Layout gefunden wird.
 
 ## Offene Fragen
