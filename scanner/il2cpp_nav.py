@@ -831,6 +831,109 @@ def discover_decks_manager_via_backref(
     return dm_instance, dm_class
 
 
+def discover_wrapper_controller_via_backref(
+    reader: Il2CppReader | MemoryReader | Any,
+    *,
+    debug: bool = False,
+) -> tuple[int, int] | None:
+    """Locate a live WrapperController instance without data_segment_base/TypeInfoTable.
+
+    Same strategy as discover_decks_manager_via_backref: Il2CppClass structs
+    are heap-allocated outside GameAssembly.dylib's own segments, so the
+    TypeInfoTable-based discovery cannot find them reliably on macOS. Instead:
+
+      1. Find WrapperController's Il2CppClass via a FieldInfo backref to the
+         "<PlayerRankServiceWrapper>k__BackingField" field name (FieldInfo
+         arrays live in the process's writable private heap, enumerated fresh
+         each run since their absolute address shifts with ASLR).
+      2. Find PlayerRankServiceWrapper's Il2CppClass via a FieldInfo backref
+         to the "_combinedRankInfo" field name (the field it declares).
+      3. Read WrapperController's real "<PlayerRankServiceWrapper>k__BackingField"
+         offset from its own FieldInfo array (no hardcoded offset).
+      4. Scan writable heap memory for a live object whose header klass pointer
+         equals WrapperController's class, validated by checking that its rank
+         wrapper field points at an object of the confirmed
+         PlayerRankServiceWrapper class.
+
+    Returns:
+        (wrapper_instance, wrapper_class), or None if any step fails.
+    """
+    def _log(msg: str) -> None:
+        if debug:
+            logger.debug("[backref-rank] %s", msg)
+
+    mem = _coerce_safe_reader(reader)
+    if mem is None:
+        _log("FAIL: reader could not be coerced to a MemoryReader")
+        return None
+    pm = getattr(reader, "pm", reader)
+    if not hasattr(pm, "task"):
+        # Not a live process handle (e.g. a bare MockMemory in tests) —
+        # region enumeration needs a real task port.
+        _log("FAIL: no live task port on reader (not a real process handle)")
+        return None
+
+    metadata_regions = _find_metadata_regions(pm)
+    if not metadata_regions:
+        _log("FAIL: no global-metadata.dat regions found in process memory")
+        return None
+    _log(f"OK: {len(metadata_regions)} metadata region(s) found")
+
+    writable_regions = _iterate_writable_private_regions(pm)
+    fieldinfo_regions = [(addr, addr + size) for addr, size in writable_regions]
+    _log(
+        f"OK: {len(writable_regions)} writable private region(s), "
+        f"{sum(size for _, size in writable_regions):,} bytes total"
+    )
+
+    # WrapperController class — parent of the rank-wrapper backing field.
+    wc_class = _find_class_by_field_backref_in_regions(
+        mem, metadata_regions, fieldinfo_regions,
+        "<PlayerRankServiceWrapper>k__BackingField",
+    )
+    if wc_class is None:
+        _log("FAIL: no FieldInfo backref to \"<PlayerRankServiceWrapper>k__BackingField\" "
+             "found in writable regions (WrapperController class not located)")
+        return None
+    _log(f"OK: WrapperController class @ {wc_class:#x}")
+
+    # PlayerRankServiceWrapper class — parent of the _combinedRankInfo field.
+    prsw_class = _find_class_by_field_backref_in_regions(
+        mem, metadata_regions, fieldinfo_regions, "_combinedRankInfo",
+    )
+    if prsw_class is None:
+        _log("FAIL: no FieldInfo backref to \"_combinedRankInfo\" found in writable regions "
+             "(PlayerRankServiceWrapper class not located)")
+        return None
+    _log(f"OK: PlayerRankServiceWrapper class @ {prsw_class:#x}")
+
+    wc_rank_field = next(
+        (f for f in get_class_fields(mem, wc_class)
+         if f.name == "<PlayerRankServiceWrapper>k__BackingField"),
+        None,
+    )
+    if wc_rank_field is None:
+        _log("FAIL: WrapperController class has no \"<PlayerRankServiceWrapper>k__BackingField\" "
+             "field in its FieldInfo array")
+        return None
+    _log(f"OK: rank-wrapper field offset = {wc_rank_field.offset:#x}")
+
+    def _validate(candidate: int) -> bool:
+        prsw_ptr = _read_ptr(mem, candidate + wc_rank_field.offset)
+        if not (MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR):
+            return False
+        return _read_ptr(mem, prsw_ptr) == prsw_class
+
+    wc_instance = _find_instance_by_klass_in_regions(mem, writable_regions, wc_class, validate=_validate)
+    if wc_instance is None:
+        _log("FAIL: no live instance in writable memory whose class pointer matches "
+             "WrapperController (and validates via PlayerRankServiceWrapper)")
+        return None
+    _log(f"OK: WrapperController instance @ {wc_instance:#x}")
+
+    return wc_instance, wc_class
+
+
 # ---------------------------------------------------------------------------
 # Dictionary<uint, ptr> reading
 # ---------------------------------------------------------------------------
