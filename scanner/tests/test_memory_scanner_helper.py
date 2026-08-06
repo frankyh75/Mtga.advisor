@@ -237,6 +237,66 @@ def test_scan_collection_helper_wrapper(
     assert collection is None or isinstance(collection, dict)
 
 
+def test_scan_collection_detailed_dedups_duplicate_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mehrere Anker im selben Array → block_parser liefert identische Blöcke.
+
+    scan_collection_detailed() muss Duplikate in candidates entfernen, bevor
+    max() den größten Block wählt. Sonst kann ein duplizierter Block fälschlich
+    als 'größer' erscheinen oder redundante Arbeit entstehen.
+    """
+    anchor_file = tmp_path / "last_anchors.json"
+    monkeypatch.setattr(memory_scanner, "_anchor_file", lambda: anchor_file)
+    monkeypatch.setattr(
+        memory_scanner,
+        "load_card_database",
+        lambda: {
+            114001: {"name": "Card A"},
+            114002: {"name": "Card B"},
+        },
+    )
+    monkeypatch.setattr(
+        memory_scanner,
+        "get_user_anchors",
+        lambda name_to_id, **kwargs: [(114001, 4, "Card A"), (114002, 2, "Card B")],
+    )
+    monkeypatch.setattr(
+        helper_client,
+        "is_helper_available",
+        lambda sock_path: True,
+    )
+    monkeypatch.setattr(
+        helper_client,
+        "HelperBackend",
+        lambda sock_path: FakeBackend(),
+    )
+
+    # Zwei Anker-Fundstellen, die DENSELBEN Speicherbereich parsen →
+    # block_parser liefert für beide identische Blöcke (Duplikate).
+    found_addresses = iter([[0x2000], [0x2000]])
+
+    def fake_memory_scanner(backend: object, needle: bytes) -> list[int]:
+        return next(found_addresses)
+
+    def fake_block_parser(backend: object, addr: int) -> list[dict[int, int]]:
+        # Identischer Block für beide Anker (Duplikat)
+        return [{114001: 4, 114002: 2, 100010: 1}]
+
+    result = memory_scanner.scan_collection_detailed(
+        use_helper=True,
+        memory_scanner=fake_memory_scanner,
+        block_parser=fake_block_parser,
+        print_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result is not None
+    # Dedup: Collection enthält die Karten genau einmal, keine Duplikat-Artefakte
+    assert result.collection == {114001: 4, 114002: 2, 100010: 1}
+    assert result.validation["valid"] is True
+
+
 def test_scan_collection_detailed_helper_with_custom_sock_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

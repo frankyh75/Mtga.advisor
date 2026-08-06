@@ -1,5 +1,18 @@
 # Parser-Analyse: MTGA Collection-Rekonstruktion aus Logs
 
+> ⚠️ **VERALTET (2026-08-06)** — Diese Analyse dokumentiert einen Weg, der nicht mehr existiert.
+> Der Endpoint `PlayerInventory.GetPlayerCardsV3` (die einzige Log-Quelle für die
+> Kartensammlung) wurde **im August 2021 entfernt und nie ersetzt**. Der Log-Scanner
+> kann die Collection **nicht** mehr liefern.
+>
+> **Aktueller Stand:** Siehe [[05-Recherche/mtga-advisor-scanner-recherche-2026|MTGA Memory- & Log-Scanner — Befunde 2026]].
+> - **Collection:** ausschließlich Memory-Scanner (`scanner/`).
+> - **Decks:** Log-Scanner via StartHook `DeckSummaries` (`parser/decks.py`) — funktioniert weiterhin.
+> - **Ranks:** Log via `RankGetCombinedRankInfo` — funktioniert weiterhin.
+>
+> Diese Datei bleibt als historische Referenz erhalten, ist aber **nicht** als
+> Implementierungsgrundlage zu verwenden.
+
 Hinweis: Offene Fragen werden als **unknown/offen** markiert; keine stillen Annahmen.
 
 ## Schritt 0 – Kontext-Validierung (kurz)

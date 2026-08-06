@@ -485,7 +485,19 @@ def scan_collection_detailed(
         print_fn("❌ Keine validen Datenblöcke gefunden.")
         return None
 
-    collection = max(candidates, key=len)
+    # Dedup: Mehrere Anker im selben Collection-Array parsen denselben
+    # Speicherbereich mehrfach → identische Blöcke in candidates.
+    # Identische Karten-Mengen entfernen, damit max() nicht durch Duplikate
+    # verfälscht wird und redundante Arbeit entfällt.
+    unique_candidates: list[dict[int, int]] = []
+    seen: set[tuple[tuple[int, int], ...]] = set()
+    for block in candidates:
+        key = tuple(sorted(block.items()))
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(block)
+
+    collection = max(unique_candidates, key=len)
     validation = validate_collection(collection, db=db, anchors=anchors)
     if validation["valid"]:
         print_fn(f"\n✅ {len(collection)} unique Einträge gefunden!")
