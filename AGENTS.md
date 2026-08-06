@@ -47,13 +47,20 @@ Collection-Extraktion investieren.
 - ✅ Dedup-Fix in `scan_collection_detailed()`
 - ✅ 256 Tests grün
 
-### Offen (Roadmap v4, Priorität)
-1. **New-Deck-Builder** (LLM-gestützt, strukturierte Ausgabe)
-2. **Analyze-Flow** (bestehende Decks bewerten: fehlende Karten, Cuts, Craft)
-3. **Collection-/Karten-Browser** (Suche, Filter)
-4. **Drafts & Verlauf** (lokal speichern, vergleichen)
-5. **Komfortweg für privilegierte macOS-Scans** (Helper läuft, aber Installation
-   auf MacBook Air steht noch aus)
+### Offen (Roadmap v4, Priorität — Franks Ziel)
+**Erst Memory-Scanner robust + Sudo-Helper, dann GUI stück für stück.**
+
+1. **Memory-Scanner robust + Sudo-Helper** (Basis)
+   - Helper-Daemon auf MacBook Air installieren + Socket verifizieren
+   - Scan-Stabilität: Heap-Instabilität, Anker-Zuverlässigkeit, Dedup
+   - `rank_scanner.py` auf Backref-Ansatz migrieren (falls Ranks gehoben werden)
+2. **New-Deck-Builder** (LLM-gestützt, strukturierte Ausgabe)
+3. **Analyze-Flow** (bestehende Decks bewerten: fehlende Karten, Cuts, Craft)
+4. **Collection-/Karten-Browser** (Suche, Filter)
+5. **Drafts & Verlauf** (lokal speichern, vergleichen)
+
+> **Regel:** GUI-Verbesserungen erst, wenn der Memory-Scanner + Sudo-Helper
+> stabil laufen. Scanner-Robustheit hat Vorrang vor Advisor-UX.
 
 ## Git-Workflow
 

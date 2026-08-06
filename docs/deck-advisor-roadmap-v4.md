@@ -101,13 +101,22 @@ Nicht sinnvoll:
 - Pattern-Scan als bevorzugte Lösung
 - neue Scanner-Grundlagen, bevor die Advisor-UX steht
 
-## Priorität
+## Priorität (verbindlich, Stand 2026-08-06)
 
-1. New-Deck-Builder
-2. Analyze-Flow
-3. Collection-Browser
-4. Draft-Speicherung
-5. Komfortweg für privilegierte macOS-Scans
+**Franks Ziel:** Erst den Memory-Scanner robust bekommen (inkl. Sudo-Helper),
+dann die GUI stück für stück verbessern.
+
+1. **Memory-Scanner robust + Sudo-Helper** (Basis — alles andere baut darauf auf)
+   - Helper-Daemon auf MacBook Air installieren + Socket verifizieren
+   - Scan-Stabilität: Heap-Instabilität, Anker-Zuverlässigkeit, Dedup
+   - `rank_scanner.py` auf Backref-Ansatz migrieren (falls Ranks gehoben werden)
+2. **New-Deck-Builder** (LLM-gestützt, strukturierte Ausgabe)
+3. **Analyze-Flow** (bestehende Decks bewerten: fehlende Karten, Cuts, Craft)
+4. **Collection-/Karten-Browser** (Suche, Filter)
+5. **Drafts & Verlauf** (lokal speichern, vergleichen)
+
+> **Regel:** GUI-Verbesserungen erst, wenn der Memory-Scanner + Sudo-Helper
+> stabil laufen. Scanner-Robustheit hat Vorrang vor Advisor-UX.
 
 ## Abgrenzung
 
