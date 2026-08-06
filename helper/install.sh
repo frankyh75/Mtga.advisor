@@ -87,12 +87,12 @@ check_prerequisites() {
 
 # --- Daemon entladen (Hilfsfunktion) ---
 unload_daemon() {
-    # Primär: launchctl unload (wie im Task gefordert)
-    if launchctl unload "$PLIST_DST" 2>/dev/null; then
+    # Primär: launchctl bootout (korrekt für System-Daemons auf modernem macOS)
+    if launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null; then
         return 0
     fi
-    # Fallback für neuere macOS-Versionen
-    if launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null; then
+    # Fallback: launchctl unload (ältere macOS-Versionen)
+    if launchctl unload "$PLIST_DST" 2>/dev/null; then
         return 0
     fi
     return 1
@@ -100,12 +100,12 @@ unload_daemon() {
 
 # --- Daemon laden (Hilfsfunktion) ---
 load_daemon() {
-    # Primär: launchctl load (wie im Task gefordert)
-    if launchctl load "$PLIST_DST" 2>/dev/null; then
+    # Primär: launchctl bootstrap (korrekt für System-Daemons auf modernem macOS)
+    if launchctl bootstrap system "$PLIST_DST" 2>/dev/null; then
         return 0
     fi
-    # Fallback für neuere macOS-Versionen
-    if launchctl bootstrap system "$PLIST_DST" 2>/dev/null; then
+    # Fallback: launchctl load (ältere macOS-Versionen)
+    if launchctl load "$PLIST_DST" 2>/dev/null; then
         return 0
     fi
     return 1
