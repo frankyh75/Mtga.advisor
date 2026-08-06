@@ -1,5 +1,14 @@
 # Projektkontext (AI) – Normativer Kontext
 
+> ⚠️ **VERALTET (2026-08-06)** — Dieses Dokument beschreibt die Log-basierte
+> Collection-Extraktion als Kernpfad. Das ist **nicht mehr korrekt**:
+> `PlayerInventory.GetPlayerCardsV3` wurde im August 2021 entfernt und nie
+> ersetzt. Die Collection kommt **ausschließlich** aus dem Memory-Scanner.
+>
+> **Aktuelle, verbindliche Projektbeschreibung:** Siehe **`CLAUDE.md`** im
+> Repo-Root. Dieses Dokument bleibt als historische Referenz erhalten, ist aber
+> nicht als Implementierungsgrundlage zu verwenden.
+
 ## Projektziel
 - Lokales, deterministisches Tool für sammlungsbewusste Deck-Beratung ohne Cloud/LLM im Kernpfad.
 - Phase-1-Kernnutzen: verlässliche `collection.json`-Extraktion aus MTGA-Logs als Basis für spätere Empfehlungen.
