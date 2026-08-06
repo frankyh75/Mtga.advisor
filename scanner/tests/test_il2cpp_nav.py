@@ -15,6 +15,8 @@ import pytest
 
 from scanner.il2cpp_nav import (
     IL2CPP_OFFSETS,
+    MAX_VALID_PTR,
+    MIN_VALID_PTR,
     Il2CppReader,
     MockMemory,
     _discover_data_segment_base_from_image,
@@ -23,6 +25,7 @@ from scanner.il2cpp_nav import (
     _find_class_by_field_backref_in_regions,
     _find_class_by_name_in_arena,
     _find_instance_by_klass_in_regions,
+    _read_ptr,
     _validate_class_struct,
     find_class_by_name,
     find_papa_instance,
@@ -1141,4 +1144,133 @@ class TestFindInstanceByKlass:
         mem.write(region_addr + 3, _pack_ptr(klass))
 
         result = _find_instance_by_klass_in_regions(mem, [(region_addr, 0x1000)], klass)
+        assert result is None
+
+
+class TestWrapperControllerBackrefDiscovery:
+    """Backref-based discovery of the WrapperController class + live instance.
+
+    Mirrors how the deck scanner locates DecksManager (see
+    discover_decks_manager_via_backref): resolve the class via a FieldInfo
+    backref on "<PlayerRankServiceWrapper>k__BackingField", then find the
+    live instance whose header klass-pointer matches, validated by its
+    PlayerRankServiceWrapper field pointing at a real object.
+
+    These test the building blocks that discover_wrapper_controller_via_backref
+    composes. The full discovery needs a live task port, so only the
+    MockMemory-testable helpers are covered here (same as the deck path).
+    """
+
+    RANK_WRAPPER_FIELD = "<PlayerRankServiceWrapper>k__BackingField"
+
+    def _build_wrapper_layout(self, mem):
+        """Return (wc_class, wc_instance, prsw_class, prsw_instance)."""
+        # -- Class name strings (all must be > MIN_VALID_PTR for class validation) --
+        wc_name = 0x200000
+        mem.write(wc_name, b"WrapperController\x00")
+        prsw_name = 0x210000
+        mem.write(prsw_name, b"PlayerRankServiceWrapper\x00")
+
+        # -- Field name strings --
+        rank_field_name = 0x220000
+        mem.write(rank_field_name, self.RANK_WRAPPER_FIELD.encode("ascii") + b"\x00")
+
+        # -- WrapperController class: one field, rank wrapper at offset 0x18 --
+        wc_fields_ptr = 0x300000
+        wc_fields = _make_field_info(name_ptr=rank_field_name, offset=0x18)
+        mem.write(wc_fields_ptr, wc_fields)
+        wc_class = 0x310000
+        mem.write(wc_class, _make_class(name_ptr=wc_name, fields_ptr=wc_fields_ptr, field_count=1))
+
+        # -- PlayerRankServiceWrapper class --
+        prsw_fields_ptr = 0x320000
+        # _make_field_info needs a name_ptr; use a placeholder (offset irrelevant here)
+        placeholder_name = 0x230000
+        mem.write(placeholder_name, b"_combinedRankInfo\x00")
+        prsw_fields = _make_field_info(name_ptr=placeholder_name, offset=0x18)
+        mem.write(prsw_fields_ptr, prsw_fields)
+        prsw_class = 0x330000
+        mem.write(prsw_class, _make_class(name_ptr=prsw_name, fields_ptr=prsw_fields_ptr, field_count=1))
+
+        # -- Live instances --
+        wc_instance = 0x400000
+        mem.write(wc_instance, _pack_ptr(wc_class))
+        prsw_instance = 0x410000
+        mem.write(prsw_instance, _pack_ptr(prsw_class))
+        # WrapperController.<PlayerRankServiceWrapper>k__BackingField @ +0x18
+        mem.write(wc_instance + 0x18, _pack_ptr(prsw_instance))
+
+        return wc_class, wc_instance, prsw_class, prsw_instance
+
+    def test_find_wrapper_class_via_field_backref(self):
+        mem = MockMemory()
+        wc_class, _wc_inst, _prsw_class, _prsw_inst = self._build_wrapper_layout(mem)
+
+        # global-metadata.dat string pool holding the field name
+        metadata_addr = 0x900000
+        mem.write(metadata_addr, b"\x00garbage\x00" + self.RANK_WRAPPER_FIELD.encode("ascii") + b"\x00")
+
+        # FieldInfo array region referencing the field name, parent = wc_class
+        fieldinfo_region_addr = 0xC00000
+        fieldinfo_entry = fieldinfo_region_addr + 0x40  # 8-byte aligned
+        mem.write(fieldinfo_entry, _make_field_info(name_ptr=metadata_addr + len(b"\x00garbage\x00"), offset=0x18))
+        mem.write(fieldinfo_entry + IL2CPP_OFFSETS["field_parent"], _pack_ptr(wc_class))
+
+        result = _find_class_by_field_backref_in_regions(
+            mem,
+            metadata_regions=[(metadata_addr, 128)],
+            fieldinfo_regions=[(fieldinfo_region_addr, fieldinfo_region_addr + 0x1000)],
+            field_name=self.RANK_WRAPPER_FIELD,
+        )
+        assert result == wc_class
+
+    def test_find_wrapper_instance_via_klass_scan_validated_by_rank_field(self):
+        mem = MockMemory()
+        wc_class, wc_instance, _prsw_class, prsw_instance = self._build_wrapper_layout(mem)
+
+        # Validator: candidate's rank-wrapper field points at a real object.
+        rank_offset = next(
+            f.offset for f in get_class_fields(mem, wc_class) if f.name == self.RANK_WRAPPER_FIELD
+        )
+
+        def validate(candidate):
+            prsw_ptr = _read_ptr(mem, candidate + rank_offset)
+            if not (MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR):
+                return False
+            return _read_ptr(mem, prsw_ptr) == _read_ptr(mem, prsw_instance)
+
+        region_addr = 0x1000000
+        # Place a decoy klass-pointer match that fails validation, then the real one.
+        decoy = region_addr + 0x40
+        mem.write(decoy, _pack_ptr(wc_class))  # decoy has no valid rank field
+        real = region_addr + 0x100
+        mem.write(real, _pack_ptr(wc_class))
+        mem.write(real + rank_offset, _pack_ptr(prsw_instance))
+
+        result = _find_instance_by_klass_in_regions(
+            mem, [(region_addr, 0x1000)], wc_class, validate=validate,
+        )
+        assert result == real
+
+    def test_wrapper_instance_scan_returns_none_when_field_invalid(self):
+        mem = MockMemory()
+        wc_class, _wc_instance, _prsw_class, _prsw_instance = self._build_wrapper_layout(mem)
+
+        rank_offset = next(
+            f.offset for f in get_class_fields(mem, wc_class) if f.name == self.RANK_WRAPPER_FIELD
+        )
+
+        def validate(candidate):
+            prsw_ptr = _read_ptr(mem, candidate + rank_offset)
+            return MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR
+
+        region_addr = 0x1000000
+        # Klass-pointer match but the rank field is null → rejected.
+        fake = region_addr + 0x40
+        mem.write(fake, _pack_ptr(wc_class))
+        mem.write(fake + rank_offset, _pack_ptr(0))
+
+        result = _find_instance_by_klass_in_regions(
+            mem, [(region_addr, 0x1000)], wc_class, validate=validate,
+        )
         assert result is None
