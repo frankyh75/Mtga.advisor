@@ -41,6 +41,7 @@ from .il2cpp_nav import (
     MockMemory,
     PymemMemoryAdapter,
     discover_data_segment_base,
+    discover_wrapper_controller_via_backref,
     _read_ptr,
     _read_i32,
     _read_u32,
@@ -463,6 +464,7 @@ def scan_ranks_and_account(
     type_info_table: int = 0,
     data_segment_base: int = 0,
     read_account: bool = True,
+    debug: bool = False,
 ) -> FullRankScanResult:
     """Scan MTGA memory for player ranks and account info.
 
@@ -476,6 +478,7 @@ def scan_ranks_and_account(
         type_info_table: Pre-discovered TypeInfoTable address (0 = discover).
         data_segment_base: GameAssembly __DATA segment base (for discovery).
         read_account: Whether to also scan account info (default: True).
+        debug: Enable backref discovery debug logging (default: False).
 
     Returns:
         FullRankScanResult with ranks and optional account info.
@@ -487,6 +490,19 @@ def scan_ranks_and_account(
         mem = reader
 
     warnings: list[str] = []
+
+    # Fast path: locate a live WrapperController instance via metadata
+    # backrefs, bypassing data_segment_base/TypeInfoTable discovery entirely
+    # (same strategy as the deck scanner's discover_decks_manager_via_backref —
+    # Il2CppClass structs live outside GameAssembly's segments on macOS). Only
+    # attempted when the caller hasn't pre-supplied explicit addresses.
+    if wrapper_instance == 0 and wrapper_class == 0:
+        via_backref = discover_wrapper_controller_via_backref(mem, debug=debug)
+        if via_backref is not None:
+            wrapper_instance, wrapper_class = via_backref
+            # Fall through to the shared scan below with discovered addresses.
+        else:
+            warnings.append("backref discovery for WrapperController failed; falling back to TypeInfoTable path")
 
     # Discover WrapperController class if not provided
     if wrapper_class == 0:
