@@ -591,6 +591,17 @@ static int write_all(int fd, const char *buf, size_t len) {
     return 0;
 }
 
+/* Send a response to the client, appending a trailing newline so the client
+ * can reliably detect the end of the JSON message (the protocol is
+ * newline-delimited, and without the \n the client would keep reading past a
+ * large multi-MB response until a timeout). Also frees `response`. */
+static void send_response(int client_fd, char *response) {
+    if (!response) return;
+    write_all(client_fd, response, strlen(response));
+    write_all(client_fd, "\n", 1);
+    free(response);
+}
+
 /* Process a single JSON request and send the response back on client_fd.
  * Returns 0 on success, -1 on read error / connection closed, 1 if the
  * client requested "shutdown" (so the caller can stop the server loop). */
@@ -607,10 +618,7 @@ static int process_request(int client_fd, const char *buf) {
     } else if (strcmp(action, "shutdown") == 0) {
         response = build_ok();
         free(action);
-        if (response) {
-            write_all(client_fd, response, strlen(response));
-            free(response);
-        }
+        send_response(client_fd, response);
         return 1;  /* signal shutdown */
     } else if (strcmp(action, "list_regions") == 0) {
         response = handle_list_regions();
@@ -623,10 +631,7 @@ static int process_request(int client_fd, const char *buf) {
     }
     free(action);
 
-    if (response) {
-        write_all(client_fd, response, strlen(response));
-        free(response);
-    }
+    send_response(client_fd, response);
     return 0;
 }
 
