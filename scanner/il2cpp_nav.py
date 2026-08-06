@@ -440,7 +440,12 @@ def find_papa_instance(mem: MemoryReader, papa_class: int) -> int | None:
     for region_start, region_end in PAPA_HEAP_REGIONS:
         for chunk_start in range(region_start, region_end, PAPA_SCAN_STEP):
             chunk = mem.read_bytes(chunk_start, PAPA_SCAN_STEP)
-            if not chunk or all(b == 0 for b in chunk):
+            # `all(b == 0 for b in chunk)` iterates byte-by-byte in pure
+            # Python — over a million iterations per 1 MB chunk. Comparing
+            # against a same-length zero-filled bytes object instead uses
+            # CPython's native memcmp, which is orders of magnitude faster
+            # for the common case where a chunk is entirely unmapped/empty.
+            if not chunk or chunk == bytes(len(chunk)):
                 continue
 
             # Scan for papa_class pointer at 8-byte alignment
