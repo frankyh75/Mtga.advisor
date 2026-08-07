@@ -10,9 +10,11 @@ from typing import Any, Sequence
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_export import export_deck_to_arena_text, load_deck_by_id, DeckNotFoundError, DeckExportError
 from advisor.deck_import import import_arena_deck, write_deck
+from advisor.analyze import analyze_deck, load_deck_cards
 from advisor.llm_advisor import run_llm_advisor
 from advisor.llm_config import LLMConfig, load_config, write_default_config
 from parser.decks import export_decks, export_container, show_deck, list_decks
+from parser.deck_cards import export_deck_cards
 from parser.wildcards import export_wildcards
 from parser.start_hook import DeckSummary
 from parser.export import export_collection
@@ -256,6 +258,56 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
     )
 
+    deck_cards = subparsers.add_parser(
+        "deck-cards",
+        help="Exportiert Deck-Kartenlisten (DeckUpsertDeckV3) aus MTGA-Logs.",
+    )
+    deck_cards.add_argument(
+        "--log",
+        dest="logs",
+        action="append",
+        type=Path,
+        help="Pfad zu einer Logdatei (mehrfach angeben möglich). Wenn nicht gesetzt, werden Logs automatisch gesucht.",
+    )
+    deck_cards.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Ausgabeverzeichnis (Standard: ./out).",
+    )
+    deck_cards.add_argument(
+        "--platform",
+        choices=["windows", "macos", "unknown"],
+        help="Plattform überschreiben (Standard: automatische Erkennung).",
+    )
+    deck_cards.add_argument(
+        "--windows-local-low",
+        type=Path,
+        help="Override für Windows LocalLow MTGA Pfad.",
+    )
+    deck_cards.add_argument(
+        "--windows-steam-userdata",
+        type=Path,
+        help="Override für Windows Steam userdata Pfad.",
+    )
+    deck_cards.add_argument(
+        "--macos-logs",
+        type=Path,
+        help="Override für macOS Log-Pfad.",
+    )
+    deck_cards.add_argument(
+        "--macos-steam-userdata",
+        type=Path,
+        help="Override für macOS Steam userdata Pfad.",
+    )
+    deck_cards.add_argument(
+        "--custom-log-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
+    )
+
     scan = subparsers.add_parser("scan", help="Scannt die macOS-Collection aus dem MTGA-Prozessspeicher.")
     scan.add_argument(
         "--output",
@@ -420,6 +472,51 @@ def _build_parser() -> argparse.ArgumentParser:
     advisor_complete.add_argument("--collection", type=Path, required=True, help="Pfad zu collection.json.")
     advisor_complete.add_argument("--deck", type=Path, required=True, help="Pfad zu arena_deck.json.")
     advisor_complete.add_argument("--output", type=Path, default=Path("out"), help="Ausgabeverzeichnis.")
+
+    advisor_analyze = advisor_subparsers.add_parser(
+        "analyze",
+        help="Analysiert ein Deck gegen Collection + Wildcards (owned/missing, Craft-Priorität).",
+    )
+    advisor_analyze.add_argument(
+        "--deck",
+        type=str,
+        help="Deck-ID des zu analysierenden Decks.",
+    )
+    advisor_analyze.add_argument(
+        "--name",
+        type=str,
+        help="Deck-Name des zu analysierenden Decks (Alternative zu --deck).",
+    )
+    advisor_analyze.add_argument(
+        "--collection",
+        type=Path,
+        default=Path("out/collection.json"),
+        help="Pfad zu collection.json (Default: out/collection.json).",
+    )
+    advisor_analyze.add_argument(
+        "--wildcards",
+        type=Path,
+        default=Path("out/wildcards.json"),
+        help="Pfad zu wildcards.json (Default: out/wildcards.json).",
+    )
+    advisor_analyze.add_argument(
+        "--deck-cards",
+        dest="deck_cards_path",
+        type=Path,
+        default=Path("out/deck-cards.json"),
+        help="Pfad zu deck-cards.json (Default: out/deck-cards.json).",
+    )
+    advisor_analyze.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Ausgabeverzeichnis (Default: out).",
+    )
+    advisor_analyze.add_argument(
+        "--json",
+        action="store_true",
+        help="Ausgabe als JSON statt Text-Zusammenfassung.",
+    )
 
     advisor_llm = advisor_subparsers.add_parser("llm", help="LLM-gestützte Wildcard- und Deck-Optimierung.")
     advisor_llm.add_argument("--collection", type=Path, default=Path("out/collection.json"), help="Pfad zu collection.json (Default: out/collection.json).")
@@ -861,6 +958,41 @@ def _run_wildcards(args: argparse.Namespace) -> int:
         f"Rares: {wc.get('rares')}, Mythics: {wc.get('mythics')}"
     )
     print(f"  Gold: {currency.get('gold')}, Gems: {currency.get('gems')}")
+    return 0
+
+
+def _run_deck_cards(args: argparse.Namespace) -> int:
+    """Exportiert Deck-Kartenlisten aus DeckUpsertDeckV3-Events."""
+    if args.logs:
+        log_paths = [Path(path) for path in args.logs]
+        missing = [path for path in log_paths if not path.exists()]
+        if missing:
+            missing_str = ", ".join(path.as_posix() for path in missing)
+            _error(f"Logdatei(en) nicht gefunden: {missing_str}")
+            return 1
+    else:
+        platform = args.platform or detect_platform()
+        config = _path_config_from_args(args)
+        try:
+            discovery = discover_logs(platform, config)
+        except MissingLogsError as exc:
+            _error(str(exc))
+            return 1
+        log_paths = discovery.found
+
+    export_paths = export_deck_cards(log_paths, args.output)
+    print(f"Deck-Kartenlisten exportiert: {export_paths.deck_cards}")
+    print(f"Run-Report: {export_paths.run_report}")
+
+    # Kurze Zusammenfassung
+    import json as _json
+    data = _json.loads(export_paths.deck_cards.read_text(encoding="utf-8"))
+    decks = data.get("decks", [])
+    print(f"  Decks mit Kartenlisten: {len(decks)}")
+    for deck in decks:
+        main_count = sum(c.get("quantity", 0) for c in deck.get("mainDeck", []))
+        sb_count = sum(c.get("quantity", 0) for c in deck.get("sideboard", []))
+        print(f"  - {deck.get('name', '?')} ({deck.get('deckId', '?')[:8]}...): Main {main_count}, SB {sb_count}")
     return 0
 
 
@@ -1473,6 +1605,117 @@ def _run_advisor_meta(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_advisor_analyze(args: argparse.Namespace) -> int:
+    """Analysiert ein Deck gegen Collection + Wildcards."""
+    if not args.deck and not args.name:
+        _error("Entweder --deck <deckId> oder --name <deckName> erforderlich.")
+        return 1
+    if not args.deck_cards_path.exists():
+        _error(f"deck-cards.json nicht gefunden: {args.deck_cards_path}")
+        return 1
+    if not args.collection.exists():
+        _error(f"collection.json nicht gefunden: {args.collection}")
+        return 1
+
+    try:
+        deck = load_deck_cards(args.deck_cards_path, deck_id=args.deck, name=args.name)
+    except ValueError as exc:
+        _error(str(exc))
+        return 1
+
+    collection_data = json.loads(args.collection.read_text(encoding="utf-8"))
+    wildcards_data = {}
+    if args.wildcards.exists():
+        wildcards_data = json.loads(args.wildcards.read_text(encoding="utf-8"))
+    else:
+        print(f"⚠ Wildcards nicht gefunden: {args.wildcards} — Analyse ohne Wildcard-Bestand.")
+
+    # Karten-DB optional laden (für Namens-/Seltenheits-Auflösung)
+    card_db = None
+    try:
+        card_db = load_card_database()
+    except Exception:
+        pass  # Karten-DB ist optional
+
+    result = analyze_deck(
+        deck=deck,
+        collection=collection_data,
+        wildcards=wildcards_data,
+        card_db=card_db,
+    )
+
+    # Ergebnis in Datei schreiben
+    output_dir = args.output
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_dir / "advisor-analyze.json"
+    result_path.write_text(
+        json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(f"\n📄 Result geschrieben: {result_path}")
+        return 0
+
+    # Text-Ausgabe
+    deck_info = result["deck"]
+    summary = result["summary"]
+    print(f"{'=' * 50}")
+    print(f"DECK-ANALYSE: {deck_info['name']} ({deck_info['format']})")
+    print(f"  DeckId: {deck_info['deckId']}")
+    print(f"{'=' * 50}")
+    print(f"\n📊 Completion: {summary['completionScore']}%")
+    print(f"  Total: {summary['totalCards']} Karten")
+    print(f"  Owned: {summary['ownedCards']} Karten")
+    print(f"  Missing: {summary['missingCards']} Karten ({summary['missingUnique']} unique)")
+
+    # Wildcard-Bedarf
+    wc = result.get("wildcardNeed", {})
+    wc_needed = wc.get("needed", {})
+    wc_sufficiency = wc.get("sufficiency", {})
+    if wc_needed:
+        print(f"\n🎴 Wildcard-Bedarf:")
+        for rarity, count in wc_needed.items():
+            suff = wc_sufficiency.get(rarity, {})
+            status = "✅" if suff.get("sufficient") else "❌"
+            print(f"  {status} {rarity}: benötigt {count}, vorhanden {suff.get('owned', 0)}, Fehlt {suff.get('shortfall', 0)}")
+    else:
+        print(f"\n🎴 Keine Wildcards benötigt — alle Karten vorhanden!")
+
+    # Craft-Priorität
+    craft = result.get("craftPriority", [])
+    if craft:
+        print(f"\n🔨 Craft-Priorität:")
+        for group in craft:
+            rarity = group["rarity"]
+            total = group["totalMissing"]
+            cards = group["cards"]
+            print(f"  {rarity.upper()} ({total} Karten, {len(cards)} unique):")
+            for card in cards[:10]:
+                print(f"    - {card['name']} (×{card['missing']}, {card['zone']})")
+            if len(cards) > 10:
+                print(f"    ... und {len(cards) - 10} weitere")
+
+    # Owned/missing Detail
+    missing = result.get("missingCards", [])
+    owned = result.get("ownedCards", [])
+    print(f"\n📋 Fehlende Karten ({len(missing)}):")
+    if missing:
+        for card in missing[:15]:
+            print(f"  - {card['name']} ({card['rarity']}): {card['missing']} fehlt, {card['owned']} vorhanden")
+        if len(missing) > 15:
+            print(f"  ... und {len(missing) - 15} weitere")
+    else:
+        print("  Keine — alle Karten vorhanden!")
+
+    if result.get("warnings"):
+        print(f"\n⚠ Warnings: {', '.join(result['warnings'])}")
+
+    print(f"\n📄 Result geschrieben: {result_path}")
+    return 0
+
+
 def _run_advisor(args: argparse.Namespace) -> int:
     if args.advisor_command == "complete":
         if not args.collection.exists():
@@ -1498,6 +1741,8 @@ def _run_advisor(args: argparse.Namespace) -> int:
         if result["warnings"]:
             print(f"Warnings: {', '.join(result['warnings'])}")
         return 0
+    if args.advisor_command == "analyze":
+        return _run_advisor_analyze(args)
     if args.advisor_command == "llm":
         if not args.collection.exists():
             _error(f"collection.json nicht gefunden: {args.collection}")
@@ -1600,6 +1845,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_decks(args)
     if args.command == "wildcards":
         return _run_wildcards(args)
+    if args.command == "deck-cards":
+        return _run_deck_cards(args)
     if args.command == "scan":
         return _run_scan(args)
     if args.command == "deck-scan":
