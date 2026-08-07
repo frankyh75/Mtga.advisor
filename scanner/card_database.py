@@ -61,11 +61,13 @@ def load_local_mtga_database() -> dict[int, dict[str, Any]]:
             cols = [row[1] for row in cursor.execute("PRAGMA table_info(Cards)")]
             has_set = "ExpansionCode" in cols
             has_cn = "CollectorNumber" in cols
+            has_rarity = "Rarity" in cols
 
             query = (
                 f"SELECT GrpId, TitleId, "
                 f"{'ExpansionCode' if has_set else 'NULL'}, "
-                f"{'CollectorNumber' if has_cn else 'NULL'} "
+                f"{'CollectorNumber' if has_cn else 'NULL'}, "
+                f"{'Rarity' if has_rarity else 'NULL'} "
                 f"FROM Cards"
             )
             cursor.execute(query)
@@ -76,12 +78,14 @@ def load_local_mtga_database() -> dict[int, dict[str, Any]]:
                 title_id = row[1]
                 set_code = row[2] if row[2] else ""
                 cn = str(row[3]) if row[3] else ""
+                rarity = _rarity_label(row[4]) if has_rarity else "unknown"
 
                 if title_id in loc_map:
                     lookup[grp_id] = {
                         "name": loc_map[title_id],
                         "set": set_code,
                         "collector_number": cn,
+                        "rarity": rarity,
                     }
 
             conn.close()
@@ -178,7 +182,20 @@ def _add_scryfall_card(lookup: dict[int, dict[str, Any]], card: dict[str, Any]) 
             "name": card.get("name", "Unknown"),
             "set": card.get("set", "").upper(),
             "collector_number": card.get("collector_number", ""),
+            "rarity": card.get("rarity", "unknown"),
         }
+
+
+# MTGA Rarity-Spalte: 1=common, 2=uncommon, 3=rare, 4=mythic
+_RARITY_MAP = {1: "common", 2: "uncommon", 3: "rare", 4: "mythic"}
+
+
+def _rarity_label(value: Any) -> str:
+    """Map MTGA Rarity-Int auf ein Label (common/uncommon/rare/mythic)."""
+    try:
+        return _RARITY_MAP.get(int(value), "unknown")
+    except (TypeError, ValueError):
+        return "unknown"
 
 
 def _read_lookup_cache(path: Path) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:

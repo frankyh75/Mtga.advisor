@@ -570,6 +570,73 @@ document.addEventListener("DOMContentLoaded", () => {
     hidePrecons.addEventListener("change", applyDeckFilter);
   }
 
+  // Deckliste importieren (Arena-Text) → gegen Collection + Wildcards analysieren
+  const importBtn = document.getElementById("deck-import-btn");
+  const importPanel = document.getElementById("deck-import-panel");
+  const importText = document.getElementById("deck-import-text");
+  const importFormat = document.getElementById("deck-import-format");
+  const importName = document.getElementById("deck-import-name");
+  const importSubmit = document.getElementById("deck-import-submit");
+  const importCancel = document.getElementById("deck-import-cancel");
+  const importResult = document.getElementById("deck-import-result");
+
+  if (importBtn && importPanel) {
+    importBtn.addEventListener("click", () => {
+      const show = importPanel.style.display === "none";
+      importPanel.style.display = show ? "block" : "none";
+      if (show && importText) importText.focus();
+    });
+  }
+  if (importCancel && importPanel) {
+    importCancel.addEventListener("click", () => {
+      importPanel.style.display = "none";
+      if (importResult) importResult.textContent = "";
+    });
+  }
+  if (importSubmit && importResult) {
+    importSubmit.addEventListener("click", async () => {
+      const text = (importText?.value || "").trim();
+      if (!text) {
+        importResult.textContent = "⚠ Bitte Deckliste einfügen.";
+        return;
+      }
+      importResult.textContent = "Analysiere...";
+      try {
+        const resp = await fetch("/api/deck-import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deck_text: text,
+            format: importFormat?.value || "historic",
+            name: importName?.value || "",
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+          importResult.textContent = "❌ " + (data.error || data.message || "Fehler");
+          return;
+        }
+        const s = data.summary || {};
+        const wc = data.wildcardNeed || {};
+        let html = `<strong>${data.deck?.name || "Deck"}</strong> (${data.deck?.format || "?"}) — Completion ${s.completionScore}%<br>`;
+        html += `Owned: ${s.ownedCards}/${s.totalCards} · Missing: ${s.missingCards} (${s.missingUnique} unique)<br>`;
+        const needed = wc.needed || {};
+        const parts = [];
+        for (const [r, n] of Object.entries(needed)) {
+          if (n > 0) parts.push(`${r}: ${n}`);
+        }
+        html += parts.length ? `Wildcard-Bedarf: ${parts.join(", ")}` : "Keine Wildcards benötigt";
+        const diag = data.importDiagnostics || {};
+        if (diag.unresolved && diag.unresolved.length) {
+          html += `<br><span style="color:var(--danger)">⚠ ${diag.unresolved.length} Zeile(n) nicht aufgelöst</span>`;
+        }
+        importResult.innerHTML = html;
+      } catch (err) {
+        importResult.textContent = "❌ " + err.message;
+      }
+    });
+  }
+
   // Search field — filter as you type (with debounce)
   let searchDebounce = null;
   if (deckSearch) {

@@ -10,7 +10,7 @@ from typing import Any, Sequence
 from advisor.completion import build_completion_advice, load_json, write_advisor_result
 from advisor.deck_export import export_deck_to_arena_text, load_deck_by_id, DeckNotFoundError, DeckExportError
 from advisor.deck_import import import_arena_deck, write_deck
-from advisor.analyze import analyze_deck, load_deck_cards
+from advisor.analyze import analyze_deck, arena_deck_to_deck_cards, load_deck_cards
 from advisor.llm_advisor import run_llm_advisor
 from advisor.llm_config import LLMConfig, load_config, write_default_config
 from parser.decks import export_decks, export_container, show_deck, list_decks
@@ -478,9 +478,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Analysiert ein Deck gegen Collection + Wildcards (owned/missing, Craft-Priorität).",
     )
     advisor_analyze.add_argument(
+        "--deck-text",
+        type=Path,
+        default=None,
+        help="Pfad zu einer Arena-Textdeckliste. Wird direkt gegen Collection + Wildcards analysiert.",
+    )
+    advisor_analyze.add_argument(
+        "--deck-text-stdin",
+        action="store_true",
+        help="Lese die Arena-Textdeckliste von stdin (Alternative zu --deck-text).",
+    )
+    advisor_analyze.add_argument(
+        "--format",
+        type=str,
+        default="standard",
+        help="Deck-Format für den Import (standard, historic, brawl, ...). Default: standard.",
+    )
+    advisor_analyze.add_argument(
         "--deck",
         type=str,
-        help="Deck-ID des zu analysierenden Decks.",
+        help="Deck-ID des zu analysierenden Decks (aus deck-cards.json).",
     )
     advisor_analyze.add_argument(
         "--name",
@@ -1606,36 +1623,68 @@ def _run_advisor_meta(args: argparse.Namespace) -> int:
 
 
 def _run_advisor_analyze(args: argparse.Namespace) -> int:
-    """Analysiert ein Deck gegen Collection + Wildcards."""
-    if not args.deck and not args.name:
-        _error("Entweder --deck <deckId> oder --name <deckName> erforderlich.")
-        return 1
-    if not args.deck_cards_path.exists():
-        _error(f"deck-cards.json nicht gefunden: {args.deck_cards_path}")
+    """Analysiert ein Deck gegen Collection + Wildcards.
+
+    Zwei Quellen werden unterstützt:
+      1. Arena-Textdeckliste via ``--deck-text <datei>`` oder ``--deck-text-stdin``
+         → ``import_arena_deck`` → ``arena_deck_to_deck_cards`` → ``analyze_deck``.
+      2. Gespeichertes Deck via ``--deck <deckId>`` / ``--name`` aus deck-cards.json.
+    """
+    has_text = bool(args.deck_text) or bool(getattr(args, "deck_text_stdin", False))
+    if not has_text and not args.deck and not args.name:
+        _error(
+            "Entweder --deck-text <datei> / --deck-text-stdin ODER "
+            "--deck <deckId> / --name <deckName> erforderlich."
+        )
         return 1
     if not args.collection.exists():
         _error(f"collection.json nicht gefunden: {args.collection}")
         return 1
 
-    try:
-        deck = load_deck_cards(args.deck_cards_path, deck_id=args.deck, name=args.name)
-    except ValueError as exc:
-        _error(str(exc))
-        return 1
-
-    collection_data = json.loads(args.collection.read_text(encoding="utf-8"))
-    wildcards_data = {}
-    if args.wildcards.exists():
-        wildcards_data = json.loads(args.wildcards.read_text(encoding="utf-8"))
-    else:
-        print(f"⚠ Wildcards nicht gefunden: {args.wildcards} — Analyse ohne Wildcard-Bestand.")
-
-    # Karten-DB optional laden (für Namens-/Seltenheits-Auflösung)
+    # Karten-DB optional laden (für Namens-/Seltenheits-Auflösung, Arena-Import braucht sie).
     card_db = None
     try:
         card_db = load_card_database()
     except Exception:
-        pass  # Karten-DB ist optional
+        pass  # Karten-DB ist optional (im Arena-Import-Flow werden unbekannte Karten übersprungen)
+
+    if has_text:
+        # --- Arena-Textdeckliste → Import → Konvertierung → Analyse ---
+        if args.deck_text and not args.deck_text.exists():
+            _error(f"Arena-Textdeckliste nicht gefunden: {args.deck_text}")
+            return 1
+        if args.deck_text:
+            deck_text = args.deck_text.read_text(encoding="utf-8")
+        else:
+            deck_text = sys.stdin.read()
+        try:
+            arena_deck = import_arena_deck(
+                deck_text,
+                card_db=card_db or {},
+                deck_format=args.format,
+                name=args.name,
+            )
+        except Exception as exc:
+            _error(f"Fehler beim Import der Arena-Textdeckliste: {exc}")
+            return 1
+        deck = arena_deck_to_deck_cards(arena_deck)
+    else:
+        # --- Deck aus deck-cards.json laden ---
+        if not args.deck_cards_path.exists():
+            _error(f"deck-cards.json nicht gefunden: {args.deck_cards_path}")
+            return 1
+        try:
+            deck = load_deck_cards(args.deck_cards_path, deck_id=args.deck, name=args.name)
+        except ValueError as exc:
+            _error(str(exc))
+            return 1
+
+    collection_data = json.loads(args.collection.read_text(encoding="utf-8"))
+    wildcards_data: dict[str, Any] = {}
+    if args.wildcards.exists():
+        wildcards_data = json.loads(args.wildcards.read_text(encoding="utf-8"))
+    else:
+        print(f"⚠ Wildcards nicht gefunden: {args.wildcards} — Analyse ohne Wildcard-Bestand.")
 
     result = analyze_deck(
         deck=deck,

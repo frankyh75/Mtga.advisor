@@ -546,12 +546,29 @@ def _render_deck_format_dropdown(formats: list[str]) -> str:
     )
 
 
-def _render_decks_table(decks: dict[str, Any] | None) -> str:
+def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = None) -> str:
     if not decks:
         return "<p>Noch kein Deck-Export vorhanden. Führe <code>python3 -m cli.main run</code> aus.</p>"
     deck_list = decks.get("decks", [])
     if not deck_list:
         return "<p>Keine Decks gefunden.</p>"
+
+    # Deck-IDs mit Kartenliste aus deck-cards.json laden (für Badge + Sortierung)
+    deck_cards_ids: set[str] = set()
+    if output_dir is not None:
+        dc = _read_json(output_dir / "deck-cards.json")
+        if dc:
+            for d in dc.get("decks", []):
+                did = d.get("deckId")
+                if did:
+                    deck_cards_ids.add(str(did))
+
+    # Sortierung: Decks mit Kartenliste zuerst, dann alphabetisch nach Name
+    def _sort_key(deck: dict[str, Any]) -> tuple[int, str]:
+        did = str(deck.get("deckKey") or deck.get("deckId") or "")
+        has_cards = did in deck_cards_ids
+        return (0 if has_cards else 1, str(deck.get("name", "")).lower())
+    deck_list = sorted(deck_list, key=_sort_key)
 
     # Sammle eindeutige Formate für das Dropdown
     formats = _collect_deck_formats(decks)
@@ -568,13 +585,19 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
         legal = ", ".join(f for f, v in legalities.items() if v)[:40] or "?"
         is_precon = bool(deck.get("isPrecon"))
         type_label = "Precon" if is_precon else "Deck"
+        has_cards = str(deck_id) in deck_cards_ids
+        badge = (
+            "<span class='deck-cards-badge' title='Kartenliste verfügbar'>✓ Kartenliste</span>"
+            if has_cards else ""
+        )
         row = (
             "<tr class='deck-row' "
             f"data-deck-key='{html.escape(str(deck_id))}' "
             f"data-deck-name='{html.escape(name)}' "
             f"data-is-precon='{str(is_precon).lower()}' "
-            f"data-deck-format='{html.escape(str(fmt))}'>"
-            + f"<td>{html.escape(name)}</td>"
+            f"data-deck-format='{html.escape(str(fmt))}' "
+            f"data-has-cards='{str(has_cards).lower()}'>"
+            + f"<td>{html.escape(name)}{badge}</td>"
             + f"<td>{html.escape(fmt)}</td>"
             + f"<td><span class='deck-type {'precon' if is_precon else 'normal'}'>{html.escape(type_label)}</span></td>"
             + f"<td>{html.escape(legal)}</td>"
@@ -594,9 +617,20 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
         'class="deck-search-input" autocomplete="off">'
         f'{format_dropdown}'
         '<label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>'
+        '<button id="deck-import-btn" class="btn-select-deck" type="button">+ Deckliste importieren</button>'
         '<span id="deck-visibility" class="meta">'
         'Klick auf eine Zeile für Details, Chat-Button für Advisor.'
         '</span>'
+        '</div>'
+        '<div id="deck-import-panel" class="deck-import-panel" style="display:none">'
+        '<textarea id="deck-import-text" rows="8" placeholder="Arena-Deckliste hier einfügen (Copy to Clipboard aus MTGA)..."></textarea>'
+        '<div class="deck-import-controls">'
+        '<input type="text" id="deck-import-format" placeholder="Format (z.B. historic)" value="historic">'
+        '<input type="text" id="deck-import-name" placeholder="Deckname (optional)">'
+        '<button id="deck-import-submit" class="btn-select-deck" type="button">Analysieren</button>'
+        '<button id="deck-import-cancel" class="btn-select-deck" type="button">Abbrechen</button>'
+        '</div>'
+        '<div id="deck-import-result" class="deck-import-result"></div>'
         '</div>'
     )
 
@@ -1108,6 +1142,12 @@ def _render_index(
     .deck-row.hidden-by-filter { display: none; }
     .deck-row.hidden-by-page { display: none; }
     .deck-type { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .75rem; }
+    .deck-cards-badge { display: inline-block; margin-left: .4rem; padding: .05rem .4rem; border-radius: 999px; background: var(--green); color: #fff; font-size: .7rem; font-weight: 600; vertical-align: middle; }
+    .deck-import-panel { margin-top: .6rem; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .deck-import-panel textarea { width: 100%; font-family: ui-monospace, monospace; font-size: .82rem; padding: .5rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .deck-import-controls { display: flex; gap: .5rem; margin-top: .5rem; flex-wrap: wrap; align-items: center; }
+    .deck-import-controls input { flex: 1; min-width: 120px; padding: .3rem .5rem; border: 1px solid var(--line); border-radius: 8px; font-size: .85rem; }
+    .deck-import-result { margin-top: .6rem; font-size: .85rem; }
     .deck-type.precon { background: #fee8d1; color: #8a4b08; }
     .deck-type.normal { background: #e7efe9; color: #26513a; }
     .deck-toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: .5rem; flex-wrap: wrap; }
@@ -1387,7 +1427,7 @@ def _render_index(
         collection_summary=_collection_summary(collection),
         decks_summary=_decks_summary(decks),
         llm_advisor_summary=_llm_advisor_summary(advisor_result),
-        decks_table=_render_decks_table(decks),
+        decks_table=_render_decks_table(decks, output_dir),
         decks_json=_json_for_script(decks or {}),
         advisor_warnings=_render_list(advisor_warnings),
         crafting_priorities=_render_crafting_priorities(advisor_result),
@@ -1722,6 +1762,60 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
             # LLM aufrufen
             result = _call_llm_chat(config, prompt)
             _json_response(self, result, status=HTTPStatus.OK)
+            return
+
+        if self.path == "/api/deck-import":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                _json_response(self, {"error": "invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_text = (data.get("deck_text") or "").strip()
+            deck_format = (data.get("format") or "standard").strip()
+            deck_name = (data.get("name") or "Imported Deck").strip()
+            if not deck_text:
+                _json_response(self, {"error": "Keine Deckliste"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            try:
+                from advisor.deck_import import import_arena_deck
+                from advisor.analyze import analyze_deck
+                from scanner.card_database import load_card_database
+
+                card_db = load_card_database()
+                imported = import_arena_deck(
+                    deck_text, card_db=card_db, deck_format=deck_format, name=deck_name
+                )
+                # Konvertiere mainboard/arenaId/count -> mainDeck/cardId/quantity
+                def _to_entries(pile):
+                    return [
+                        {"cardId": int(c["arenaId"]), "quantity": int(c["count"])}
+                        for c in pile
+                    ]
+                deck_for_analyze = {
+                    "deckId": imported.get("deckId"),
+                    "name": imported.get("name"),
+                    "format": imported.get("format"),
+                    "mainDeck": _to_entries(imported.get("mainboard", [])),
+                    "sideboard": _to_entries(imported.get("sideboard", [])),
+                    "commandZone": [],
+                    "companions": [],
+                }
+                collection = _read_json(output_dir / "collection.json") or {}
+                wildcards = _read_json(output_dir / "wildcards.json") or {}
+                result = analyze_deck(
+                    deck=deck_for_analyze,
+                    collection=collection,
+                    wildcards=wildcards,
+                    card_db=card_db,
+                )
+                result["importDiagnostics"] = imported.get("diagnostics", {})
+                _json_response(self, result, status=HTTPStatus.OK)
+            except Exception as exc:
+                _json_response(self, {"error": f"Import fehlgeschlagen: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if self.path == "/api/config":

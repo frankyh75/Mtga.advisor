@@ -175,6 +175,39 @@ def analyze_deck(
     }
 
 
+def arena_deck_to_deck_cards(arena_deck: dict[str, Any]) -> dict[str, Any]:
+    """Konvertiere ein ``import_arena_deck``-Payload (Schema ``arena-deck.v1``)
+    in das ``deck-cards.v1``-Format, das ``analyze_deck`` erwartet.
+
+    Mapping: ``mainboard`` → ``mainDeck``, ``sideboard`` → ``sideboard``,
+    ``arenaId`` → ``cardId``, ``count`` → ``quantity``.
+    ``commandZone``/``companions`` bleiben leer (Arena-Textexport kennt sie nicht).
+    """
+    def _convert_zone(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for card in cards:
+            arena_id = card.get("arenaId")
+            if arena_id is None:
+                continue
+            try:
+                card_id = int(arena_id)
+            except (TypeError, ValueError):
+                continue
+            quantity = int(card.get("count", 1))
+            out.append({"cardId": card_id, "quantity": quantity})
+        return out
+
+    return {
+        "deckId": arena_deck.get("deckId"),
+        "name": arena_deck.get("name", "Imported Deck"),
+        "format": arena_deck.get("format", "unknown"),
+        "mainDeck": _convert_zone(arena_deck.get("mainboard", [])),
+        "sideboard": _convert_zone(arena_deck.get("sideboard", [])),
+        "commandZone": [],
+        "companions": [],
+    }
+
+
 def load_deck_cards(
     deck_cards_path: Path,
     deck_id: str | None = None,
