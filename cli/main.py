@@ -13,6 +13,7 @@ from advisor.deck_import import import_arena_deck, write_deck
 from advisor.llm_advisor import run_llm_advisor
 from advisor.llm_config import LLMConfig, load_config, write_default_config
 from parser.decks import export_decks, export_container, show_deck, list_decks
+from parser.wildcards import export_wildcards
 from parser.start_hook import DeckSummary
 from parser.export import export_collection
 from parser.log_paths import (
@@ -203,6 +204,56 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Container-Verzeichnis.",
+    )
+
+    wildcards = subparsers.add_parser(
+        "wildcards",
+        help="Exportiert Wildcards (StartHook-InventoryInfo) aus MTGA-Logs.",
+    )
+    wildcards.add_argument(
+        "--log",
+        dest="logs",
+        action="append",
+        type=Path,
+        help="Pfad zu einer Logdatei (mehrfach angeben möglich). Wenn nicht gesetzt, werden Logs automatisch gesucht.",
+    )
+    wildcards.add_argument(
+        "--output",
+        type=Path,
+        default=Path("out"),
+        help="Ausgabeverzeichnis (Standard: ./out).",
+    )
+    wildcards.add_argument(
+        "--platform",
+        choices=["windows", "macos", "unknown"],
+        help="Plattform überschreiben (Standard: automatische Erkennung).",
+    )
+    wildcards.add_argument(
+        "--windows-local-low",
+        type=Path,
+        help="Override für Windows LocalLow MTGA Pfad.",
+    )
+    wildcards.add_argument(
+        "--windows-steam-userdata",
+        type=Path,
+        help="Override für Windows Steam userdata Pfad.",
+    )
+    wildcards.add_argument(
+        "--macos-logs",
+        type=Path,
+        help="Override für macOS Log-Pfad.",
+    )
+    wildcards.add_argument(
+        "--macos-steam-userdata",
+        type=Path,
+        help="Override für macOS Steam userdata Pfad.",
+    )
+    wildcards.add_argument(
+        "--custom-log-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Zusätzliche Log-Verzeichnisse, die geprüft werden sollen.",
     )
 
     scan = subparsers.add_parser("scan", help="Scannt die macOS-Collection aus dem MTGA-Prozessspeicher.")
@@ -775,6 +826,42 @@ def _is_helper_available() -> bool:
     """Prüft, ob der Sudo-Helper-Daemon läuft und erreichbar ist."""
     from scanner.helper_client import is_helper_available as _check
     return _check()
+
+
+def _run_wildcards(args: argparse.Namespace) -> int:
+    """Exportiert Wildcards aus StartHook-InventoryInfo-Events."""
+    if args.logs:
+        log_paths = [Path(path) for path in args.logs]
+        missing = [path for path in log_paths if not path.exists()]
+        if missing:
+            missing_str = ", ".join(path.as_posix() for path in missing)
+            _error(f"Logdatei(en) nicht gefunden: {missing_str}")
+            return 1
+    else:
+        platform = args.platform or detect_platform()
+        config = _path_config_from_args(args)
+        try:
+            discovery = discover_logs(platform, config)
+        except MissingLogsError as exc:
+            _error(str(exc))
+            return 1
+        log_paths = discovery.found
+
+    export_paths = export_wildcards(log_paths, args.output)
+    print(f"Wildcards exportiert: {export_paths.wildcards}")
+    print(f"Run-Report: {export_paths.run_report}")
+
+    # Kurze Zusammenfassung
+    import json as _json
+    data = _json.loads(export_paths.wildcards.read_text(encoding="utf-8"))
+    wc = data.get("wildcards", {})
+    currency = data.get("currency", {})
+    print(
+        f"  Commons: {wc.get('commons')}, Uncommons: {wc.get('uncommons')}, "
+        f"Rares: {wc.get('rares')}, Mythics: {wc.get('mythics')}"
+    )
+    print(f"  Gold: {currency.get('gold')}, Gems: {currency.get('gems')}")
+    return 0
 
 
 def _run_scan_via_helper(args: argparse.Namespace) -> int:
@@ -1511,6 +1598,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_collection(args)
     if args.command == "decks":
         return _run_decks(args)
+    if args.command == "wildcards":
+        return _run_wildcards(args)
     if args.command == "scan":
         return _run_scan(args)
     if args.command == "deck-scan":
