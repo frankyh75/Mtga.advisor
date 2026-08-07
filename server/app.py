@@ -515,16 +515,54 @@ def _llm_advisor_summary(advisor: dict[str, Any] | None) -> str:
     )
 
 
+def _collect_deck_formats(decks: dict[str, Any] | None) -> list[str]:
+    """Sammle eindeutige Formate aus allen Decks (formatLegalities + attributes.Format)."""
+    if not decks:
+        return []
+    formats: set[str] = set()
+    for deck in decks.get("decks", []):
+        fl = deck.get("formatLegalities", {})
+        if isinstance(fl, dict):
+            for fmt, legal in fl.items():
+                if legal:
+                    formats.add(fmt)
+        attrs = deck.get("attributes", {})
+        if isinstance(attrs, dict):
+            fmt = attrs.get("Format")
+            if fmt and fmt != "?":
+                formats.add(fmt)
+    return sorted(formats)
+
+
+def _render_deck_format_dropdown(formats: list[str]) -> str:
+    """Rendere das Format-Dropdown mit 'Alle' + eindeutigen Formaten."""
+    options = ["<option value=''>Alle</option>"]
+    for fmt in formats:
+        escaped = html.escape(fmt)
+        options.append(f"<option value='{escaped}'>{escaped}</option>")
+    return (
+        "<select id='deck-format-filter' class='deck-format-select'>"
+        f"{''.join(options)}</select>"
+    )
+
+
 def _render_decks_table(decks: dict[str, Any] | None) -> str:
     if not decks:
         return "<p>Noch kein Deck-Export vorhanden. Führe <code>python3 -m cli.main run</code> aus.</p>"
     deck_list = decks.get("decks", [])
     if not deck_list:
         return "<p>Keine Decks gefunden.</p>"
+
+    # Sammle eindeutige Formate für das Dropdown
+    formats = _collect_deck_formats(decks)
+    format_dropdown = _render_deck_format_dropdown(formats)
+
+    # Rendere ALLE Decks (nicht nur 50) — Pagination erfolgt client-seitig
     rows = []
-    for i, deck in enumerate(deck_list[:50]):
+    for i, deck in enumerate(deck_list):
         name = deck.get("name", "Unnamed")
-        fmt = deck.get("attributes", {}).get("Format", "?")
+        attrs = deck.get("attributes", {})
+        fmt = attrs.get("Format", "?") if isinstance(attrs, dict) else "?"
         deck_id = deck.get("deckKey") or deck.get("deckId") or deck.get("deckTileId") or i
         legalities = deck.get("formatLegalities", {})
         legal = ", ".join(f for f, v in legalities.items() if v)[:40] or "?"
@@ -534,7 +572,8 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
             "<tr class='deck-row' "
             f"data-deck-key='{html.escape(str(deck_id))}' "
             f"data-deck-name='{html.escape(name)}' "
-            f"data-is-precon='{str(is_precon).lower()}'>"
+            f"data-is-precon='{str(is_precon).lower()}' "
+            f"data-deck-format='{html.escape(str(fmt))}'>"
             + f"<td>{html.escape(name)}</td>"
             + f"<td>{html.escape(fmt)}</td>"
             + f"<td><span class='deck-type {'precon' if is_precon else 'normal'}'>{html.escape(type_label)}</span></td>"
@@ -547,13 +586,42 @@ def _render_decks_table(decks: dict[str, Any] | None) -> str:
             + "</tr>"
         )
         rows.append(row)
-    suffix = ""
-    if len(deck_list) > 50:
-        suffix = f'<p class="meta">Weitere {len(deck_list) - 50} Decks im JSON.</p>'
-    return (
-        "<table><thead><tr><th>Name</th><th>Format</th><th>Typ</th><th>Legal in</th><th></th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>{suffix}"
+
+    # Filter- und Pagination-Toolbar über der Tabelle
+    toolbar = (
+        '<div class="deck-filter-bar">'
+        '<input type="text" id="deck-search" placeholder="Deck suchen..." '
+        'class="deck-search-input" autocomplete="off">'
+        f'{format_dropdown}'
+        '<label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>'
+        '<span id="deck-visibility" class="meta">'
+        'Klick auf eine Zeile für Details, Chat-Button für Advisor.'
+        '</span>'
+        '</div>'
     )
+
+    table = (
+        "<table id='deck-table'><thead><tr><th>Name</th><th>Format</th>"
+        "<th>Typ</th><th>Legal in</th><th></th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+    # Pagination-Controls unter der Tabelle
+    pagination = (
+        '<div id="deck-pagination" class="deck-pagination">'
+        '<button id="deck-prev-page" class="btn-select-deck" disabled>← Vorherige</button>'
+        '<span id="deck-page-info" class="meta">Seite 1</span>'
+        '<button id="deck-next-page" class="btn-select-deck">Nächste →</button>'
+        '<label class="deck-page-size"><span class="meta">pro Seite:</span>'
+        '<select id="deck-page-size">'
+        '<option value="25">25</option>'
+        '<option value="50" selected>50</option>'
+        '<option value="100">100</option>'
+        '</select></label>'
+        '</div>'
+    )
+
+    return toolbar + table + pagination
 
 
 def _render_crafting_priorities(advisor: dict[str, Any] | None) -> str:
@@ -1038,11 +1106,20 @@ def _render_index(
     .deck-row:hover { background: rgba(180,83,9,.06); cursor: pointer; }
     .deck-row.is-selected { background: rgba(180,83,9,.14); }
     .deck-row.hidden-by-filter { display: none; }
+    .deck-row.hidden-by-page { display: none; }
     .deck-type { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .75rem; }
     .deck-type.precon { background: #fee8d1; color: #8a4b08; }
     .deck-type.normal { background: #e7efe9; color: #26513a; }
     .deck-toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: .5rem; flex-wrap: wrap; }
     .deck-toolbar label { display: inline-flex; gap: .45rem; align-items: center; cursor: pointer; }
+    .deck-filter-bar { display: flex; gap: .8rem; align-items: center; margin-bottom: .8rem; flex-wrap: wrap; }
+    .deck-search-input { flex: 1; min-width: 180px; border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-family: inherit; font-size: .9rem; }
+    .deck-format-select { border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-family: inherit; font-size: .9rem; background: var(--panel); }
+    .deck-filter-bar label { display: inline-flex; gap: .35rem; align-items: center; cursor: pointer; font-size: .88rem; }
+    .deck-pagination { display: flex; gap: .8rem; align-items: center; margin-top: .8rem; flex-wrap: wrap; }
+    .deck-pagination button:disabled { opacity: .4; cursor: default; }
+    .deck-page-size { display: inline-flex; gap: .35rem; align-items: center; margin-left: auto; }
+    .deck-page-size select { border: 1px solid var(--line); border-radius: 6px; padding: .2rem .4rem; font-family: inherit; font-size: .85rem; }
     .deck-details { margin-top: 1rem; border: 1px solid var(--line); border-radius: 16px; background: rgba(247,241,231,.9); padding: 1rem; }
     .deck-details code, .deck-details pre { background: #231f1a; color: #f8ead1; }
     .deck-details pre { max-height: 20rem; }
@@ -1220,10 +1297,6 @@ def _render_index(
 
   <div class="section">
     <h2>Decks <span class="badge">Phase 1.2</span></h2>
-    <div class="deck-toolbar">
-      <label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>
-      <span id="deck-visibility" class="meta">Klick auf eine Zeile für Details, Chat-Button für Advisor.</span>
-    </div>
     $decks_table
     <div id="deck-details" class="deck-details">
       <div class="deck-detail-empty" id="deck-detail-empty">Klicke auf ein Deck, um die Detailansicht zu laden.</div>
@@ -1502,6 +1575,77 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
 
             cards_data = _extract_deck_cards(deck)
             _json_response(self, cards_data, status=HTTPStatus.OK)
+            return
+
+        # /api/deck-cards-v2?deck_id=... — reads deck-cards.json (schema deck-cards.v1)
+        # Returns card list with resolved card names from card_database.
+        if parsed.path == "/api/deck-cards-v2":
+            qs = parse_qs(parsed.query)
+            deck_id = qs.get("deck_id", [None])[0]
+            if not deck_id:
+                _json_response(self, {"error": "deck_id parameter required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            deck_cards_data = _read_json(output_dir / "deck-cards.json")
+            if not deck_cards_data:
+                _json_response(self, {"available": False, "message": "deck-cards.json noch nicht vorhanden."}, status=HTTPStatus.OK)
+                return
+
+            # Search for the deck in deck-cards.json by deckId
+            target_deck = None
+            for d in deck_cards_data.get("decks", []):
+                if str(d.get("deckId")) == str(deck_id):
+                    target_deck = d
+                    break
+
+            if not target_deck:
+                _json_response(self, {"available": False, "message": "Kartenliste für dieses Deck noch nicht erfasst."}, status=HTTPStatus.OK)
+                return
+
+            # Try to load card database for name resolution
+            card_db: dict[int, dict[str, Any]] = {}
+            try:
+                from scanner.card_database import load_card_database
+                card_db = load_card_database()
+            except Exception:
+                pass  # Fall back to raw cardId if DB unavailable
+
+            def _resolve_card_name(card_id: Any) -> str:
+                """Resolve card name from card DB by grpId/arenaId."""
+                if not card_db:
+                    return ""
+                # Try numeric lookup
+                try:
+                    gid = int(card_id)
+                except (ValueError, TypeError):
+                    return ""
+                entry = card_db.get(gid)
+                if entry and isinstance(entry, dict):
+                    return entry.get("name", "")
+                return ""
+
+            def _normalize_pile(pile: list) -> list[dict[str, Any]]:
+                result = []
+                for c in pile:
+                    card_id = c.get("cardId", c.get("grpId", 0))
+                    qty = c.get("quantity", c.get("count", 1))
+                    name = _resolve_card_name(card_id) or c.get("name", "") or f"ID:{card_id}"
+                    result.append({"cardId": card_id, "name": name, "quantity": qty})
+                return result
+
+            payload: dict[str, Any] = {
+                "available": True,
+                "deckId": target_deck.get("deckId", ""),
+                "name": target_deck.get("name", "Unnamed"),
+                "format": target_deck.get("format", ""),
+                "mainboard": _normalize_pile(target_deck.get("mainDeck", [])),
+                "sideboard": _normalize_pile(target_deck.get("sideboard", [])),
+                "commandZone": _normalize_pile(target_deck.get("commandZone", [])),
+                "companions": _normalize_pile(target_deck.get("companions", [])),
+            }
+            total = sum(c.get("quantity", 1) for c in payload["mainboard"])
+            payload["totalCards"] = total
+            _json_response(self, payload, status=HTTPStatus.OK)
             return
 
         if self.path == "/":

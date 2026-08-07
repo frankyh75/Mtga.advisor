@@ -13,6 +13,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const chatDeckCards = document.getElementById("chat-deck-cards");
   const hidePrecons = document.getElementById("hide-precons");
   const deckVisibility = document.getElementById("deck-visibility");
+  const deckSearch = document.getElementById("deck-search");
+  const deckFormatFilter = document.getElementById("deck-format-filter");
+  const deckPrevPage = document.getElementById("deck-prev-page");
+  const deckNextPage = document.getElementById("deck-next-page");
+  const deckPageInfo = document.getElementById("deck-page-info");
+  const deckPageSize = document.getElementById("deck-page-size");
   const deckDetailsSection = document.getElementById("deck-details");
   const deckDetailEmpty = document.getElementById("deck-detail-empty");
   const deckDetailContent = document.getElementById("deck-detail-content");
@@ -22,6 +28,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const deckDetailJson = document.getElementById("deck-detail-json");
   const deckDetailCards = document.getElementById("deck-detail-cards");
   const deckRows = Array.from(document.querySelectorAll(".deck-row"));
+
+  // Pagination state
+  let currentPage = 1;
+  let pageSize = 50;
 
   const PILE_LABELS = [
     ["mainboard", "Mainboard"],
@@ -249,7 +259,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 
-  const renderDeckDetails = (payload) => {
+  const renderDeckDetails = (payload, v2Cards) => {
     if (!deckDetailContent || !deckDetailEmpty) {
       return;
     }
@@ -288,26 +298,56 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (deckDetailCards) {
       deckDetailCards.replaceChildren();
-      const { mainboard, sideboard, commandZone, companions } = extractCards(payload);
-      const hasDeckList = mainboard.length || sideboard.length || commandZone.length || companions.length;
 
-      if (!hasDeckList) {
-        const note = document.createElement("p");
-        note.className = "deck-detail-empty";
-        note.textContent = "Diese Ansicht enthält derzeit nur eine Summary. Eine vollständige Deckliste ist für dieses Deck noch nicht verfügbar.";
-        deckDetailCards.appendChild(note);
+      // Priority 1: v2 card list from deck-cards.json
+      if (v2Cards && v2Cards.available) {
+        const v2Piles = [
+          ["mainboard", "Mainboard"],
+          ["sideboard", "Sideboard"],
+          ["commandZone", "Command Zone"],
+          ["companions", "Companions"],
+        ];
+        const v2HasCards = v2Piles.some(([key]) => (v2Cards[key] || []).length > 0);
+        if (v2HasCards) {
+          for (const [pileKey, label] of v2Piles) {
+            const pile = v2Cards[pileKey] || [];
+            if (!pile.length) continue;
+            const normalized = pile.map((c) => ({
+              cardId: c.cardId ?? 0,
+              name: c.name || `ID:${c.cardId}`,
+              count: c.quantity ?? 1,
+            }));
+            deckDetailCards.appendChild(renderCardSection(label, normalized));
+          }
+        } else {
+          const note = document.createElement("p");
+          note.className = "deck-detail-empty";
+          note.textContent = "Kartenliste noch nicht verfügbar — öffne/ändere das Deck in MTGA, damit es erfasst wird.";
+          deckDetailCards.appendChild(note);
+        }
       } else {
-        if (mainboard.length) {
-          deckDetailCards.appendChild(renderCardSection("Mainboard", mainboard));
-        }
-        if (sideboard.length) {
-          deckDetailCards.appendChild(renderCardSection("Sideboard", sideboard));
-        }
-        if (commandZone.length) {
-          deckDetailCards.appendChild(renderCardSection("Command Zone", commandZone));
-        }
-        if (companions.length) {
-          deckDetailCards.appendChild(renderCardSection("Companions", companions));
+        // Priority 2: summary cards from payload (legacy)
+        const { mainboard, sideboard, commandZone, companions } = extractCards(payload);
+        const hasDeckList = mainboard.length || sideboard.length || commandZone.length || companions.length;
+
+        if (!hasDeckList) {
+          const note = document.createElement("p");
+          note.className = "deck-detail-empty";
+          note.textContent = "Kartenliste noch nicht verfügbar — öffne/ändere das Deck in MTGA, damit es erfasst wird.";
+          deckDetailCards.appendChild(note);
+        } else {
+          if (mainboard.length) {
+            deckDetailCards.appendChild(renderCardSection("Mainboard", mainboard));
+          }
+          if (sideboard.length) {
+            deckDetailCards.appendChild(renderCardSection("Sideboard", sideboard));
+          }
+          if (commandZone.length) {
+            deckDetailCards.appendChild(renderCardSection("Command Zone", commandZone));
+          }
+          if (companions.length) {
+            deckDetailCards.appendChild(renderCardSection("Companions", companions));
+          }
         }
       }
     }
@@ -381,13 +421,25 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     try {
-      const response = await fetch(`/api/deck/${encodeURIComponent(deckKey)}`);
-      const payload = await response.json();
-      if (!response.ok || payload.error) {
+      // Fetch summary and deck-cards-v2 in parallel
+      const [summaryResp, cardsResp] = await Promise.all([
+        fetch(`/api/deck/${encodeURIComponent(deckKey)}`),
+        fetch(`/api/deck-cards-v2?deck_id=${encodeURIComponent(deckKey)}`),
+      ]);
+
+      const payload = await summaryResp.json();
+      if (!summaryResp.ok || payload.error) {
         deckDetailEmpty.textContent = payload.message || payload.error || "Deck konnte nicht geladen werden.";
         return;
       }
-      renderDeckDetails(payload);
+
+      // Try to get v2 card list
+      let v2Cards = null;
+      if (cardsResp.ok) {
+        v2Cards = await cardsResp.json();
+      }
+
+      renderDeckDetails(payload, v2Cards);
     } catch (error) {
       deckDetailEmpty.textContent = error.message;
     }
@@ -395,24 +447,64 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const applyDeckFilter = () => {
     const hide = Boolean(hidePrecons?.checked);
-    let visibleCount = 0;
-    let hiddenCount = 0;
+    const searchTerm = (deckSearch?.value || "").trim().toLowerCase();
+    const formatFilter = deckFormatFilter?.value || "";
 
+    // First pass: mark each row hidden/visible based on all filters
+    let filteredRows = [];
     deckRows.forEach((row) => {
       const isPrecon = row.dataset.isPrecon === "true";
-      const shouldHide = hide && isPrecon;
-      row.classList.toggle("hidden-by-filter", shouldHide);
-      if (shouldHide) {
-        hiddenCount += 1;
-      } else {
-        visibleCount += 1;
-      }
+      const deckName = (row.dataset.deckName || "").toLowerCase();
+      const deckFormat = row.dataset.deckFormat || "?";
+
+      let hidden = false;
+      if (hide && isPrecon) hidden = true;
+      if (searchTerm && !deckName.includes(searchTerm)) hidden = true;
+      if (formatFilter && deckFormat !== formatFilter) hidden = true;
+
+      row.classList.toggle("hidden-by-filter", hidden);
+      if (!hidden) filteredRows.push(row);
     });
 
+    // Second pass: apply pagination on filtered rows
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+    if (currentPage > totalPages) currentPage = totalPages;
+    if (currentPage < 1) currentPage = 1;
+
+    const startIdx = (currentPage - 1) * pageSize;
+    const endIdx = startIdx + pageSize;
+
+    filteredRows.forEach((row, idx) => {
+      const onPage = idx >= startIdx && idx < endIdx;
+      // Use hidden-by-filter for filter, and hidden-by-page for pagination
+      row.classList.toggle("hidden-by-page", !onPage);
+    });
+
+    // Update visibility info
     if (deckVisibility) {
-      deckVisibility.textContent = hide
-        ? `${visibleCount} Decks sichtbar, ${hiddenCount} Precons ausgeblendet.`
-        : `${visibleCount} Decks sichtbar.`;
+      const visibleCount = filteredRows.length;
+      const hiddenCount = deckRows.length - filteredRows.length;
+      let msg = `${visibleCount} Decks sichtbar`;
+      if (hiddenCount > 0) {
+        msg += `, ${hiddenCount} ausgeblendet`;
+      }
+      if (totalPages > 1) {
+        msg += ` · Seite ${currentPage}/${totalPages}`;
+      }
+      deckVisibility.textContent = msg + ".";
+    }
+
+    // Update pagination controls
+    if (deckPageInfo) {
+      deckPageInfo.textContent = totalPages > 1
+        ? `Seite ${currentPage} von ${totalPages}`
+        : `Seite 1`;
+    }
+    if (deckPrevPage) {
+      deckPrevPage.disabled = currentPage <= 1;
+    }
+    if (deckNextPage) {
+      deckNextPage.disabled = currentPage >= totalPages;
     }
   };
 
@@ -476,6 +568,49 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (hidePrecons) {
     hidePrecons.addEventListener("change", applyDeckFilter);
+  }
+
+  // Search field — filter as you type (with debounce)
+  let searchDebounce = null;
+  if (deckSearch) {
+    deckSearch.addEventListener("input", () => {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => {
+        currentPage = 1;
+        applyDeckFilter();
+      }, 200);
+    });
+  }
+
+  // Format dropdown — filter on change
+  if (deckFormatFilter) {
+    deckFormatFilter.addEventListener("change", () => {
+      currentPage = 1;
+      applyDeckFilter();
+    });
+  }
+
+  // Pagination buttons
+  if (deckPrevPage) {
+    deckPrevPage.addEventListener("click", () => {
+      if (currentPage > 1) {
+        currentPage -= 1;
+        applyDeckFilter();
+      }
+    });
+  }
+  if (deckNextPage) {
+    deckNextPage.addEventListener("click", () => {
+      currentPage += 1;
+      applyDeckFilter();
+    });
+  }
+  if (deckPageSize) {
+    deckPageSize.addEventListener("change", () => {
+      pageSize = parseInt(deckPageSize.value, 10) || 50;
+      currentPage = 1;
+      applyDeckFilter();
+    });
   }
 
   if (chatClose && chatPanel) {
