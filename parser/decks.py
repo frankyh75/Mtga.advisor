@@ -600,11 +600,17 @@ def _deck_key(deck: DeckSummary) -> str:
 
 
 def _precon_reason(deck: DeckSummary) -> str | None:
-    """Ermittle den ersten Precon-Hinweis, falls vorhanden."""
+    """Ermittle den ersten Precon-Hinweis, falls vorhanden.
+
+    Ein echtes Precon hat einen Namen, der auf ein Precon-Template verweist
+    (z.B. ``?=?Loc/Decks/Precon/...``). Die Description kann auf ein
+    Precon-Template verweisen, auf dem ein EIGENES Deck basiert (z.B.
+    ``Decks/Precon/Precon_EPP2021_BG_Desc``) — das ist dann KEIN Precon.
+    Daher zählt nur der Name als Precon-Indikator, nicht die Description.
+    """
     haystack = " ".join(
         [
             deck.name or "",
-            deck.description or "",
             " ".join(f"{k}:{v}" for k, v in deck.attributes.items()),
             " ".join(f"{k}:{v}" for k, v in deck.format_legalities.items()),
         ]
