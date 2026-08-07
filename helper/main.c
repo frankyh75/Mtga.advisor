@@ -343,7 +343,14 @@ static int get_writable_regions(mach_port_t task, region_t *regions, int max_reg
         if (kr != KERN_SUCCESS) break;
 
         if (info.is_submap) {
+            /* In die Submap eintauchen: Tiefe erhöhen und Adresse
+             * weiterschieben, damit die Enumeration voranschreitet und
+             * nicht dauerhaft auf derselben Submap hängenbleibt (was
+             * spätere Regionen wie MALLOC_MEDIUM/LARGE oder GameAssembly
+             * __DATA verpassen würde). mach_vm_region_recurse verwaltet
+             * die Tiefe als in/out-Parameter. */
             depth++;
+            address += size;
             continue;
         }
 
