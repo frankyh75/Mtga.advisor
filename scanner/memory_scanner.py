@@ -235,6 +235,7 @@ def get_user_anchors(
     *,
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[..., None] = print,
+    non_interactive: bool = False,
 ) -> list[tuple[int, int, str]]:
     """Interaktive Anker-Eingabe mit Auto-Save.
 
@@ -243,6 +244,8 @@ def get_user_anchors(
 
     Args:
         name_to_id: Mapping von Kartenname (lower) → grpId
+        non_interactive: Wenn True, werden gespeicherte Anker automatisch
+            akzeptiert (kein stdin). Für Watch-Modus / Hintergrund-Scans.
 
     Returns:
         Liste von (grpId, quantity, name)-Tupeln
@@ -261,6 +264,9 @@ def get_user_anchors(
                 print_fn("\n📌 [Gespeicherte Anker gefunden]")
                 for i, (_, qty, name) in enumerate(saved, 1):
                     print_fn(f"   {i}. {name} (x{qty})")
+                if non_interactive:
+                    print_fn("   (nicht-interaktiv: gespeicherte Anker verwendet)")
+                    return saved
                 choice = input_fn("   Diese verwenden? [Y/n]: ").strip().lower()
                 if choice not in ("n", "no"):
                     return saved
@@ -363,6 +369,7 @@ def scan_collection_detailed(
     use_helper: bool | None = None,
     sock_path: str | None = None,
     backend: MemoryBackend | None = None,
+    non_interactive: bool = False,
 ) -> MemoryScanResult | None:
     """Hauptfunktion: Scannt den MTGA-Speicher nach der Collection.
 
@@ -427,7 +434,12 @@ def scan_collection_detailed(
         return None
 
     name_to_id = {v["name"].lower(): k for k, v in db.items()}
-    anchors = get_user_anchors(name_to_id, input_fn=input_fn, print_fn=print_fn)
+    anchors = get_user_anchors(
+        name_to_id,
+        input_fn=input_fn,
+        print_fn=print_fn,
+        non_interactive=non_interactive,
+    )
     if not anchors:
         print_fn("❌ Keine Anker-Karten angegeben.")
         return None

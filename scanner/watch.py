@@ -269,6 +269,7 @@ def _run_combined_scan(config: WatchConfig) -> int:
     result = scan_all(
         debug=config.debug,
         print_fn=print,
+        non_interactive=True,
     )
 
     if result.errors and not result.collection and not result.decks and not result.ranks:
@@ -298,10 +299,10 @@ def _run_combined_scan(config: WatchConfig) -> int:
     # Diese kommen aus den Player.log-Dateien, nicht aus dem Memory-Scan.
     try:
         from parser.deck_cards import export_deck_cards
-        from parser.log_paths import discover_logs
+        from parser.log_paths import discover_logs, detect_platform
 
         try:
-            discovery = discover_logs(None, None)
+            discovery = discover_logs(detect_platform(), None)
             log_paths = discovery.found
         except Exception:
             log_paths = []

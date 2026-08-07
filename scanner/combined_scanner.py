@@ -53,6 +53,7 @@ def scan_all(
     scan_decks: bool = True,
     scan_ranks: bool = True,
     read_account: bool = True,
+    non_interactive: bool = False,
 ) -> CombinedScanResult:
     """Führt Collection-, Deck- und Rank-Scan in einem Durchlauf aus.
 
@@ -89,6 +90,7 @@ def scan_all(
             scan_decks=scan_decks,
             scan_ranks=scan_ranks,
             read_account=read_account,
+            non_interactive=non_interactive,
             result=result,
         )
 
@@ -113,6 +115,7 @@ def _scan_all_via_helper(
     scan_decks: bool,
     scan_ranks: bool,
     read_account: bool,
+    non_interactive: bool,
     result: CombinedScanResult,
 ) -> CombinedScanResult:
     """Kombinierter Scan über eine persistente Helper-Verbindung."""
@@ -139,6 +142,7 @@ def _scan_all_via_helper(
                 backend=backend,
                 debug=debug,
                 print_fn=print_fn,
+                non_interactive=non_interactive,
             )
             result.collection = coll_result
             if coll_result is None:
