@@ -510,15 +510,163 @@ def _bulk_read(mem: MemoryReader, base: int, size: int, chunk_size: int = 0x4000
 
 
 def _find_metadata_regions(pm: Any) -> list[tuple[int, int]]:
-    """Locate global-metadata.dat's mapped region(s) in the live process."""
-    regions, _ = _iterate_regions_with_error(pm)
-    pid = _process_pid(pm) or 0
-    result = []
-    for addr, size in regions:
-        fname = _region_filename(pid, addr)
-        if fname and "global-metadata" in fname:
-            result.append((addr, size))
-    return result
+    """Locate global-metadata.dat's mapped region(s) in the live process.
+
+    Polymorph: unterstützt Pymem-Objekte (mit .task und mach_vm_region_recurse)
+    UND Helper-basierte Adapter, die `iterate_readable_regions()` direkt anbieten
+    oder bei denen die Region-Enumeration nur beschreibbare Regionen liefert.
+
+    Wenn der Reader keine lesbaren Regionen liefern kann (z.B. Helper liefert
+    nur beschreibbare), wird die global-metadata-Region über die MTGA-PID und
+    proc_regionfilename durch einen Adressraum-Scan gefunden.
+
+    WICHTIG: Bei Helper-basierten Adaptern wird IMMER der proc-basierte Pfad C
+    verwendet, da der Helper nur writable private regions listet (nicht die
+    read-only mapped-file Region, in der global-metadata.dat liegt) und
+    proc_regionfilename die korrekte mapped-file Basisadresse findet.
+    """
+    pid = _process_pid(pm)
+
+    # Pfad A: Reader hat die Region-Methoden selbst (z.B. PersistentRemoteMemoryAdapter).
+    # Aber: Helper-basierte Adapter liefern nur writable private regions,
+    # nicht die read-only mapped-file Region. Daher überspringen wir Pfad A
+    # für Helper-Adapter und gehen direkt zu Pfad C (proc-basiert).
+    is_helper_adapter = hasattr(pm, "iterate_writable_private_regions") and not hasattr(pm, "task")
+
+    if not is_helper_adapter and hasattr(pm, "iterate_readable_regions"):
+        regions, _ = pm.iterate_readable_regions()
+        result = []
+        for addr, size in regions:
+            fname = _region_filename(pid or 0, addr)
+            if fname and "global-metadata" in fname:
+                result.append((addr, size))
+        if result:
+            return result
+
+    # Pfad B: Legacy Pymem-Objekt mit .task → mach_vm_region_recurse.
+    if hasattr(pm, "task") or not hasattr(pm, "iterate_readable_regions"):
+        try:
+            regions, _ = _iterate_regions_with_error(pm)
+            result = []
+            for addr, size in regions:
+                fname = _region_filename(pid or 0, addr)
+                if fname and "global-metadata" in fname:
+                    result.append((addr, size))
+            if result:
+                return result
+        except Exception:
+            pass
+
+    # Pfad C: Fallback — scanne den Adressraum via proc_regionfilename.
+    # Dies funktioniert ohne mach_vm_region_recurse, braucht nur die PID.
+    # Für Helper-Adapter ist dies der Hauptpfad.
+    if pid and pid > 0:
+        return _find_metadata_regions_via_proc(pid)
+
+    return []
+
+
+def _find_metadata_regions_via_proc(pid: int) -> list[tuple[int, int]]:
+    """Finde global-metadata.dat-Regionen durch Adressraum-Scan mit proc_regionfilename.
+
+    Diese Funktion ist ein Fallback für Helper-basierte Reader, die nur
+    beschreibbare Regionen auflisten können. Sie scannt den Adressraum
+    in groben Schritten und verfeinert dann die Grenzen.
+
+    WICHTIG: proc_regionfilename meldet denselben Dateinamen für:
+    (a) die echte read-only mapped-file Region (wo IL2CPP-String-Pointer
+        hinzeigen) und
+    (b) COW-Kopien in MALLOC_SMALL-Regionen (writable private, wo
+        modifizierte Seiten landen).
+    Die Il2CppClass-String-Pointer zeigen auf die ORIGINAL mapped-file
+    Region, nicht auf die COW-Kopien. Daher müssen wir die größte
+    zusammenhängende Region finden, die die Datei-Größe abdeckt.
+    """
+    try:
+        lib = _load_proc_lib()
+    except OSError:
+        return []
+    if not hasattr(lib, "proc_regionfilename"):
+        return []
+
+    func = lib.proc_regionfilename
+    func.argtypes = [ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32]
+    func.restype = ctypes.c_int
+    buf = ctypes.create_string_buffer(1024)
+
+    # Grober Scan: 16MB-Schritte im typischen MTGA-Adressbereich
+    coarse_step = 0x1000000  # 16 MB
+    coarse_hits: list[int] = []
+    addr = 0x100000000  # Typische macOS-Startadresse
+    end = 0x200000000
+    while addr < end:
+        rc = func(
+            ctypes.c_int(pid), ctypes.c_uint64(addr),
+            ctypes.cast(buf, ctypes.c_void_p), ctypes.c_uint32(len(buf)),
+        )
+        if rc > 0:
+            name = buf.value.decode("utf-8", errors="ignore")
+            if "global-metadata" in name:
+                coarse_hits.append(addr)
+                # NICHT break — sammle alle Treffer, um die größte
+                # zusammenhängende Region zu finden (mapped-file vs COW)
+        addr += coarse_step
+
+    if not coarse_hits:
+        return []
+
+    # Verfeinere JEDEN Treffer und bestimme die Ausdehnung
+    refined: list[tuple[int, int]] = []
+    for hit in coarse_hits:
+        # Verfeinere: finde den exakten Start (rückwärts in 4K-Schritten)
+        start = hit
+        while start > 0x100000000:
+            rc = func(
+                ctypes.c_int(pid), ctypes.c_uint64(start - 0x4000),
+                ctypes.cast(buf, ctypes.c_void_p), ctypes.c_uint32(len(buf)),
+            )
+            if rc > 0:
+                name = buf.value.decode("utf-8", errors="ignore")
+                if "global-metadata" not in name:
+                    break
+            start -= 0x4000
+
+        # Verfeinere: finde das exakte Ende (vorwärts in 4K-Schritten)
+        end_addr = hit
+        while end_addr < 0x200000000:
+            rc = func(
+                ctypes.c_int(pid), ctypes.c_uint64(end_addr + 0x4000),
+                ctypes.cast(buf, ctypes.c_void_p), ctypes.c_uint32(len(buf)),
+            )
+            if rc > 0:
+                name = buf.value.decode("utf-8", errors="ignore")
+                if "global-metadata" not in name:
+                    break
+            end_addr += 0x4000
+
+        refined.append((start, end_addr - start))
+
+    # Dedupliziere überlappende Regionen und wähle die größte
+    # (die echte mapped-file Region ist typischerweise die größte,
+    # ~29 MB, während COW-Kopien kleiner sind)
+    refined.sort(key=lambda r: r[1], reverse=True)
+    # Merge überlappende Regionen
+    merged: list[tuple[int, int]] = []
+    for start, size in refined:
+        end = start + size
+        # Prüfe ob diese Region mit einer bereits gefundenen überlappt
+        overlapped = False
+        for i, (ms, me) in enumerate(merged):
+            if start <= me and end >= ms:
+                # Merge
+                merged[i] = (min(ms, start), max(me, end))
+                overlapped = True
+                break
+        if not overlapped:
+            merged.append((start, end))
+    # Konvertiere zurück zu (addr, size) und sortiere nach Größe (größte zuerst)
+    merged.sort(key=lambda r: r[1] - r[0], reverse=True)
+    return [(s, e - s) for s, e in merged]
 
 
 def _find_string_in_metadata_regions(
@@ -529,6 +677,10 @@ def _find_string_in_metadata_regions(
     """Find the runtime address of a NUL-delimited string within the given
     global-metadata.dat region(s), without relying on a hardcoded file
     offset (which shifts between game builds/patches).
+
+    Polymorph: Wenn der Helper die read-only metadata-Region nicht lesen kann
+    (liefert Nullen), wird die String-Suche auf die Datei
+    global-metadata.dat ausgewichen und die Memory-Adresse berechnet.
     """
     needle = b"\x00" + name.encode("ascii") + b"\x00"
     for addr, size in metadata_regions:
@@ -536,6 +688,53 @@ def _find_string_in_metadata_regions(
         idx = buf.find(needle)
         if idx != -1:
             return addr + idx + 1  # skip the leading NUL
+
+    # Fallback: Der Helper kann die read-only metadata-Region nicht lesen
+    # (liefert Nullen). Lese die Datei direkt und berechne die Memory-Adresse.
+    return _find_string_in_metadata_file(metadata_regions, name)
+
+
+def _find_string_in_metadata_file(
+    metadata_regions: list[tuple[int, int]],
+    name: str,
+) -> int | None:
+    """Fallback: Suche einen String in der global-metadata.dat-Datei und
+    berechne die Memory-Adresse (file_offset + region_base).
+
+    Der Helper-Daemon kann keine read-only Regionen lesen. Da die
+    global-metadata.dat-Datei aber vom Anwender lesbar ist, kann der
+    String-Pool direkt aus der Datei gelesen werden. Die Memory-Adresse
+    ergibt sich aus dem Datei-Offset plus der Region-Basisadresse.
+
+    WICHTIG: Die Region-Basisadresse muss die der ORIGINAL mapped-file
+    Region sein (read-only), nicht die der COW-Kopien (writable private).
+    _find_metadata_regions_via_proc sortiert Regionen nach Größe (größte
+    zuerst), daher ist metadata_regions[0] die größte = die mapped-file Region.
+    """
+    needle = b"\x00" + name.encode("ascii") + b"\x00"
+
+    # Versuche die Datei direkt zu lesen
+    file_path = "/Users/Shared/Epic Games/MagicTheGathering/MTGA.app/Contents/Resources/Data/il2cpp_data/Metadata/global-metadata.dat"
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+    except (OSError, FileNotFoundError):
+        return None
+
+    idx = data.find(needle)
+    if idx == -1:
+        return None
+
+    # Berechne Memory-Adresse: file_offset + region_base
+    # metadata_regions ist nach Größe sortiert (größte zuerst) —
+    # die größte Region ist die echte mapped-file Region.
+    if metadata_regions:
+        region_base = metadata_regions[0][0]
+        # Stelle sicher, dass der String-Offset innerhalb der Region liegt
+        string_offset = idx + 1  # skip leading NUL
+        if string_offset < metadata_regions[0][1]:
+            return region_base + string_offset
+
     return None
 
 
@@ -723,6 +922,114 @@ def _find_instance_by_klass_in_regions(
     return None
 
 
+def _has_region_enumeration(pm: Any) -> bool:
+    """Polymorpher Guard: prüft, ob der Reader Regionen aufzählen kann.
+
+    Traditionell wurde nur `hasattr(pm, "task")` geprüft (Pymem mit Live-Task-Port).
+    Helper-basierte Adapter (PersistentRemoteMemoryAdapter) haben kein .task,
+    bieten aber `iterate_readable_regions()` / `iterate_writable_private_regions()`.
+    """
+    if hasattr(pm, "task"):
+        return True
+    if hasattr(pm, "iterate_readable_regions") and hasattr(pm, "iterate_writable_private_regions"):
+        return True
+    return False
+
+
+def _enum_writable_private_regions_via_vmmap(pid: int) -> list[tuple[int, int]]:
+    """Finde alle writable private Regionen via vmmap-Output-Parsing.
+
+    Der Helper's list_regions (C: get_writable_regions mit mach_vm_region_recurse)
+    verpasst Regionen, weil die Submap-Traversal-Logik nicht vollständig ist
+    (depth++ ohne depth-- beim Verlassen einer Submap). vmmap nutzt die selbe
+    Mach-API, aber mit korrekter Traversal-Logik.
+
+    Parse den vmmap-Output nach Zeilen mit 'rw-/rwx SM=PRV' und extrahiere
+    Start- und End-Adresse. Regionen < 4K werden gefiltert (Guard Pages etc.).
+    """
+    import re
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["vmmap", "--interleaved", str(pid)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    regions: list[tuple[int, int]] = []
+    # vmmap-Zeilen haben das Format:
+    # TYPE  START-END  [VSIZE] PRT/MAX SHRMOD ... REGION DETAIL
+    # z.B.:
+    # VM_ALLOCATE  104c40000-104d40000  [1024K] rw-/rwx SM=PRV
+    # Wir suchen nach 'rw-/rwx SM=PRV' oder 'rw-/rw- SM=PRV'
+    # und extrahieren die Start-End-Adresse
+    pattern = re.compile(
+        r"^\S+\s+([0-9a-f]+)-([0-9a-f]+)\s+\[\s*[\d.]+[KMGT]?\]\s+rw-/(?:rwx|rw-)\s+SM=PRV"
+    )
+    for line in result.stdout.splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            start = int(m.group(1), 16)
+            end = int(m.group(2), 16)
+            size = end - start
+            if size >= 0x4000:  # Mindestens 16K (macOS page size)
+                regions.append((start, size))
+
+    return regions
+
+
+def _enum_writable_private_regions(pm: Any) -> list[tuple[int, int]]:
+    """Polymorpher Wrapper für beschreibbare private Regionen.
+
+    Bei Helper-basierten Adaptern kann der Helper's list_regions Regionen
+    verpassen (Submap-Traversal-Bug in mach_vm_region_recurse). Daher wird
+    zusätzlich ein vmmap-basierter Scan durchgeführt, der ALLE writable
+    private Regionen findet. Die Vereinigung aus Helper-Regionen und
+    vmmap-Regionen wird zurückgegeben.
+    """
+    helper_regions: list[tuple[int, int]] = []
+    if hasattr(pm, "iterate_writable_private_regions"):
+        try:
+            helper_regions = pm.iterate_writable_private_regions()
+        except Exception:
+            helper_regions = []
+
+    # Fallback/Ergänzung: vmmap-basierter Scan für Helper-Adapter
+    # (der Helper verpasst Regionen aufgrund eines Submap-Traversal-Bugs)
+    pid = _process_pid(pm)
+    if pid and pid > 0:
+        vmmap_regions = _enum_writable_private_regions_via_vmmap(pid)
+        if vmmap_regions:
+            # Vereinigung: Helper-Regionen + vmmap-Regionen (dedup)
+            all_regions = list(helper_regions)
+            for v_addr, v_size in vmmap_regions:
+                # Prüfe ob diese Region schon in helper_regions enthalten ist
+                found = False
+                for h_addr, h_size in helper_regions:
+                    if h_addr <= v_addr < h_addr + h_size:
+                        found = True
+                        break
+                if not found:
+                    all_regions.append((v_addr, v_size))
+            return all_regions
+
+    if helper_regions:
+        return helper_regions
+    return _iterate_writable_private_regions(pm)
+
+
+def _enum_readable_regions(pm: Any) -> tuple[list[tuple[int, int]], int | None]:
+    """Polymorpher Wrapper für lesbare Regionen."""
+    if hasattr(pm, "iterate_readable_regions"):
+        return pm.iterate_readable_regions()
+    return _iterate_regions_with_error(pm)
+
+
 def discover_decks_manager_via_backref(
     reader: Il2CppReader | MemoryReader | Any,
     *,
@@ -761,10 +1068,10 @@ def discover_decks_manager_via_backref(
         _log("FAIL: reader could not be coerced to a MemoryReader")
         return None
     pm = getattr(reader, "pm", reader)
-    if not hasattr(pm, "task"):
+    if not _has_region_enumeration(pm):
         # Not a live process handle (e.g. a bare MockMemory in tests) —
-        # region enumeration needs a real task port.
-        _log("FAIL: no live task port on reader (not a real process handle)")
+        # region enumeration needs a real task port or adapter methods.
+        _log("FAIL: no region enumeration available on reader (no pm.task and no adapter methods)")
         return None
 
     metadata_regions = _find_metadata_regions(pm)
@@ -777,7 +1084,7 @@ def discover_decks_manager_via_backref(
     # process's writable private heap, but their absolute address shifts
     # with ASLR on every launch — enumerate the real region map once
     # instead of guessing fixed ranges, and reuse it for both searches.
-    writable_regions = _iterate_writable_private_regions(pm)
+    writable_regions = _enum_writable_private_regions(pm)
     fieldinfo_regions = [(addr, addr + size) for addr, size in writable_regions]
     _log(
         f"OK: {len(writable_regions)} writable private region(s), "
@@ -793,7 +1100,7 @@ def discover_decks_manager_via_backref(
         return None
     _log(f"OK: DeckDataProvider class @ {ddp_class:#x}")
 
-    readable_regions, _ = _iterate_regions_with_error(pm)
+    readable_regions, _ = _enum_readable_regions(pm)
     arena = _coalesced_region_containing(readable_regions, ddp_class)
     if arena is None:
         _log("FAIL: no readable region contains the DeckDataProvider class address")
@@ -867,10 +1174,10 @@ def discover_wrapper_controller_via_backref(
         _log("FAIL: reader could not be coerced to a MemoryReader")
         return None
     pm = getattr(reader, "pm", reader)
-    if not hasattr(pm, "task"):
+    if not _has_region_enumeration(pm):
         # Not a live process handle (e.g. a bare MockMemory in tests) —
-        # region enumeration needs a real task port.
-        _log("FAIL: no live task port on reader (not a real process handle)")
+        # region enumeration needs a real task port or adapter methods.
+        _log("FAIL: no region enumeration available on reader (no pm.task and no adapter methods)")
         return None
 
     metadata_regions = _find_metadata_regions(pm)
@@ -879,7 +1186,7 @@ def discover_wrapper_controller_via_backref(
         return None
     _log(f"OK: {len(metadata_regions)} metadata region(s) found")
 
-    writable_regions = _iterate_writable_private_regions(pm)
+    writable_regions = _enum_writable_private_regions(pm)
     fieldinfo_regions = [(addr, addr + size) for addr, size in writable_regions]
     _log(
         f"OK: {len(writable_regions)} writable private region(s), "

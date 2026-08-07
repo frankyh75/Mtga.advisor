@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import base64
 import struct
 from dataclasses import dataclass
@@ -350,7 +351,12 @@ class _PersistentConnection:
         try:
             s = self._ensure_connected()
             s.sendall(req_bytes)
-            # newline-terminierte Response lesen
+            # newline-terminierte Response lesen. WICHTIG: NUR bei einem
+            # abschließenden '\n' brechen — nicht bei len(data) < RECV_BUF.
+            # Der Server sendet jede Response mit '\n' (send_response). Wenn
+            # wir bei len(data) < RECV_BUF abbrechen, kann ein Teil der
+            # Response (z.B. das abschließende '\n') im Socket-Puffer
+            # zurückbleiben und die NÄCHSTE Response verfälschen.
             chunks: list[bytes] = []
             while True:
                 try:
@@ -358,7 +364,7 @@ class _PersistentConnection:
                     if not data:
                         break
                     chunks.append(data)
-                    if b"\n" in data or len(data) < RECV_BUF:
+                    if b"\n" in data:
                         break
                 except socket.timeout:
                     break
@@ -430,10 +436,48 @@ class PersistentHelperBackend:
         return ([(r["address"], r["size"]) for r in regions], None)
 
 
+def _find_mtga_pid() -> int | None:
+    """Bestimme die MTGA-Prozess-PID via pgrep (ohne sudo).
+
+    Der Helper-Daemon liefert in seiner status-Response seine EIGENE PID
+    (den Daemon), nicht die MTGA-PID. Daher muss der Client die MTGA-PID
+    selbst bestimmen — über `pgrep -f MTGA.app` bzw. den Prozessnamen.
+    """
+    # Versuche pgrep mit verschiedenen Mustern (wie get_macos_mtga_process_names)
+    patterns = [
+        r"MTGA\.app/Contents/MacOS/MTGA",
+        r"MTGA\.app",
+        r"MagicTheGathering.*MTGA\.app",
+    ]
+    for pattern in patterns:
+        try:
+            out = subprocess.check_output(
+                ["pgrep", "-f", pattern],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            ).strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        if not out:
+            continue
+        for line in out.splitlines():
+            try:
+                pid = int(line.strip())
+            except ValueError:
+                continue
+            if pid > 0:
+                return pid
+    return None
+
+
 class PersistentRemoteMemoryAdapter:
     """RemoteMemoryAdapter über eine persistente Helper-Verbindung.
 
     Wie RemoteMemoryAdapter, aber nutzt eine bestehende _PersistentConnection.
+    Implementiert zusätzlich die Region-Iterations-Methoden, die von den
+    Backref-Funktionen in il2cpp_nav.py benötigt werden, sowie eine korrekte
+    MTGA-PID-Bestimmung (nicht die Daemon-PID).
     """
 
     def __init__(self, conn: _PersistentConnection) -> None:
@@ -442,12 +486,19 @@ class PersistentRemoteMemoryAdapter:
 
     @property
     def pid(self) -> int:
+        """Liefert die MTGA-Prozess-PID (nicht die Daemon-PID)."""
         if self._pid is None:
-            resp = self._conn.request({"action": "status"})
-            if resp.get("status") == "ok":
-                self._pid = resp.get("pid") or 0
+            # Der Helper liefert seine eigene PID — bestimme die MTGA-PID selbst.
+            mtga_pid = _find_mtga_pid()
+            if mtga_pid is not None:
+                self._pid = mtga_pid
             else:
-                self._pid = 0
+                # Fallback: Helper-Status (Daemon-PID, aber besser als 0).
+                resp = self._conn.request({"action": "status"})
+                if resp.get("status") == "ok":
+                    self._pid = resp.get("pid") or 0
+                else:
+                    self._pid = 0
         return self._pid  # type: ignore[return-value]
 
     def read_bytes(self, addr: int, size: int) -> bytes:
@@ -484,6 +535,30 @@ class PersistentRemoteMemoryAdapter:
         if end == -1:
             end = len(raw)
         return raw[:end].decode("ascii", errors="replace")
+
+    def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+        """Liste beschreibbare private Memory-Regionen über den Helper auf.
+
+        Entspricht PersistentHelperBackend.iterate_writable_private_regions,
+        aber für den RemoteMemoryAdapter (IL2CPP-Pfad).
+        """
+        resp = self._conn.request({"action": "list_regions"})
+        if "error" in resp:
+            raise HelperError(resp["error"])
+        regions = resp.get("regions", [])
+        return [(r["address"], r["size"]) for r in regions]
+
+    def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+        """Liste lesbare Memory-Regionen über den Helper auf.
+
+        Entspricht PersistentHelperBackend.iterate_readable_regions,
+        aber für den RemoteMemoryAdapter (IL2CPP-Pfad).
+        """
+        resp = self._conn.request({"action": "list_regions"})
+        if "error" in resp:
+            raise HelperError(resp["error"])
+        regions = resp.get("regions", [])
+        return ([(r["address"], r["size"]) for r in regions], None)
 
 
 def open_helper_connection(
