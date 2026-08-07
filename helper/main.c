@@ -331,6 +331,15 @@ static int get_writable_regions(mach_port_t task, region_t *regions, int max_reg
     natural_t depth = 0;
     int count = 0;
 
+    /* Guard gegen Endlosschleifen bei leeren Submaps: merke uns die
+     * letzte Submap (address+size+depth). Wenn mach_vm_region_recurse
+     * nach depth++ dieselbe Submap nochmal liefert, ist sie leer —
+     * dann überspringen wir sie (address += size; depth--). */
+    mach_vm_address_t last_submap_addr = 0;
+    mach_vm_size_t last_submap_size = 0;
+    natural_t last_submap_depth = 0;
+    int submap_retry = 0;
+
     while (count < max_regions) {
         mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
         struct vm_region_submap_info_64 info;
@@ -343,16 +352,32 @@ static int get_writable_regions(mach_port_t task, region_t *regions, int max_reg
         if (kr != KERN_SUCCESS) break;
 
         if (info.is_submap) {
-            /* In die Submap eintauchen: Tiefe erhöhen und Adresse
-             * weiterschieben, damit die Enumeration voranschreitet und
-             * nicht dauerhaft auf derselben Submap hängenbleibt (was
-             * spätere Regionen wie MALLOC_MEDIUM/LARGE oder GameAssembly
-             * __DATA verpassen würde). mach_vm_region_recurse verwaltet
-             * die Tiefe als in/out-Parameter. */
+            /* Guard: wenn wir gerade depth++ für diese exakte Submap gemacht
+             * haben und sie wiederkehrt, ist sie leer → überspringen. */
+            if (submap_retry && address == last_submap_addr && size == last_submap_size) {
+                address += size;
+                depth = last_submap_depth;  /* zurück auf die Ebene vor der Submap */
+                submap_retry = 0;
+                continue;
+            }
+            /* In die Submap eintauchen: nur depth++ (nicht address += size!).
+             * mach_vm_region_recurse verwaltet depth als in/out-Parameter:
+             *   - depth++ → nächste Iteration liefert Regionen INNERHALB der
+             *     Submap (address wird auf die erste innere Region gesetzt)
+             *   - Wenn alle inneren Regionen enumeriert sind, fährt die
+             *     Enumeration automatisch nach der Submap fort.
+             *
+             * Der alte Bug: depth++ UND address += size übersprang die
+             * gesamte Submap → nur 12 statt ~80+ Regionen. */
+            last_submap_addr = address;
+            last_submap_size = size;
+            last_submap_depth = depth;
             depth++;
-            address += size;
+            submap_retry = 1;
             continue;
         }
+
+        submap_retry = 0;  /* non-submap region → reset guard */
 
         /* Only scan writable, private regions */
         int writable = (info.protection & VM_PROT_WRITE) != 0;

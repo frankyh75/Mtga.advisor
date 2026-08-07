@@ -962,14 +962,15 @@ def _enum_writable_private_regions_via_vmmap(pid: int) -> list[tuple[int, int]]:
         return []
 
     regions: list[tuple[int, int]] = []
-    # vmmap-Zeilen haben das Format:
-    # TYPE  START-END  [VSIZE] PRT/MAX SHRMOD ... REGION DETAIL
+    # vmmap-Zeilen haben das Format (macOS 15.6, report format 2.4):
+    # TYPE  START-END  [ VSIZE  RSDNT  DIRTY  SWAP] PRT/MAX SHRMOD ...
     # z.B.:
-    # VM_ALLOCATE  104c40000-104d40000  [1024K] rw-/rwx SM=PRV
-    # Wir suchen nach 'rw-/rwx SM=PRV' oder 'rw-/rw- SM=PRV'
-    # und extrahieren die Start-End-Adresse
+    # VM_ALLOCATE  104c40000-104d40000  [ 1024K  400K  400K  384K] rw-/rwx SM=PRV
+    # Der alte Regex erwartete nur einen Wert in den Klammern (\[\s*[\d.]+[KMGT]?\]),
+    # aber vmmap gibt VIER Werte aus → Regex matchte nie → 0 Regionen.
+    # Fix: \[.*?\] matcht beliebig viele Werte in den Klammern.
     pattern = re.compile(
-        r"^\S+\s+([0-9a-f]+)-([0-9a-f]+)\s+\[\s*[\d.]+[KMGT]?\]\s+rw-/(?:rwx|rw-)\s+SM=PRV"
+        r"^\S+\s+([0-9a-f]+)-([0-9a-f]+)\s+\[.*?\]\s+rw-/(?:rwx|rw-)\s+SM=PRV"
     )
     for line in result.stdout.splitlines():
         m = pattern.match(line.strip())
