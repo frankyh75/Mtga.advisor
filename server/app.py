@@ -1813,6 +1813,26 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                     card_db=card_db,
                 )
                 result["importDiagnostics"] = imported.get("diagnostics", {})
+
+                # Importiertes Deck dauerhaft in deck-cards.json speichern
+                # (damit es in der Deck-Liste mit Badge erscheint).
+                try:
+                    from parser.deck_cards import upsert_deck_cards
+                    saved_deck = {
+                        "deckId": imported.get("deckId"),
+                        "name": imported.get("name"),
+                        "format": imported.get("format"),
+                        "mainDeck": _to_entries(imported.get("mainboard", [])),
+                        "sideboard": _to_entries(imported.get("sideboard", [])),
+                        "commandZone": [],
+                        "companions": [],
+                    }
+                    upsert_deck_cards(saved_deck, output_dir)
+                    result["saved"] = True
+                except Exception as exc:
+                    result["saved"] = False
+                    result["saveError"] = str(exc)
+
                 _json_response(self, result, status=HTTPStatus.OK)
             except Exception as exc:
                 _json_response(self, {"error": f"Import fehlgeschlagen: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)

@@ -630,6 +630,9 @@ document.addEventListener("DOMContentLoaded", () => {
         if (diag.unresolved && diag.unresolved.length) {
           html += `<br><span style="color:var(--danger)">⚠ ${diag.unresolved.length} Zeile(n) nicht aufgelöst</span>`;
         }
+        if (data.saved) {
+          html += `<br><span style="color:var(--green)">✅ Gespeichert — erscheint in der Deck-Liste mit Badge.</span>`;
+        }
         importResult.innerHTML = html;
       } catch (err) {
         importResult.textContent = "❌ " + err.message;

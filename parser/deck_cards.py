@@ -294,3 +294,46 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def upsert_deck_cards(deck: dict[str, Any], output_dir: Path) -> Path:
+    """Speichere ein einzelnes Deck in deck-cards.json (merge, letzter gewinnt).
+
+    Liest die bestehende deck-cards.json (falls vorhanden), ersetzt/ergänzt das
+    Deck mit der gleichen deckId und schreibt die Datei zurück. Wird vom
+    GUI-Import-Endpoint genutzt, damit importierte Decks dauerhaft gespeichert
+    werden und in der Deck-Liste mit Badge erscheinen.
+
+    Args:
+        deck: Ein Deck-Dict (deckId, name, format, mainDeck, sideboard, ...).
+        output_dir: Ausgabeverzeichnis mit deck-cards.json.
+
+    Returns:
+        Pfad zu deck-cards.json.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "deck-cards.json"
+
+    payload: dict[str, Any] = {"schema": "deck-cards.v1", "source": "local-logs", "decks": []}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and isinstance(existing.get("decks"), list):
+                payload = existing
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    decks = payload.setdefault("decks", [])
+    deck_id = deck.get("deckId")
+    replaced = False
+    for i, d in enumerate(decks):
+        if d.get("deckId") == deck_id:
+            decks[i] = deck
+            replaced = True
+            break
+    if not replaced:
+        decks.append(deck)
+
+    payload["diagnostics"] = {"deckCount": len(decks), "warnings": []}
+    _write_json(path, payload)
+    return path
