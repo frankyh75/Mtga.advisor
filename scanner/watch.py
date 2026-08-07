@@ -294,6 +294,23 @@ def _run_combined_scan(config: WatchConfig) -> int:
         )
         print(f"  Decks: {decks_path} ({len(result.decks)} Decks)")
 
+    # Log-basierte Deck-Kartenlisten (DeckUpsertDeckV3) exportieren.
+    # Diese kommen aus den Player.log-Dateien, nicht aus dem Memory-Scan.
+    try:
+        from parser.deck_cards import export_deck_cards
+        from parser.log_paths import discover_logs
+
+        try:
+            discovery = discover_logs(None, None)
+            log_paths = discovery.found
+        except Exception:
+            log_paths = []
+        if log_paths:
+            export_deck_cards(log_paths, output_dir)
+            print(f"  Deck-Kartenlisten: {output_dir / 'deck-cards.json'}")
+    except Exception as exc:  # pragma: no cover - defensiv
+        print(f"  ⚠ Deck-Kartenlisten-Export übersprungen: {exc}")
+
     # Rank-Artefakte schreiben
     if result.ranks or result.account:
         rank_data = {
