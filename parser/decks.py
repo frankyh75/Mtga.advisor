@@ -18,7 +18,7 @@ import json
 import re
 from typing import Iterable, Optional, Any
 
-from .pipeline import ParsedEvent, chunk, extract_json, ingest
+from .pipeline import ParsedEvent
 from .start_hook import DeckSummary, parse_start_hook
 
 
@@ -68,14 +68,28 @@ def export_decks(paths: Iterable[Path], output_dir: Path) -> DeckExportPaths:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = _iso_now()
-    events = list(extract_json(chunk(ingest(sorted_paths))))
-    decks, warnings = _extract_decks(events)
-    raw_decks, raw_warnings = _extract_decks_from_raw_json_lines(sorted_paths)
-    if raw_decks:
-        decks.extend(raw_decks)
-    if raw_warnings:
-        warnings.extend(raw_warnings)
+    # Effizienter zeilenweiser Pfad: liest nur DeckSummaries-Zeilen,
+    # nicht alle Zeilen in den Speicher. Der alte Pipeline-Weg
+    # (ingest→chunk→extract_json→_extract_decks) war zu langsam auf
+    # großen Logs (25 MB → Timeout).
+    decks, warnings = _extract_decks_from_raw_json_lines(sorted_paths)
     decks = _dedupe_decks(decks)
+
+    # Ergänze Struktur-Warnings (früher in _extract_decks generiert)
+    for deck in decks:
+        if deck.deck_id is None:
+            warnings.append(
+                f"Deck '{deck.name}' hat keine DeckId — kann nicht eindeutig identifiziert werden."
+            )
+    name_counts: dict[str, int] = {}
+    for deck in decks:
+        name_counts[deck.name] = name_counts.get(deck.name, 0) + 1
+    for name, count in name_counts.items():
+        if count > 1:
+            warnings.append(
+                f"Deck-Name '{name}' tritt {count}-mal auf (verschiedene IDs). "
+                "Möglicherweise unterschiedliche Deck-Varianten."
+            )
 
     decks_path = output_dir / "decks.json"
     run_report_path = output_dir / "run-report-decks.json"
@@ -236,7 +250,17 @@ def _extract_decks(events: list[ParsedEvent]) -> tuple[list[DeckSummary], list[s
 
 
 def _extract_decks_from_raw_json_lines(paths: list[Path]) -> tuple[list[DeckSummary], list[str]]:
-    """Fallback für JSON-Zeilen, die nicht über das Timestamp-Chunking laufen."""
+    """Effizienter zeilenweiser Deck-Extraktionspfad.
+
+    Liest die Logs zeilenweise (nicht alles in den Speicher), filtert nur
+    Zeilen mit ``DeckSummaries`` oder ``CourseDeckSummary`` und extrahiert
+    robust den JSON-Block daraus.
+
+    Manche Log-Zeilen sind reines JSON (starten direkt mit ``{``), andere
+    haben einen Präfix (z.B. Timestamp) mit JSON-Block danach. Diese Funktion
+    findet den ersten ``{`` und scannt bis zur passenden schließenden ``}``,
+    wobei Strings und Escapes korrekt behandelt werden.
+    """
     decks: list[DeckSummary] = []
     warnings: list[str] = []
 
@@ -244,26 +268,112 @@ def _extract_decks_from_raw_json_lines(paths: list[Path]) -> tuple[list[DeckSumm
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line_number, raw_line in enumerate(handle, start=1):
-                    text = raw_line.strip()
-                    if not text.startswith("{"):
+                    # Quick filter: nur Zeilen mit Deck-Kennzeichen verarbeiten
+                    if '"DeckSummaries"' not in raw_line and '"CourseDeckSummary"' not in raw_line:
                         continue
-                    if "\"CourseDeckSummary\"" not in text and "\"DeckSummaries\"" not in text:
+
+                    payload = _extract_json_block(raw_line)
+                    if payload is None:
                         continue
-                    try:
-                        payload = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
+
                     found, payload_warnings = _extract_decks_from_payload(payload)
                     if found:
                         decks.extend(found)
                     if payload_warnings:
                         warnings.extend(
-                            f"{path.name}:{line_number}: {warning}" for warning in payload_warnings
+                            f"{path.name}:{line_number}: {w}" for w in payload_warnings
                         )
         except OSError as exc:
             warnings.append(f"{path.name}: konnte nicht gelesen werden ({exc})")
 
     return decks, warnings
+
+
+def _extract_json_block(line: str) -> dict[str, Any] | None:
+    """Extrahiere den ersten vollständigen JSON-Objekt-Block aus einer Zeile.
+
+    Findet das erste ``{`` und scannt bis zur passenden schließenden ``}``,
+    wobei Strings (single/double quotes) und Escape-Sequenzen beachtet werden.
+
+    Versuche-Reihenfolge:
+    1. Brace-matching: extrahiere den JSON-Block ab erstem ``{``.
+    2. Falls json.loads auf den Block fehlschlägt, versuche die ganze Zeile
+       ab ``{`` (kann bei mehrzeiligen Konstrukten helfen).
+    3. Als letzten Versuch: json.loads auf die ganze (getrimmte) Zeile.
+    """
+    start = line.find("{")
+    if start == -1:
+        return None
+
+    json_str = _scan_json_object(line, start)
+    if json_str is not None:
+        try:
+            data = json.loads(json_str)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass  # Fallback unten
+
+    # Fallback 1: ganze Zeile ab erstem '{'
+    tail = line[start:]
+    try:
+        data = json.loads(tail)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback 2: ganze getrimmte Zeile (für den Fall, dass '{' nicht der Start ist)
+    stripped = line.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _scan_json_object(text: str, start: int) -> str | None:
+    """Scanne ab Position *start* bis zur passenden schließenden Klammer.
+
+    Gibt den Substring inklusive der äußeren ``{}``  zurück, oder ``None``
+    wenn kein vollständiges JSON-Objekt gefunden wurde.
+    """
+    depth = 0
+    in_string = False
+    string_char = ""
+    i = start
+
+    while i < len(text):
+        ch = text[i]
+
+        if in_string:
+            if ch == "\\":
+                # Escape: überspringe das nächste Zeichen
+                i += 2
+                continue
+            if ch == string_char:
+                in_string = False
+            i += 1
+            continue
+
+        # Nicht in einem String
+        if ch == '"' or ch == "'":
+            in_string = True
+            string_char = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
+        i += 1
+
+    return None  # keine schließende Klammer gefunden
 
 
 def _extract_decks_from_payload(data: dict[str, Any]) -> tuple[list[DeckSummary], list[str]]:
