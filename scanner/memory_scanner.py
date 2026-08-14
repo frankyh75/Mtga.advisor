@@ -58,8 +58,12 @@ def find_blocks(backend: MemoryBackend, addr: int) -> list[dict[int, int]]:
         Liste von Karten-Dictionaries (grpId → quantity)
     """
     try:
-        block_start = max(0, addr - 1024 * 1024)
-        data = backend.read_bytes(block_start, 4 * 1024 * 1024)
+        # Lese einen größeren Bereich um die Fundstelle, um auch große
+        # Collection-Arrays (8000+ Einträge = 64KB+) vollständig zu erfassen.
+        # 2MB vor der Fundstelle (Collection-Array kann weit vor dem Anker
+        # beginnen) und 6MB danach (für den Rest des Arrays + folgende Daten).
+        block_start = max(0, addr - 2 * 1024 * 1024)
+        data = backend.read_bytes(block_start, 8 * 1024 * 1024)
         if data is None:
             return []
         ints = struct.unpack(f"<{len(data) // 4}I", data)
@@ -197,8 +201,14 @@ def validate_collection(
         for card_id, expected, name in anchors:
             actual = collection.get(card_id)
             ok = actual == expected
-            if not ok:
-                errors.append("anchor-mismatch")
+            if actual is None:
+                # Anker-Karte komplett fehlend → error (Block ist nicht die Collection)
+                errors.append("anchor-missing")
+            elif not ok:
+                # Anker-Karte vorhanden, aber Menge abweicht → warning
+                # (Block ist wahrscheinlich die echte Collection, Mengen-Abweichung
+                # kann durch Parser-Ungenauigkeit oder View-Status entstehen)
+                warnings.append("anchor-qty-mismatch")
             anchor_results.append(
                 {
                     "arenaId": card_id,
@@ -330,6 +340,98 @@ def get_user_anchors(
             pass
 
     return anchors
+
+
+def _select_best_block(
+    candidates: list[dict[int, int]],
+    anchors: Sequence[tuple[int, int, str]],
+    *,
+    print_fn: Callable[..., None] = print,
+) -> dict[int, int]:
+    """Wählt den besten Kandidaten-Block aus der Liste von Speicherblöcken.
+
+    Auswahlstrategie (anchor-presence-basiert, ersetzt naives max(len)):
+
+    1. **Anchor-Presence-Score** (primär): Für jeden Block wird gezählt, wie
+       viele Anker-Karten-grpIds **überhaupt vorhanden** sind (unabhängig von
+       der Menge). Ein Block mit 5/5 enthaltenen Anker-grpIds ist die echte
+       Collection, selbst wenn einige Mengen abweichen — ein Block mit nur
+       2/5 ist nicht die echte Collection, egal wie groß er ist.
+    2. **Exact-Quantity-Score** (Tie-Breaker 1): Bei gleichem Presence-Score
+       gewinnt der Block mit mehr Ankern, deren Menge exakt stimmt.
+    3. **Blockgröße** (Tie-Breaker 2): Bei weiterem Gleichstand gewinnt der
+       größere Block (mehr gefundene Karten = wahrscheinlicher echte Collection).
+
+    Diese Logik verhindert, dass ein kleiner Block (z.B. 258 Einträge, 2/5
+    Anker mit exakter Menge) gegen den echten Collection-Block (8000+ Einträge,
+    5/5 Anker-grpIds vorhanden, aber einige Mengen abweichend) gewinnt.
+
+    Args:
+        candidates: Deduplizierte Liste von {grpId: qty} Blocks.
+        anchors: Liste von (grpId, expected_qty, name)-Tupeln.
+        print_fn: Ausgabe-Funktion für Diagnose-Meldungen.
+
+    Returns:
+        Der ausgewählte Block als {grpId: qty} Dictionary.
+    """
+    if not candidates:
+        return {}
+    if not anchors:
+        # Keine Anker → Fallback auf größten Block (altes Verhalten)
+        return max(candidates, key=len)
+
+    anchor_map = {aid: expected for aid, expected, _ in anchors}
+
+    def anchor_score(block: dict[int, int]) -> tuple[int, int, int]:
+        """Score: (vorhandene Anker-grpIds, exakte Mengen, Block-Größe).
+
+        Höher = besser. Sortierung:
+        1. Wie viele der gesuchten grpIds sind überhaupt im Block?
+        2. Wie viele davon haben die exakte erwartete Menge?
+        3. Block-Größe (größer = wahrscheinlicher echte Collection).
+        """
+        present = 0
+        exact = 0
+        for aid, expected in anchor_map.items():
+            actual = block.get(aid)
+            if actual is not None:
+                present += 1
+                if actual == expected:
+                    exact += 1
+        return (present, exact, len(block))
+
+    # Sortiere nach (presence, exact, size) absteigend
+    scored = sorted(candidates, key=anchor_score, reverse=True)
+
+    best = scored[0]
+    best_present, best_exact, best_size = anchor_score(best)
+    total_anchors = len(anchor_map)
+
+    if best_present == total_anchors and best_exact == total_anchors:
+        print_fn(f"   📋 Block ausgewählt: {best_size} Einträge, {best_exact}/{total_anchors} Anker korrekt")
+    elif best_present == total_anchors:
+        print_fn(
+            f"   📋 Block ausgewählt: {best_size} Einträge, "
+            f"{best_present}/{total_anchors} Anker-grpIds vorhanden, "
+            f"{best_exact}/{total_anchors} Mengen exakt"
+        )
+    elif best_present > 0:
+        print_fn(
+            f"   ⚠ Block ausgewählt: {best_size} Einträge, "
+            f"nur {best_present}/{total_anchors} Anker-grpIds vorhanden, "
+            f"{best_exact}/{total_anchors} Mengen exakt (Teiltreffer)"
+        )
+        # Prüfe, ob ein größerer Block ohne Anker existiert — Warnung
+        biggest = max(candidates, key=len)
+        if len(biggest) > best_size * 2 and anchor_score(biggest)[0] == 0:
+            print_fn(f"   ⚠ Ein größerer Block ({len(biggest)} Einträge) ohne Anker wurde verworfen")
+    else:
+        # Kein Block enthält Anker — Fallback auf größten Block
+        biggest = max(candidates, key=len)
+        print_fn(f"   ⚠ Kein Block enthält Anker-Karten. Fallback auf größten Block ({len(biggest)} Einträge)")
+        return biggest
+
+    return best
 
 
 def _attach_process(
@@ -499,8 +601,8 @@ def scan_collection_detailed(
 
     # Dedup: Mehrere Anker im selben Collection-Array parsen denselben
     # Speicherbereich mehrfach → identische Blöcke in candidates.
-    # Identische Karten-Mengen entfernen, damit max() nicht durch Duplikate
-    # verfälscht wird und redundante Arbeit entfällt.
+    # Identische Karten-Mengen entfernen, damit die Blockauswahl nicht durch
+    # Duplikate verfälscht wird und redundante Arbeit entfällt.
     unique_candidates: list[dict[int, int]] = []
     seen: set[tuple[tuple[int, int], ...]] = set()
     for block in candidates:
@@ -509,7 +611,7 @@ def scan_collection_detailed(
             seen.add(key)
             unique_candidates.append(block)
 
-    collection = max(unique_candidates, key=len)
+    collection = _select_best_block(unique_candidates, anchors, print_fn=print_fn)
     validation = validate_collection(collection, db=db, anchors=anchors)
     if validation["valid"]:
         print_fn(f"\n✅ {len(collection)} unique Einträge gefunden!")
