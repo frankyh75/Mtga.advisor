@@ -301,3 +301,63 @@ def test_load_deck_cards_not_found(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         load_deck_cards(path, deck_id="nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# Print-übergreifendes owned-Matching (Reprints / alle Prints)
+# ---------------------------------------------------------------------------
+
+def test_analyze_deck_owned_across_prints() -> None:
+    """owned wird über alle grpIds mit gleichem Kartennamen summiert (Reprints).
+
+    Deck will Duress grpId 83792 (1x). Collection hat Duress unter drei
+    grpIds (77508: 4, 78439: 4, 83792: 1) = 9 insgesamt. Die Analyse
+    darf nicht nur 83792 zählen.
+    """
+    collection = _make_collection({"77508": 4, "78439": 4, "83792": 1})
+    wildcards = _make_wildcards()
+    deck = _make_deck(main_deck=[{"cardId": 83792, "quantity": 4}], sideboard=[])
+    card_db = {
+        77508: {"name": "Duress", "rarity": "common"},
+        78439: {"name": "Duress", "rarity": "common"},
+        83792: {"name": "Duress", "rarity": "common"},
+    }
+
+    result = analyze_deck(deck=deck, collection=collection, wildcards=wildcards, card_db=card_db)
+
+    assert result["summary"]["completionScore"] == 100.0
+    assert result["summary"]["missingCards"] == 0
+    assert result["summary"]["missingUnique"] == 0
+    # Die Deck-Karte soll 9 owned anzeigen (Summe aller Prints).
+    owned_entry = result["ownedCards"][0]
+    assert owned_entry["owned"] == 9
+
+
+def test_analyze_deck_basic_land_any_grp_id() -> None:
+    """Grundländer sind immer owned, auch wenn die grpId in der Collection
+    eine andere ist als im Deck (MTGA Grundländer sind unbegrenzt)."""
+    collection = _make_collection({"58445": 1})  # Swamp grpId 58445, nur 1
+    wildcards = _make_wildcards()
+    deck = _make_deck(main_deck=[{"cardId": 99999, "quantity": 23}], sideboard=[])
+    # 99999 ist eine Swamp-grpId, die nicht in der Collection liegt.
+    card_db = {99999: {"name": "Swamp", "rarity": "common"}, 58445: {"name": "Swamp", "rarity": "common"}}
+
+    result = analyze_deck(deck=deck, collection=collection, wildcards=wildcards, card_db=card_db)
+
+    assert result["summary"]["completionScore"] == 100.0
+    assert result["summary"]["missingCards"] == 0
+    # owned = needed (23), da Grundländer unbegrenzt.
+    assert result["ownedCards"][0]["owned"] == 23
+
+
+def test_analyze_deck_no_card_db_falls_back_to_exact_match() -> None:
+    """Ohne Karten-DB bleibt das alte Verhalten: exakter grpId-Match."""
+    collection = _make_collection({"77508": 4, "83792": 1})
+    wildcards = _make_wildcards()
+    deck = _make_deck(main_deck=[{"cardId": 83792, "quantity": 4}], sideboard=[])
+
+    result = analyze_deck(deck=deck, collection=collection, wildcards=wildcards)
+
+    # Ohne DB nur 83792 (1) → 3 fehlen.
+    assert result["summary"]["missingCards"] == 3
+    assert result["summary"]["completionScore"] < 100.0
