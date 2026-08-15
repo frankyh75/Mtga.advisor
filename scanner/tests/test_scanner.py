@@ -545,6 +545,22 @@ def _make_valid_collection_payload(cards: dict[int, int]) -> dict:
     }
 
 
+def _make_invalid_collection_payload(cards: dict[int, int]) -> dict:
+    """Erzeugt ein ungültiges collection.json-Payload für Tests."""
+    return {
+        "schema": "collection.v1",
+        "source": "memory-scan",
+        "cards": {str(k): v for k, v in sorted(cards.items())},
+        "wildcards": {},
+        "diagnostics": {
+            "completeness": {"cards": "incomplete", "wildcards": "unknown", "source": "incomplete"},
+            "warnings": [],
+            "evidence": ["memory-scan"],
+            "validation": {"valid": False, "errors": ["anchor-missing"], "warnings": []},
+        },
+    }
+
+
 def _make_valid_scan_result(cards: dict[int, int]) -> memory_scanner.MemoryScanResult:
     """Erzeugt ein gültiges MemoryScanResult für Tests."""
     return memory_scanner.MemoryScanResult(
@@ -552,6 +568,16 @@ def _make_valid_scan_result(cards: dict[int, int]) -> memory_scanner.MemoryScanR
         anchors=[],
         anchor_matches={},
         validation={"valid": True, "errors": [], "warnings": []},
+    )
+
+
+def _make_invalid_scan_result(cards: dict[int, int]) -> memory_scanner.MemoryScanResult:
+    """Erzeugt ein ungültiges MemoryScanResult für Tests (valid: false)."""
+    return memory_scanner.MemoryScanResult(
+        collection=cards,
+        anchors=[],
+        anchor_matches={},
+        validation={"valid": False, "errors": ["anchor-missing"], "warnings": []},
     )
 
 
@@ -733,3 +759,282 @@ def test_backup_created_on_overwrite(tmp_path: Path) -> None:
     # Neue Collection geschrieben
     written = json.loads((out / "collection.json").read_text(encoding="utf-8"))
     assert len(written["cards"]) == 200
+
+
+# ---------------------------------------------------------------------------
+# Robuster Schreibschutz — Testfälle A-E (Teil 1-3: Grundregel + Quality-Guards)
+# ---------------------------------------------------------------------------
+
+def test_write_protect_A_invalid_scan_does_not_overwrite_valid(tmp_path: Path) -> None:
+    """Testfall A: bestehend 8064 (valid:true), neu 288330 (valid:false) → NICHT überschreiben.
+
+    Der konkrete Live-Fehlerfall: ein riesiger invalider Block (288.330 Einträge,
+    valid:false, anchor-missing) hat die bestehende gültige Collection überschrieben.
+    Die Grundregel muss das verhindern: invalider Scan überschreibt NIE eine bestehende Collection.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 288.330 Einträge, valid: false (der Live-Fehlerfall)
+    new_cards = {i: 1 for i in range(1, 288331)}
+    scan_result = _make_invalid_scan_result(new_cards)
+
+    memory_scanner.write_collection_artifacts(new_cards, out, scan_result=scan_result)
+
+    # collection.json darf NICHT überschrieben worden sein
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 8064  # alte Collection erhalten
+
+    # run-report muss writeProtected melden
+    report = json.loads((out / "run-report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+    assert report["summary"]["existingCardsCount"] == 8064
+    assert report["summary"]["cardsCount"] == 288330
+    assert any("invalid scan" in w for w in report["diagnostics"]["warnings"])
+
+
+def test_write_protect_B_invalid_scan_does_not_overwrite_invalid(tmp_path: Path) -> None:
+    """Testfall B: bestehend 59 (valid:false), neu 288330 (valid:false) → NICHT überschreiben.
+
+    Selbst wenn die bestehende Collection bereits kaputt ist (valid:false, nur 59 Karten),
+    darf ein invalider Scan sie nicht überschreiben. Ein invalider Scan ist nie besser.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende UNGÜLTIGE Collection mit nur 59 Karten
+    existing_cards = {i: 1 for i in range(1, 60)}
+    existing_payload = _make_invalid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 288.330 Einträge, valid: false
+    new_cards = {i: 1 for i in range(1, 288331)}
+    scan_result = _make_invalid_scan_result(new_cards)
+
+    memory_scanner.write_collection_artifacts(new_cards, out, scan_result=scan_result)
+
+    # collection.json darf NICHT überschrieben worden sein — die 59-Karten Collection bleibt
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 59  # alte (kaputte) Collection erhalten
+
+    # run-report muss writeProtected melden
+    report = json.loads((out / "run-report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+    assert any("invalid scan" in w for w in report["diagnostics"]["warnings"])
+
+
+def test_write_overwrite_C_valid_scan_more_cards(tmp_path: Path) -> None:
+    """Testfall C: bestehend 8064 (valid:true), neu 9000 (valid:true) → überschreiben.
+
+    Echte Aktualisierung: valider Scan mit mehr Karten überschreibt die bestehende Collection.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 9000 Karten, valid: true
+    new_cards = {i: 1 for i in range(1, 9001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    collection_path, run_report_path = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    # collection.json muss überschrieben worden sein
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 9000
+
+    # Backup der alten Collection muss existieren
+    backup = json.loads((out / "collection.backup.json").read_text(encoding="utf-8"))
+    assert len(backup["cards"]) == 8064
+
+    # run-report: kein writeProtected
+    report = json.loads(run_report_path.read_text(encoding="utf-8"))
+    assert not report["summary"].get("writeProtected", False)
+
+
+def test_write_first_scan_D_invalid_writes_with_warning(tmp_path: Path) -> None:
+    """Testfall D: keine bestehende Collection → erster Scan schreibt (auch wenn invalid).
+
+    Ein erster Scan (keine bestehende Datei) schreibt immer — besser als nichts.
+    Aber mit Warnung, dass der Scan invalid ist.
+    """
+    out = tmp_path / "out"
+
+    # Neuer Scan: 100 Karten, valid: false
+    new_cards = {i: 1 for i in range(1, 101)}
+    scan_result = _make_invalid_scan_result(new_cards)
+
+    collection_path, run_report_path = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    # collection.json muss geschrieben worden sein
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 100
+
+    # Warnung im collection.json, dass der erste Scan invalid ist
+    assert any("first scan is invalid" in w for w in written["diagnostics"]["warnings"])
+
+    # run-report: kein writeProtected (kein bestehendes Artefakt zum Schützen)
+    report = json.loads(run_report_path.read_text(encoding="utf-8"))
+    assert not report["summary"].get("writeProtected", False)
+
+
+def test_write_protect_E_fewer_cards_valid_scan(tmp_path: Path) -> None:
+    """Testfall E: bestehend 8064, neu 5000 (valid:true) → NICHT überschreiben.
+
+    Karten können nicht weniger werden — ein Scan mit weniger unique Karten
+    bedeutet, dass der Helper nicht alle Regionen geliefert hat.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 5000 Karten, valid: true
+    new_cards = {i: 1 for i in range(1, 5001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    memory_scanner.write_collection_artifacts(new_cards, out, scan_result=scan_result)
+
+    # collection.json darf nicht überschrieben worden sein
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 8064
+
+    # run-report muss writeProtected melden
+    report = json.loads((out / "run-report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+    assert any("cards cannot decrease" in w for w in report["diagnostics"]["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Quality-Guard Tests (Ceiling + Known-Ratio)
+# ---------------------------------------------------------------------------
+
+def test_write_protect_ceiling_guard_blocks_huge_valid_block(tmp_path: Path) -> None:
+    """Ceiling-Guard: ein Block mit >100k Einträgen (valid:true) überschreibt nicht.
+
+    Auch wenn der Scan valid:true meldet (z.B. alle Anker zufällig matchen),
+    ist ein Block mit >100.000 Einträgen mit Sicherheit kein echte Collection
+    (echte ~8.000).  Der Ceiling-Guard schützt davor.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 150.000 Einträge, valid: true (Edge-Case: Anker zufällig korrekt)
+    new_cards = {i: 1 for i in range(1, 150001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    memory_scanner.write_collection_artifacts(new_cards, out, scan_result=scan_result)
+
+    # collection.json darf nicht überschrieben worden sein
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 8064
+
+    report = json.loads((out / "run-report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+    assert any("absurdly large" in w for w in report["diagnostics"]["warnings"])
+
+
+def test_write_protect_known_ratio_guard_blocks_low_quality(tmp_path: Path) -> None:
+    """Known-Ratio-Guard: ein Block mit <30% bekannten IDs überschreibt nicht.
+
+    Ein Block mit 288.330 Einträgen, von denen nur 14.049 (4.8%) bekannte arenaIds
+    sind, ist kein echter Collection-Block.  Der known_ratio-Guard schützt davor,
+    selbst wenn der Scan valid:true meldet (z.B. Anker zufällig korrekt).
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 10.000 Einträge, aber nur IDs 1-1000 sind bekannt (10% known_ratio)
+    # IDs 1001-10000 sind unbekannt (nicht in known_ids)
+    new_cards = {i: 1 for i in range(1, 10001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    # known_ids: nur IDs 1-1000 sind bekannt → known_ratio = 1000/10000 = 10%
+    known_ids = set(range(1, 1001))
+
+    memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result, known_ids=known_ids,
+    )
+
+    # collection.json darf nicht überschrieben worden sein
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 8064
+
+    report = json.loads((out / "run-report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+    assert any("low-quality" in w for w in report["diagnostics"]["warnings"])
+
+
+def test_write_protect_known_ratio_passes_high_quality(tmp_path: Path) -> None:
+    """Known-Ratio-Guard: ein Block mit >=30% bekannten IDs darf überschreiben.
+
+    Ein valider Scan mit 9000 Karten, von denen >=30% bekannt sind, überschreibt
+    die bestehende Collection (echte Aktualisierung).
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan: 9000 Karten, alle bekannt (100% known_ratio)
+    new_cards = {i: 1 for i in range(1, 9001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    # known_ids: alle IDs 1-9000 sind bekannt → known_ratio = 100%
+    known_ids = set(range(1, 9001))
+
+    collection_path, _ = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result, known_ids=known_ids,
+    )
+
+    # collection.json muss überschrieben worden sein
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 9000
+
+
+def test_write_protect_ceiling_allows_first_scan(tmp_path: Path) -> None:
+    """Ceiling-Guard greift nicht beim ersten Scan (keine bestehende Collection).
+
+    Auch ein absurd großer Block wird geschrieben, wenn keine bestehende Collection
+    existiert — besser als nichts.
+    """
+    out = tmp_path / "out"
+
+    # Neuer Scan: 150.000 Einträge, valid: true
+    new_cards = {i: 1 for i in range(1, 150001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    collection_path, _ = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 150000

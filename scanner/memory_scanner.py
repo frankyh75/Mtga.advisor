@@ -41,6 +41,10 @@ MIN_BLOCK_SIZE = 50
 MAX_GAP = 64
 STRIDES_WORDS = (2, 3, 4)
 
+# Schreibschutz-Konstanten für write_collection_artifacts
+MAX_COLLECTION_ENTRIES = 100_000  # Ceiling-Guard: echte Collection ~8k, >100k = Müll
+MIN_KNOWN_RATIO = 0.30            # Quality-Guard: <30% bekannte IDs = nicht real
+
 
 @dataclass(frozen=True)
 class MemoryScanResult:
@@ -174,24 +178,45 @@ def write_collection_artifacts(
     output_dir: Path,
     *,
     scan_result: MemoryScanResult | None = None,
+    known_ids: set[int] | None = None,
 ) -> tuple[Path, Path]:
     """Schreibt Memory-Scan-Ergebnisse im bestehenden Artefaktformat.
 
-    Schreibschutz:
-    - **P0 (invalid scan):** Wenn der neue Scan ``valid: false`` liefert UND
-      bereits eine gültige ``collection.json`` (``valid: true``) existiert, wird
-      die bestehende Collection **nicht überschrieben**.
-    - **Mengen-Sanity-Check:** Wenn der neue Scan ``valid: true`` liefert, aber
-      WENIGER unique Karten hat als die bestehende gültige Collection, wird
-      ebenfalls nicht überschrieben.  Karten können nicht weniger werden —
-      ein solcher Scan bedeutet, dass der Helper z.B. nicht alle Regionen
-      geliefert hat.
+    Robuster Schreibschutz (konservativ — lieber alt behalten als verlieren):
+
+    - **Grundregel (Teil 1):** Ein Scan mit ``valid: false`` überschreibt
+      **niemals** eine bestehende Collection (egal ob die bestehende valid
+      ist oder nicht).  Ein invalider Scan ist nie besser als der aktuelle
+      Zustand.  Ausnahme: kein bestehendes Artefakt → dann schreiben
+      (besser als nichts, aber mit Warnung).
+
+    - **Ceiling-Guard (Teil 2):** Ein Block mit > ``MAX_COLLECTION_ENTRIES``
+      (> 100.000) Einträgen ist mit Sicherheit Speichermüll (Katalog-Daten,
+      Deck-Definitionen etc.) — die echte Collection hat ~8.000 unique Karten.
+      Wenn eine bestehende Collection existiert → nicht überschreiben.
+
+    - **Known-Ratio-Guard (Teil 3):** Wenn der neue Block eine
+      known_ratio < ``MIN_KNOWN_RATIO`` (< 30%) hat und eine bestehende
+      Collection existiert → nicht überschreiben.  Ein Block mit 4.8%
+      bekannten IDs ist kein echter Collection-Block.
+
+    - **Mengen-Sanity-Check:** Wenn der neue Scan ``valid: true`` liefert,
+      aber WENIGER unique Karten hat als die bestehende Collection → nicht
+      überschreiben.  Karten können nicht weniger werden.
+
     - **JSON-Backup:** Vor dem Überschreiben einer bestehenden Collection wird
       diese als ``collection.backup.json`` gesichert.
 
     Ein legitimer erster Scan (keine bestehende Datei) schreibt immer.  Ein
-    valider neuer Scan mit >= bestehender Kartenanzahl überschreibt (echte
-    Aktualisierung).
+    valider neuer Scan mit >= bestehender Kartenanzahl, der alle Guards
+    passiert, überschreibt (echte Aktualisierung).
+
+    Args:
+        collection: Die gescannte Collection als {grpId: quantity}.
+        output_dir: Ausgabe-Verzeichnis für collection.json + run-report.json.
+        scan_result: Das vollständige MemoryScanResult (für Validation + Stats).
+        known_ids: Set aller bekannten arenaIds aus der Karten-DB.
+            Wenn None, wird der known_ratio-Guard übersprungen (backward-kompatibel).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     collection_path = output_dir / "collection.json"
@@ -216,22 +241,51 @@ def write_collection_artifacts(
         )
         existing_count = len(existing.get("cards", {}))
 
-    # --- Schreibschutz: gültige Collection nicht zerstören ---
-    # Fall 1 (P0): neuer Scan ist invalid + bestehende ist valid → nicht überschreiben
-    # Fall 2 (Mengen-Sanity): neuer Scan ist valid, hat aber WENIGER unique Karten
-    #   als die bestehende gültige Collection → nicht überschreiben.
-    #   Karten können nicht weniger werden — ein solcher Scan bedeutet,
-    #   dass z.B. der Helper nicht alle Regionen geliefert hat.
+    # --- Known-Ratio berechnen (für Quality-Guard) ---
+    new_known_ratio: float | None = None
+    if known_ids is not None and new_count > 0:
+        known_in_block = sum(1 for cid in collection if cid in known_ids)
+        new_known_ratio = known_in_block / new_count
+
+    # ===================================================================
+    # SCHREIBSCHUTZ-LOGIK — konservativ, mehre unabhängige Guards
+    # ===================================================================
+    # Grundregel: ein invalider Scan überschreibt NIE eine bestehende Collection.
+    # Ceiling-Guard: >100k Einträge = Müll.
+    # Known-Ratio-Guard: <30% bekannte IDs = nicht die echte Collection.
+    # Mengen-Sanity: weniger Karten als bestehend → nicht überschreiben.
+    #
+    # Jeder Guard greift nur wenn eine bestehende Collection existiert
+    # (erster Scan schreibt immer, auch wenn invalid — besser als nichts).
+    # ===================================================================
     write_protect_reason: str | None = None
-    if existing is not None and existing_valid and existing_count > 0:
+
+    if existing is not None:
+        # --- Teil 1 (Grundregel): invalider Scan überschreibt NIE ---
         if not new_valid:
             write_protect_reason = (
-                f"existing valid collection ({existing_count} cards) NOT overwritten "
-                f"by invalid scan ({new_count} cards, valid={new_valid})"
+                f"existing collection ({existing_count} cards, valid={existing_valid}) "
+                f"NOT overwritten by invalid scan ({new_count} cards, valid={new_valid}) "
+                f"— an invalid scan is never better than the current state"
             )
+        # --- Teil 2 (Ceiling-Guard): absurd großer Block ---
+        elif new_count > MAX_COLLECTION_ENTRIES:
+            write_protect_reason = (
+                f"existing collection ({existing_count} cards) NOT overwritten by "
+                f"absurdly large block ({new_count} entries > {MAX_COLLECTION_ENTRIES}) "
+                f"— not a real collection (memory junk / catalog data)"
+            )
+        # --- Teil 3 (Known-Ratio-Guard): sehr niedrige known_ratio ---
+        elif new_known_ratio is not None and new_known_ratio < MIN_KNOWN_RATIO:
+            write_protect_reason = (
+                f"existing collection ({existing_count} cards) NOT overwritten by "
+                f"low-quality block ({new_count} entries, known_ratio={new_known_ratio:.1%} "
+                f"< {MIN_KNOWN_RATIO:.0%}) — not a real collection block"
+            )
+        # --- Mengen-Sanity-Check: Karten können nicht weniger werden ---
         elif new_count < existing_count:
             write_protect_reason = (
-                f"existing valid collection ({existing_count} cards) NOT overwritten "
+                f"existing collection ({existing_count} cards) NOT overwritten "
                 f"by new scan with fewer unique cards ({new_count} cards, valid={new_valid}) "
                 f"— cards cannot decrease"
             )
@@ -246,7 +300,7 @@ def write_collection_artifacts(
             "source": "memory-scan",
             "logs": [
                 f"WARNING: {write_protect_reason}. "
-                f"Existing valid collection ({existing_count} cards) "
+                f"Existing collection ({existing_count} cards) "
                 f"was kept — not overwritten."
             ],
             "outputs": {
@@ -260,6 +314,7 @@ def write_collection_artifacts(
                 "valid": new_valid,
                 "writeProtected": True,
                 "existingCardsCount": existing_count,
+                "knownRatio": round(new_known_ratio, 4) if new_known_ratio is not None else None,
             },
             "diagnostics": {
                 "completeness": {
@@ -299,6 +354,12 @@ def write_collection_artifacts(
             backup_path.write_bytes(collection_path.read_bytes())
         except OSError:
             pass  # non-fatal — Backup-Fehler soll den Scan nicht blockieren
+
+    # --- Erster Scan mit invalidem Ergebnis → Warnung (besser als nichts) ---
+    if existing is None and not new_valid:
+        warnings.append(
+            "first scan is invalid but written — no existing collection to protect"
+        )
 
     collection_payload = {
         "schema": "collection.v1",
@@ -1038,9 +1099,17 @@ def main() -> int:
         return 1
 
     # Ausgabe
-    print(f"\n📊 Collection: {sum(result.collection.values())} Karten, {len(result.collection)} unique IDs")
+    print(f"\n📊 Collection: {sum(result.collection.values())} Karten, {len(result.collection)} unique IDs")  # noqa: E501
     if args.output:
-        collection_path, run_report_path = write_collection_artifacts(result.collection, args.output, scan_result=result)
+        # known_ids für Quality-Guard laden
+        try:
+            _db = load_card_database()
+            _known_ids = set(_db.keys()) if _db else None
+        except Exception:
+            _known_ids = None
+        collection_path, run_report_path = write_collection_artifacts(
+            result.collection, args.output, scan_result=result, known_ids=_known_ids,
+        )
         print(f"Collection exportiert: {collection_path}")
         print(f"Run-Report: {run_report_path}")
     return 0
