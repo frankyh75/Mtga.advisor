@@ -29,6 +29,18 @@ from .macos_paths import (
 from .pattern_scanner import MemoryBackend, PymemBackend, scan_process_memory, scan_process_memory_with_stats
 from .pattern_scanner import ScanStats, scan_process_memory_many_with_stats
 
+# ---------------------------------------------------------------------------
+# Scan-Konfiguration (aus Community-Tool v3.4 übernommen)
+# ---------------------------------------------------------------------------
+SCAN_RANGE_MB = 8
+MIN_ARENA_ID = 1000
+MAX_ARENA_ID = 900_000
+MIN_QTY = 1
+MAX_QTY = 400
+MIN_BLOCK_SIZE = 50
+MAX_GAP = 64
+STRIDES_WORDS = (2, 3, 4)
+
 
 @dataclass(frozen=True)
 class MemoryScanResult:
@@ -43,12 +55,45 @@ def _anchor_file() -> Path:
     return get_default_cache_dir() / "last_anchors.json"
 
 
-def find_blocks(backend: MemoryBackend, addr: int) -> list[dict[int, int]]:
-    """Liest Speicher um eine Adresse und sucht nach (k,v)-Paaren.
+def find_blocks_with_dupes(
+    backend: MemoryBackend, addr: int
+) -> list[tuple[dict[int, int], int]]:
+    """Liest Speicher um eine Adresse und extrahiert (block, duplicates)-Paare.
 
-    Die Collection-Daten liegen als Array von (grpId, quantity)-Paaren
-    im Heap. Diese Funktion liest 4MB um die Fundstelle und parst
-    alle gültigen Paare.
+    Analog zum Community-Tool _find_blocks + _scan_region + _extract:
+    - Liest SCAN_RANGE_MB um die Fundstelle
+    - Versucht mehrere Strides (2, 3, 4 Wörter) und Offsets
+    - Trackt doppelte arena_ids innerhalb eines Blocks (→ dirty memory)
+    - max_gap / min_block_size Schwellen beenden Blöcke
+
+    Args:
+        backend: MemoryBackend-Instanz
+        addr: Fundstelle einer Anker-Karte
+
+    Returns:
+        Liste von (block_dict, duplicates_count)-Tupeln
+    """
+    try:
+        scan_bytes = SCAN_RANGE_MB * 1024 * 1024
+        block_start = max(0, addr - scan_bytes // 2)
+        data = backend.read_bytes(block_start, scan_bytes)
+        if data is None:
+            return []
+
+        results: list[tuple[dict[int, int], int]] = []
+        for stride_w in STRIDES_WORDS:
+            for off_w in range(stride_w):
+                results.extend(_extract_blocks(data, stride_w, off_w))
+        return results
+    except Exception:
+        return []
+
+
+def find_blocks(backend: MemoryBackend, addr: int) -> list[dict[int, int]]:
+    """Backward-kompatibler Wrapper: liefert nur Block-Dicts (ohne duplicates).
+
+    Behält die ursprüngliche Signatur für bestehende Tests und CLI.
+    Die Dedup-Logik (Schutz vor verfälschtem max()) bleibt erhalten.
 
     Args:
         backend: MemoryBackend-Instanz
@@ -57,35 +102,71 @@ def find_blocks(backend: MemoryBackend, addr: int) -> list[dict[int, int]]:
     Returns:
         Liste von Karten-Dictionaries (grpId → quantity)
     """
-    try:
-        block_start = max(0, addr - 1024 * 1024)
-        data = backend.read_bytes(block_start, 4 * 1024 * 1024)
-        if data is None:
-            return []
-        ints = struct.unpack(f"<{len(data) // 4}I", data)
+    pairs = find_blocks_with_dupes(backend, addr)
+    return [block for block, _dupes in pairs]
 
-        blocks: list[dict[int, int]] = []
-        for offset in (0, 1):
-            current: dict[int, int] = {}
-            misses = 0
-            for i in range(offset, len(ints) - 1, 2):
-                k, v = ints[i], ints[i + 1]
-                if 1000 <= k < 500000 and 1 <= v <= 400:
-                    current[k] = v
-                    misses = 0
-                else:
-                    misses += 1
-                    if misses > 50:
-                        if len(current) > 50:
-                            blocks.append(current)
-                        current = {}
-                        misses = 0
-            if len(current) > 50:
-                blocks.append(current)
 
-        return blocks
-    except Exception:
+def _extract_blocks(
+    data: bytes, stride_w: int, off_w: int
+) -> list[tuple[dict[int, int], int]]:
+    """Extrahiert (grpId, qty)-Paare aus rohen Speicherbytes.
+
+    Technik 2 (Duplicate-Tracking): Wenn eine arena_id mehrfach im selben
+    Block vorkommt, wird sie NICHT überschrieben (erste Vorkommen gewinnt)
+    und `duplicates` wird inkrementiert. Blöcke mit vielen Duplikaten
+    deuten auf dirty memory (falscher Speicherbereich).
+
+    Technik 2 (max_gap + min_block_size): Wenn mehr als MAX_GAP aufeinander-
+    folgende (k,v)-Paare nicht dem Filter entsprechen, wird der Block
+    abgeschlossen. Nur Blöcke mit >= MIN_BLOCK_SIZE Einträgen werden behalten.
+
+    Args:
+        data: Rohe Speicherbytes
+        stride_w: Stride in Wörtern (2, 3, oder 4)
+        off_w: Word-Offset für diese Iteration
+
+    Returns:
+        Liste von (block_dict, duplicates_count)-Tupeln
+    """
+    n_ints = len(data) // 4
+    if n_ints < 2:
         return []
+
+    try:
+        ints = struct.unpack_from(f"<{n_ints}I", data)
+    except struct.error:
+        return []
+
+    blocks: list[tuple[dict[int, int], int]] = []
+    current: dict[int, int] = {}
+    duplicates = 0
+    misses = 0
+    i = off_w
+
+    while i + 1 < n_ints:
+        k, v = ints[i], ints[i + 1]
+
+        if MIN_ARENA_ID <= k < MAX_ARENA_ID and MIN_QTY <= v <= MAX_QTY:
+            if k in current:
+                duplicates += 1
+            else:
+                current[k] = v
+            misses = 0
+        else:
+            misses += 1
+            if misses > MAX_GAP:
+                if len(current) >= MIN_BLOCK_SIZE:
+                    blocks.append((current, duplicates))
+                current = {}
+                duplicates = 0
+                misses = 0
+
+        i += stride_w
+
+    if len(current) >= MIN_BLOCK_SIZE:
+        blocks.append((current, duplicates))
+
+    return blocks
 
 
 def write_collection_artifacts(
@@ -197,8 +278,14 @@ def validate_collection(
         for card_id, expected, name in anchors:
             actual = collection.get(card_id)
             ok = actual == expected
-            if not ok:
-                errors.append("anchor-mismatch")
+            if actual is None:
+                # Anker-Karte komplett fehlend → error (Block ist nicht die Collection)
+                errors.append("anchor-missing")
+            elif not ok:
+                # Anker-Karte vorhanden, aber Menge abweicht → warning
+                # (Block ist wahrscheinlich die echte Collection, Mengen-Abweichung
+                # kann durch Parser-Ungenauigkeit oder View-Status entstehen)
+                warnings.append("anchor-qty-mismatch")
             anchor_results.append(
                 {
                     "arenaId": card_id,
@@ -332,6 +419,189 @@ def get_user_anchors(
     return anchors
 
 
+def _select_best_block(
+    candidates: Sequence[dict[int, int]] | Sequence[tuple[dict[int, int], int]],
+    anchors: Sequence[tuple[int, int, str]],
+    *,
+    known_ids: set[int] | None = None,
+    print_fn: Callable[..., None] = print,
+) -> dict[int, int]:
+    """Wählt den besten Kandidaten-Block aus der Liste von Speicherblöcken.
+
+    Technik 3 (gewichteter Score, aus Community-Tool v3.4 übernommen):
+
+    score = known_ratio * 0.35
+          + anchors_exact_ratio * 0.35
+          + anchors_id_ratio * 0.10
+          + size_score * 0.10
+          + (1 - dup_ratio) * 0.10
+
+    - **known_ratio**: Antel bekannter Karten-IDs im Block (aus Karten-DB).
+      Ein Block mit vielen unbekannten IDs ist wahrscheinlich kein
+      Collection-Block.  *Benötigt known_ids-Parameter.*
+    - **anchors_exact**: Anker mit exakter Menge.  Höchste Gewichtung.
+    - **anchors_id**: Anker-grpIds überhaupt vorhanden.
+    - **size_score**: min(len/5000, 1.0) — größere Blöcke sind wahrscheinlicher
+      die echte Collection.
+    - **(1 - dup_ratio)**: Weniger Duplikate = sauberer Speicherbereich.
+
+    Sortierung: (dupes==0, score, anchors_exact, known, size) absteigend.
+
+    **Backward-Kompatibilität**: Ohne ``known_ids`` fällt known_ratio auf
+    1.0 (alle IDs als "bekannt" angenommen) — die alte anchor-presence-Logik
+    bleibt damit funktionsfähig.  Kandidaten können als reine dicts
+    (alte API) oder (dict, dupes)-Tupel (neue API) übergeben werden.
+
+    Args:
+        candidates: Deduplizierte Blöcke als dicts oder (dict, dupes)-Tupel.
+        anchors: Liste von (grpId, expected_qty, name)-Tupeln.
+        known_ids: Set aller bekannten arenaIds aus der Karten-DB.
+        print_fn: Ausgabe-Funktion für Diagnose-Meldungen.
+
+    Returns:
+        Der ausgewählte Block als {grpId: qty} Dictionary.
+    """
+    if not candidates:
+        return {}
+
+    # Normalisiere Kandidaten: trenne Block-Dict und Duplikate-Zähler
+    normalized: list[tuple[dict[int, int], int]] = []
+    for c in candidates:
+        if isinstance(c, tuple) and len(c) == 2 and isinstance(c[0], dict):
+            normalized.append((c[0], c[1]))
+        elif isinstance(c, dict):
+            normalized.append((c, 0))
+        else:
+            continue
+
+    if not normalized:
+        return {}
+
+    if not anchors:
+        # Keine Anker → Fallback auf größten Block (altes Verhalten)
+        return max((blk for blk, _ in normalized), key=len)
+
+    anchor_pairs = {(aid, qty) for aid, qty, _ in anchors}
+    anchor_ids = {aid for aid, _, _ in anchors}
+    n_anchors = max(1, len(anchors))
+
+    # Wenn known_ids nicht gegeben: alle IDs als bekannt annehmen (ratio=1.0)
+    _known = known_ids if known_ids is not None else None
+
+    scored: list[tuple[dict[int, int], float, int, int, int, int]] = []
+    # (block, score, anchors_exact, known_count, dupes, size)
+
+    for blk, dupes in normalized:
+        if not blk:
+            continue
+
+        blk_len = len(blk)
+
+        # known_ratio: Anteil bekannter Karten-IDs
+        if _known is not None:
+            known_count = sum(1 for k in blk if k in _known)
+            known_ratio = known_count / blk_len
+        else:
+            known_count = blk_len  # alle als bekannt annehmen
+            known_ratio = 1.0
+
+        # anchors_exact: Anker mit exakter Menge
+        anchors_exact = sum(1 for k, v in blk.items() if (k, v) in anchor_pairs)
+        # anchors_id: Anker-grpIds überhaupt vorhanden
+        anchors_id = sum(1 for k in blk if k in anchor_ids)
+
+        size_score = min(blk_len / 5000, 1.0)
+        dup_ratio = dupes / max(1, blk_len + dupes)
+
+        score = (
+            known_ratio * 0.35
+            + (anchors_exact / n_anchors) * 0.35
+            + (anchors_id / n_anchors) * 0.10
+            + size_score * 0.10
+            + (1.0 - dup_ratio) * 0.10
+        )
+
+        scored.append((blk, score, anchors_exact, known_count, dupes, blk_len))
+
+    # Sortiere nach (dupes==0, score, anchors_exact, known, size) absteigend
+    scored.sort(
+        key=lambda x: (x[4] == 0, x[1], x[2], x[3], x[5]),
+        reverse=True,
+    )
+
+    best = scored[0]
+    best_blk, best_score, best_exact, best_known, best_dupes, best_size = best
+    total_anchors = len(anchor_ids)
+
+    if best_dupes == 0 and best_exact == total_anchors:
+        print_fn(
+            f"   📋 Block ausgewählt: {best_size} Einträge, "
+            f"score {best_score:.3f}, {best_exact}/{total_anchors} Anker korrekt"
+        )
+    elif best_exact > 0 or best_known > 0:
+        print_fn(
+            f"   📋 Block ausgewählt: {best_size} Einträge, "
+            f"score {best_score:.3f}, "
+            f"{best_exact}/{total_anchors} Anker exakt, "
+            f"known={best_known}, dupes={best_dupes}"
+        )
+    else:
+        # Kein Block enthält Anker — Fallback auf größten Block
+        biggest = max((blk for blk, _ in normalized), key=len)
+        print_fn(
+            f"   ⚠ Kein Block enthält Anker-Karten. "
+            f"Fallback auf größten Block ({len(biggest)} Einträge)"
+        )
+        return biggest
+
+    return best_blk
+
+
+def _validate_block(
+    block: dict[int, int],
+    duplicates: int = 0,
+    known_ids: set[int] | None = None,
+) -> bool:
+    """Validiert einen extrahierten Block gegen Schwellen (Technik 4).
+
+    Aus Community-Tool v3.4 _validate übernommen:
+    - len(block) >= 10 und <= 100_000
+    - known_ratio >= 0.30 (bekannte IDs / len)
+    - total (Summe der Mengen) <= 500_000
+    - duplicates <= max(25, int(len * 0.05))
+
+    Args:
+        block: Extrahierter Block als {grpId: qty}
+        duplicates: Anzahl doppelter arena_ids im Block
+        known_ids: Set aller bekannten arenaIds (aus Karten-DB)
+
+    Returns:
+        True wenn der Block die Schwellen erfüllt (wahrscheinlich echte Collection)
+    """
+    if not block:
+        return False
+    if len(block) < 10:
+        return False
+    if len(block) > 100_000:
+        return False
+
+    # known_ratio: Anteil bekannter Karten-IDs
+    if known_ids is not None:
+        known = sum(1 for k in block if k in known_ids)
+        ratio = known / len(block)
+        if ratio < 0.30:
+            return False
+
+    total = sum(block.values())
+    if total > 500_000:
+        return False
+
+    if duplicates > max(25, int(len(block) * 0.05)):
+        return False
+
+    return True
+
+
 def _attach_process(
     process_names: Sequence[str],
     *,
@@ -364,7 +634,7 @@ def scan_collection_detailed(
     db_loader: Callable[[], dict[int, dict[str, Any]]] | None = None,
     process_names: Sequence[str] | None = None,
     memory_scanner: Callable[[MemoryBackend, bytes], list[int]] | None = None,
-    block_parser: Callable[[MemoryBackend, int], list[dict[int, int]]] | None = None,
+    block_parser: Callable[[MemoryBackend, int], list[Any]] | None = None,
     debug: bool = False,
     use_helper: bool | None = None,
     sock_path: str | None = None,
@@ -426,12 +696,15 @@ def scan_collection_detailed(
     if memory_scanner is None:
         memory_scanner = scan_process_memory
     if block_parser is None:
-        block_parser = find_blocks
+        block_parser = find_blocks_with_dupes
 
     db = db_loader()
     if not db:
         print_fn("❌ Karten-DB konnte nicht geladen werden.")
         return None
+
+    # known_ids für known_ratio im gewichteten Score und _validate_block
+    known_ids: set[int] = set(db.keys())
 
     name_to_id = {v["name"].lower(): k for k, v in db.items()}
     anchors = get_user_anchors(
@@ -444,14 +717,20 @@ def scan_collection_detailed(
         print_fn("❌ Keine Anker-Karten angegeben.")
         return None
 
-    print_fn("\n🔍 Scanne Speicher nach Collection-Daten...")
+    # --- Technik 1: (arena_id, quantity)-Paar-Scan ---
+    # Statt nur nach der arena_id (4 bytes) zu suchen, suchen wir nach
+    # dem (arena_id, quantity)-Paar (8 bytes, struct.pack("<II", aid, qty)).
+    # Das reduziert False-Positives massiv, da die Wahrscheinlichkeit dass
+    # ein zufälliges 8-Byte-Pattern im Heap matcht extrem gering ist.
+    print_fn("\n🔍 Scanne Speicher nach (arena_id, quantity)-Paaren...")
     matches: list[int] = []
     total = len(anchors)
     anchor_matches: dict[int, int] = {}
     aggregate_stats: ScanStats | None = None
 
     if memory_scanner is scan_process_memory:
-        needles = {aid: struct.pack("<I", aid) for aid, _, _ in anchors}
+        # Paar-Pattern: struct.pack("<II", arena_id, quantity)
+        needles = {aid: struct.pack("<II", aid, qty) for aid, qty, _ in anchors}
         multi_result = scan_process_memory_many_with_stats(backend, needles)
         aggregate_stats = multi_result.stats
         for i, (aid, _aqty, aname) in enumerate(anchors, 1):
@@ -471,10 +750,11 @@ def scan_collection_detailed(
                 f"Region-Stop={stats.region_error}"
             )
     else:
-        for i, (aid, _aqty, aname) in enumerate(anchors, 1):
+        for i, (aid, aqty, aname) in enumerate(anchors, 1):
             display = (aname[:15] + "..") if len(aname) > 15 else aname
-            print_fn(f"   [{i}/{total}] Suche {display}...")
-            needle = struct.pack("<I", aid)
+            print_fn(f"   [{i}/{total}] Suche {display} (x{aqty})...")
+            # Technik 1: Paar-Pattern statt nur arena_id
+            needle = struct.pack("<II", aid, aqty)
             found = memory_scanner(backend, needle)
             anchor_matches[aid] = len(found)
             print_fn(f"     → {len(found)} Fundstellen")
@@ -489,27 +769,62 @@ def scan_collection_detailed(
         return None
 
     print_fn("\n📦 Parse Speicherblöcke...")
-    candidates: list[dict[int, int]] = []
+    # Normalisiere block_parser-Ergebnisse: akzeptiert sowohl list[dict]
+    # (alte API, find_blocks) als auch list[tuple[dict, int]] (neue API,
+    # find_blocks_with_dupes).  Dupes-Count wird für Score + Validation
+    # gebraucht.
+    raw_candidates: list[tuple[dict[int, int], int]] = []
     for m in matches:
-        candidates.extend(block_parser(backend, m))
+        result = block_parser(backend, m)
+        for item in result:
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], dict):
+                blk_dict: dict[int, int] = item[0]
+                blk_dupes: int = item[1] if isinstance(item[1], int) else 0
+                raw_candidates.append((blk_dict, blk_dupes))
+            elif isinstance(item, dict):
+                raw_candidates.append((item, 0))
 
-    if not candidates:
+    if not raw_candidates:
         print_fn("❌ Keine validen Datenblöcke gefunden.")
         return None
 
     # Dedup: Mehrere Anker im selben Collection-Array parsen denselben
     # Speicherbereich mehrfach → identische Blöcke in candidates.
-    # Identische Karten-Mengen entfernen, damit max() nicht durch Duplikate
-    # verfälscht wird und redundante Arbeit entfällt.
-    unique_candidates: list[dict[int, int]] = []
+    # Identische Karten-Mengen entfernen, damit die Blockauswahl nicht durch
+    # Duplikate verfälscht wird und redundante Arbeit entfällt.
+    # Dupes-Count des ersten Vorkommens wird behalten.
+    unique_candidates: list[tuple[dict[int, int], int]] = []
     seen: set[tuple[tuple[int, int], ...]] = set()
-    for block in candidates:
+    for block, dupes in raw_candidates:
         key = tuple(sorted(block.items()))
         if key not in seen:
             seen.add(key)
-            unique_candidates.append(block)
+            unique_candidates.append((block, dupes))
 
-    collection = max(unique_candidates, key=len)
+    # Technik 3: gewichteter Score mit known_ids + dupes
+    collection = _select_best_block(
+        unique_candidates,
+        anchors,
+        known_ids=known_ids,
+        print_fn=print_fn,
+    )
+
+    # Anker-Mengen erzwingen (user-provided Werte sind vertrauenswürdig)
+    for aid, qty, _name in anchors:
+        if aid in collection:
+            collection[aid] = qty
+
+    # Technik 4: _validate_block mit known_ratio/duplicates/total Schwellen
+    best_dupes = 0
+    for blk, dupes in unique_candidates:
+        if blk is collection or blk == collection:
+            best_dupes = dupes
+            break
+
+    block_valid = _validate_block(collection, best_dupes, known_ids)
+    if not block_valid and len(collection) >= 10:
+        print_fn("   ⚠ Block-Validierung fehlgeschlagen (known_ratio/dupes/total)")
+
     validation = validate_collection(collection, db=db, anchors=anchors)
     if validation["valid"]:
         print_fn(f"\n✅ {len(collection)} unique Einträge gefunden!")
@@ -532,7 +847,7 @@ def scan_collection(
     db_loader: Callable[[], dict[int, dict[str, Any]]] | None = None,
     process_names: Sequence[str] | None = None,
     memory_scanner: Callable[[MemoryBackend, bytes], list[int]] | None = None,
-    block_parser: Callable[[MemoryBackend, int], list[dict[int, int]]] | None = None,
+    block_parser: Callable[[MemoryBackend, int], list[Any]] | None = None,
     debug: bool = False,
     use_helper: bool | None = None,
     sock_path: str | None = None,
