@@ -17,8 +17,17 @@ def import_arena_deck(
     card_db: dict[int, dict[str, Any]],
     deck_format: str,
     name: str | None = None,
+    collection_ids: set[int] | None = None,
 ) -> dict[str, Any]:
-    """Parse Arena text export into arena_deck.json payload."""
+    """Parse Arena text export into arena_deck.json payload.
+
+    When ``collection_ids`` is provided, reprint resolution (same card name
+    across multiple sets) prefers the grpId that actually exists in the
+    player's collection. This ensures the imported deck uses IDs that match
+    the collection, so downstream analysis correctly reports owned cards.
+    If no candidate matches the collection, the alphabetically-last set is
+    used as fallback (preserving the original behaviour).
+    """
     mainboard: list[dict[str, Any]] = []
     sideboard: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
@@ -53,10 +62,13 @@ def import_arena_deck(
             unresolved.append({"line": line, "name": card_name, "reason": "unknown-card-name"})
             continue
         if len(candidates) > 1:
-            # Same card name across multiple sets (reprints): resolve by picking
-            # the newest set (last after alphabetical sort by set then arenaId).
-            # This is a normal reprint resolution, not a genuine ambiguity.
-            entry = dict(candidates[-1])
+            # Same card name across multiple sets (reprints).
+            # Prefer a grpId that exists in the player's collection so the
+            # imported deck IDs match the collection IDs used downstream.
+            # If no candidate is in the collection (or no collection given),
+            # fall back to the alphabetically-last set (original behaviour).
+            chosen = _resolve_reprint(candidates, collection_ids)
+            entry = dict(chosen)
             entry["count"] = count
             if section == "sideboard":
                 sideboard.append(entry)
@@ -121,6 +133,28 @@ def _parse_deck_line(line: str) -> tuple[int, str] | None:
     if not match:
         return None
     return int(match.group("count")), match.group("name").strip()
+
+
+def _resolve_reprint(
+    candidates: list[dict[str, Any]],
+    collection_ids: set[int] | None,
+) -> dict[str, Any]:
+    """Pick the best candidate for a reprinted card name.
+
+    If ``collection_ids`` is provided and one or more candidates have an
+    ``arenaId`` that exists in the collection, the first matching candidate
+    (sorted by set then arenaId) is returned — guaranteeing the imported
+    deck uses IDs that align with the player's collection.
+
+    If no candidate matches the collection (or no collection is given), the
+    alphabetically-last candidate is returned (original behaviour: newest
+    set as a heuristic).
+    """
+    if collection_ids:
+        for cand in candidates:
+            if int(cand["arenaId"]) in collection_ids:
+                return cand
+    return candidates[-1]
 
 
 def _normalize_name(name: str) -> str:
