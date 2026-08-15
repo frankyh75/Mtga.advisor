@@ -1641,6 +1641,10 @@ def _run_advisor_analyze(args: argparse.Namespace) -> int:
         _error(f"collection.json nicht gefunden: {args.collection}")
         return 1
 
+    # Collection früh laden — ihre grpIds werden beim Deck-Import gebraucht,
+    # damit Reprints den Print wählen, der in der Collection existiert.
+    collection_data = json.loads(args.collection.read_text(encoding="utf-8"))
+
     # Karten-DB optional laden (für Namens-/Seltenheits-Auflösung, Arena-Import braucht sie).
     card_db = None
     try:
@@ -1657,12 +1661,15 @@ def _run_advisor_analyze(args: argparse.Namespace) -> int:
             deck_text = args.deck_text.read_text(encoding="utf-8")
         else:
             deck_text = sys.stdin.read()
+        # Collection-IDs für Reprint-Auflösung vorbereiten.
+        _collection_ids = {int(cid) for cid in collection_data.get("cards", {})}
         try:
             arena_deck = import_arena_deck(
                 deck_text,
                 card_db=card_db or {},
                 deck_format=args.format,
                 name=args.name,
+                collection_ids=_collection_ids,
             )
         except Exception as exc:
             _error(f"Fehler beim Import der Arena-Textdeckliste: {exc}")
@@ -1679,7 +1686,6 @@ def _run_advisor_analyze(args: argparse.Namespace) -> int:
             _error(str(exc))
             return 1
 
-    collection_data = json.loads(args.collection.read_text(encoding="utf-8"))
     wildcards_data: dict[str, Any] = {}
     if args.wildcards.exists():
         wildcards_data = json.loads(args.wildcards.read_text(encoding="utf-8"))

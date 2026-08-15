@@ -105,3 +105,45 @@ def test_build_completion_advice_groups_missing_cards_and_guards_wildcards() -> 
     assert result["missingByRarity"] == {"rare": 1, "common": 2}
     assert result["recommendations"][0]["name"] == "Lightning Strike"
     assert result["recommendations"][0]["craftAdvice"] == "what-if"
+
+
+def test_import_arena_deck_prefers_collection_id_for_reprints() -> None:
+    """Reprints should resolve to the grpId that exists in the collection."""
+    card_db = {
+        100: {"name": "Opt", "set": "XLN"},
+        101: {"name": "Opt", "set": "STA"},
+        102: {"name": "Opt", "set": "DMR"},
+    }
+    # Player owns grpId 101 (STA) but not 100 (XLN) or 102 (DMR).
+    # Without collection_ids the fallback picks 100 (XLN, alphabetically last).
+    deck_no_col = import_arena_deck(
+        "Deck\n4 Opt",
+        card_db=card_db,
+        deck_format="historic",
+    )
+    assert deck_no_col["mainboard"][0]["arenaId"] == 100
+
+    # With collection_ids, the print in the collection (101) is chosen.
+    deck_with_col = import_arena_deck(
+        "Deck\n4 Opt",
+        card_db=card_db,
+        deck_format="historic",
+        collection_ids={101, 200},
+    )
+    assert deck_with_col["mainboard"][0]["arenaId"] == 101
+
+
+def test_import_arena_deck_collection_ids_fallback_when_no_match() -> None:
+    """If no candidate matches the collection, fall back to newest-set heuristic."""
+    card_db = {
+        100: {"name": "Opt", "set": "XLN"},
+        101: {"name": "Opt", "set": "STA"},
+    }
+    # Collection has neither 100 nor 101.
+    deck = import_arena_deck(
+        "Deck\n4 Opt",
+        card_db=card_db,
+        deck_format="historic",
+        collection_ids={999},
+    )
+    assert deck["mainboard"][0]["arenaId"] == 100  # XLN > STA alphabetically
