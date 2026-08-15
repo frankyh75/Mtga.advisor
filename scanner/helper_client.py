@@ -65,7 +65,13 @@ def _send_request(request: dict[str, Any], sock_path: str = DEFAULT_SOCK_PATH, *
             s.settimeout(timeout)
             s.sendall(request_bytes)
 
-            # Response lesen (kann in mehreren Chunks kommen)
+            # Response lesen (kann in mehreren Chunks kommen).
+            # WICHTIG: Auf abschließendes '\n' prüfen, nicht auf
+            # len(data) < RECV_BUF — der Server sendet jede Response mit
+            # '\n' terminiert. Ein erster recv kann weniger als RECV_BUF
+            # zurückgeben (z.B. 8192 Bytes bei einer 9736-Byte-Response),
+            # obwohl noch Daten folgen.  Das alte `len(data) < RECV_BUF`
+            # brach zu früh ab und lieferte trunkiertes JSON.
             chunks: list[bytes] = []
             while True:
                 try:
@@ -73,8 +79,7 @@ def _send_request(request: dict[str, Any], sock_path: str = DEFAULT_SOCK_PATH, *
                     if not data:
                         break
                     chunks.append(data)
-                    # Wenn wir weniger als den Buffer erhalten haben, sind wir wahrscheinlich fertig
-                    if len(data) < RECV_BUF:
+                    if b"\n" in data:
                         break
                 except socket.timeout:
                     break
