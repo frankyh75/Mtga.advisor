@@ -523,3 +523,213 @@ def test_select_best_block_presence_tiebreaker_exact_qty() -> None:
     )
     # Beide haben 5/5 present, aber block_5_exact hat 5/5 exact vs 3/5
     assert result == block_5_exact
+
+
+# ---------------------------------------------------------------------------
+# write_collection_artifacts — Schreibschutz + Backup + Mengen-Sanity-Check
+# ---------------------------------------------------------------------------
+
+def _make_valid_collection_payload(cards: dict[int, int]) -> dict:
+    """Erzeugt ein gültiges collection.json-Payload für Tests."""
+    return {
+        "schema": "collection.v1",
+        "source": "memory-scan",
+        "cards": {str(k): v for k, v in sorted(cards.items())},
+        "wildcards": {},
+        "diagnostics": {
+            "completeness": {"cards": "complete", "wildcards": "unknown", "source": "complete"},
+            "warnings": [],
+            "evidence": ["memory-scan"],
+            "validation": {"valid": True, "errors": [], "warnings": []},
+        },
+    }
+
+
+def _make_valid_scan_result(cards: dict[int, int]) -> memory_scanner.MemoryScanResult:
+    """Erzeugt ein gültiges MemoryScanResult für Tests."""
+    return memory_scanner.MemoryScanResult(
+        collection=cards,
+        anchors=[],
+        anchor_matches={},
+        validation={"valid": True, "errors": [], "warnings": []},
+    )
+
+
+def test_write_protect_fewer_cards_valid_scan(tmp_path: Path) -> None:
+    """Testfall A: bestehende 8064 Karten, neuer Scan 5000 (valid:true) → NICHT überschreiben."""
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan mit nur 5000 Karten (valid: true)
+    new_cards = {i: 1 for i in range(1, 5001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    collection_path, run_report_path = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    # collection.json darf nicht überschrieben worden sein
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 8064  # alte Collection erhalten
+
+    # run-report muss writeProtected melden
+    report = json.loads(run_report_path.read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+    assert report["summary"]["existingCardsCount"] == 8064
+    assert report["summary"]["cardsCount"] == 5000
+    assert any("cards cannot decrease" in w for w in report["diagnostics"]["warnings"])
+
+
+def test_write_protect_fewer_cards_backup_exists(tmp_path: Path) -> None:
+    """Testfall A (Backup): bei Schreibschutz wird keine Backup-Datei erzeugt
+    (nur beim tatsächlichen Überschreiben).  Die alte Collection bleibt erhalten."""
+    out = tmp_path / "out"
+    out.mkdir()
+
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    new_cards = {i: 1 for i in range(1, 5001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    memory_scanner.write_collection_artifacts(new_cards, out, scan_result=scan_result)
+
+    # Alte Collection unverändert
+    assert not (out / "collection.backup.json").exists()
+
+
+def test_write_overwrite_more_cards(tmp_path: Path) -> None:
+    """Testfall B: bestehende 8064 Karten, neuer Scan 9000 (valid:true) → überschreiben."""
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende gültige Collection mit 8064 Karten
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan mit 9000 Karten (valid: true) → echte Aktualisierung
+    new_cards = {i: 1 for i in range(1, 9001)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    collection_path, run_report_path = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    # collection.json muss überschrieben worden sein
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 9000
+
+    # Backup der alten Collection muss existieren
+    backup = json.loads((out / "collection.backup.json").read_text(encoding="utf-8"))
+    assert len(backup["cards"]) == 8064
+
+    # run-report: kein writeProtected
+    report = json.loads(run_report_path.read_text(encoding="utf-8"))
+    assert "writeProtected" not in report.get("summary", {}) or not report["summary"].get("writeProtected")
+
+
+def test_write_first_scan_no_existing_file(tmp_path: Path) -> None:
+    """Testfall C: keine bestehende Datei → erster Scan schreibt immer."""
+    out = tmp_path / "out"
+
+    new_cards = {i: 1 for i in range(1, 101)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    collection_path, run_report_path = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    # collection.json muss geschrieben worden sein
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 100
+
+    # Kein Backup (nichts vorhanden zum Backupen)
+    assert not (out / "collection.backup.json").exists()
+
+    # run-report: kein writeProtected
+    report = json.loads(run_report_path.read_text(encoding="utf-8"))
+    assert not report["summary"].get("writeProtected", False)
+
+
+def test_write_overwrite_equal_cards(tmp_path: Path) -> None:
+    """Gleich viele Karten (z.B. Re-Scan) → überschreiben (kein Rückgang)."""
+    out = tmp_path / "out"
+    out.mkdir()
+
+    existing_cards = {i: 1 for i in range(1, 101)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    new_cards = {i: 2 for i in range(1, 101)}  # gleiche Anzahl, andere Mengen
+    scan_result = _make_valid_scan_result(new_cards)
+
+    collection_path, _ = memory_scanner.write_collection_artifacts(
+        new_cards, out, scan_result=scan_result,
+    )
+
+    written = json.loads(collection_path.read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 100
+    assert written["cards"]["1"] == 2  # neue Mengen
+
+
+def test_write_protect_invalid_scan_keeps_existing(tmp_path: Path) -> None:
+    """P0: invalider Scan überschreibt nicht die bestehende gültige Collection."""
+    out = tmp_path / "out"
+    out.mkdir()
+
+    existing_cards = {i: 1 for i in range(1, 8065)}
+    existing_payload = _make_valid_collection_payload(existing_cards)
+    (out / "collection.json").write_text(json.dumps(existing_payload), encoding="utf-8")
+
+    # Neuer Scan mit invalid validation (leere Collection → empty-collection error)
+    scan_result = memory_scanner.MemoryScanResult(
+        collection={},
+        anchors=[],
+        anchor_matches={},
+        validation={"valid": False, "errors": ["empty-collection"], "warnings": []},
+    )
+
+    collection_path, run_report_path = memory_scanner.write_collection_artifacts(
+        {}, out, scan_result=scan_result,
+    )
+
+    # Alte Collection erhalten
+    kept = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(kept["cards"]) == 8064
+
+    # writeProtected
+    report = json.loads(run_report_path.read_text(encoding="utf-8"))
+    assert report["summary"]["writeProtected"] is True
+
+
+def test_backup_created_on_overwrite(tmp_path: Path) -> None:
+    """Backup wird beim Überschreiben einer bestehenden (auch ungültigen) Collection erstellt."""
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Bestehende ungültige Collection
+    (out / "collection.json").write_text(
+        json.dumps({"schema": "collection.v1", "cards": {"1": 1}, "diagnostics": {
+            "validation": {"valid": False, "errors": ["x"], "warnings": []}}}),
+        encoding="utf-8",
+    )
+
+    new_cards = {i: 1 for i in range(1, 201)}
+    scan_result = _make_valid_scan_result(new_cards)
+
+    memory_scanner.write_collection_artifacts(new_cards, out, scan_result=scan_result)
+
+    # Backup der alten Collection muss existieren
+    backup = json.loads((out / "collection.backup.json").read_text(encoding="utf-8"))
+    assert backup["cards"] == {"1": 1}
+
+    # Neue Collection geschrieben
+    written = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert len(written["cards"]) == 200
