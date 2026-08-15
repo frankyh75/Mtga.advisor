@@ -322,10 +322,23 @@ typedef struct {
     mach_vm_size_t size;
 } region_t;
 
-/* Iterate writable private regions of a task.
- * Fills regions[] up to max_regions. Returns count or -1 on error.
- * Uses mach_vm_region_recurse() to traverse submaps. */
-static int get_writable_regions(mach_port_t task, region_t *regions, int max_regions) {
+/* Iterate ALL readable regions of a task (not just writable+private).
+ *
+ * This mirrors the community tool's _readable_regions approach: enumerate
+ * every region with VM_PROT_READ set. The collection data (IL2CPP
+ * global-metadata.dat, GameAssembly.dylib, Card database) lives in
+ * READ-ONLY regions — the old writable+private filter skipped them, so the
+ * scanner found only 8–16 regions instead of ~80+ and never saw the
+ * collection anchor patterns.
+ *
+ * We keep mach_vm_region_recurse (not mach_vm_region) because the submap
+ * traversal logic is already debugged and correct. The only change from
+ * the old get_writable_regions is the filter: VM_PROT_READ instead of
+ * VM_PROT_WRITE + !is_shared. mach_vm_read_overwrite (which we use for
+ * actual reads) can read read-only regions just fine.
+ *
+ * Fills regions[] up to max_regions. Returns count or -1 on error. */
+static int get_readable_regions(mach_port_t task, region_t *regions, int max_regions) {
     mach_vm_address_t address = 0;
     mach_vm_size_t size = 0;
     natural_t depth = 0;
@@ -379,11 +392,11 @@ static int get_writable_regions(mach_port_t task, region_t *regions, int max_reg
 
         submap_retry = 0;  /* non-submap region → reset guard */
 
-        /* Only scan writable, private regions */
-        int writable = (info.protection & VM_PROT_WRITE) != 0;
-        int is_shared = (info.share_mode != SM_PRIVATE &&
-                         info.share_mode != SM_EMPTY);
-        if (writable && !is_shared && size > 0) {
+        /* Scan ALL readable regions (read-only, writable, shared, private).
+         * The collection data lives in read-only regions — filtering on
+         * VM_PROT_WRITE (the old behaviour) missed them entirely. */
+        int readable = (info.protection & VM_PROT_READ) != 0;
+        if (readable && size > 0) {
             regions[count].address = address;
             regions[count].size = size;
             count++;
@@ -410,7 +423,7 @@ static char *handle_status(void) {
 /* Forward declarations — these functions are defined later in the file
  * but referenced by handle_list_regions / handle_read_memory. */
 static mach_port_t attach_to_process(pid_t pid);
-static int get_writable_regions(mach_port_t task, region_t *regions, int max_regions);
+static int get_readable_regions(mach_port_t task, region_t *regions, int max_regions);
 static void *read_memory(mach_port_t task, mach_vm_address_t addr,
                          mach_vm_size_t size, mach_vm_size_t *out_size);
 
@@ -437,11 +450,11 @@ static char *handle_list_regions(void) {
     }
 
     region_t regions[MAX_REGIONS];
-    int n_regions = get_writable_regions(task, regions, MAX_REGIONS);
+    int n_regions = get_readable_regions(task, regions, MAX_REGIONS);
     mach_port_deallocate(mach_task_self(), task);
 
     if (n_regions <= 0) {
-        return build_error("No writable memory regions found");
+        return build_error("No readable memory regions found");
     }
 
     /* Build JSON response */
