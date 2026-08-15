@@ -526,9 +526,18 @@ def _llm_advisor_summary(advisor: dict[str, Any] | None) -> str:
     )
 
 
-def _collect_deck_formats(decks: dict[str, Any] | None) -> list[str]:
-    """Sammle eindeutige Formate aus allen Decks (formatLegalities + attributes.Format)."""
+def _collect_deck_formats(
+    decks: dict[str, Any] | None,
+    deck_cards_format_map: dict[str, str] | None = None,
+) -> list[str]:
+    """Sammle eindeutige Formate aus allen Decks (formatLegalities + attributes.Format).
+
+    Wenn ``deck_cards_format_map`` gegeben ist, werden auch die aus
+    ``deck-cards.json`` nachgeschlagenen Formate einbezogen (P2).
+    """
     if not decks:
+        if deck_cards_format_map:
+            return sorted(set(deck_cards_format_map.values()))
         return []
     formats: set[str] = set()
     for deck in decks.get("decks", []):
@@ -540,6 +549,11 @@ def _collect_deck_formats(decks: dict[str, Any] | None) -> list[str]:
         attrs = deck.get("attributes", {})
         if isinstance(attrs, dict):
             fmt = attrs.get("Format")
+            if fmt and fmt != "?":
+                formats.add(fmt)
+    # P2: Formate aus deck-cards.json hinzufügen
+    if deck_cards_format_map:
+        for fmt in deck_cards_format_map.values():
             if fmt and fmt != "?":
                 formats.add(fmt)
     return sorted(formats)
@@ -567,8 +581,11 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
     # Deck-IDs mit Kartenliste aus deck-cards.json laden (für Badge + Sortierung)
     # UND: Decks aus deck-cards.json, die NICHT in decks.json sind, als
     # synthetische Einträge hinzufügen, damit sie in der GUI erscheinen.
+    # UND: Format-Lookup-Map aus deck-cards.json (P2: Format nachschlagen,
+    # wenn decks.json attributes.Format leer ist).
     deck_cards_ids: set[str] = set()
     extra_decks: list[dict[str, Any]] = []
+    deck_cards_format_map: dict[str, str] = {}
     if output_dir is not None:
         dc = _read_json(output_dir / "deck-cards.json")
         if dc:
@@ -581,6 +598,9 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
                 did = d.get("deckId")
                 if did:
                     deck_cards_ids.add(str(did))
+                    fmt_dc = d.get("format")
+                    if fmt_dc and isinstance(fmt_dc, str):
+                        deck_cards_format_map[str(did)] = fmt_dc
                     if str(did) not in existing_ids:
                         # Deck nur in deck-cards.json → synthetischer Eintrag
                         fmt = d.get("format", "unknown")
@@ -603,7 +623,7 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
     deck_list = sorted(deck_list, key=_sort_key)
 
     # Sammle eindeutige Formate für das Dropdown
-    formats = _collect_deck_formats(decks)
+    formats = _collect_deck_formats(decks, deck_cards_format_map)
     format_dropdown = _render_deck_format_dropdown(formats)
 
     # Rendere ALLE Decks (nicht nur 50) — Pagination erfolgt client-seitig
@@ -611,8 +631,16 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
     for i, deck in enumerate(deck_list):
         name = deck.get("name", "Unnamed")
         attrs = deck.get("attributes", {})
-        fmt = attrs.get("Format", "?") if isinstance(attrs, dict) else "?"
+        fmt = attrs.get("Format") if isinstance(attrs, dict) else None
         deck_id = deck.get("deckKey") or deck.get("deckId") or deck.get("deckTileId") or i
+        # P2: Wenn attributes.Format leer/None ist, schlage das Format in
+        # deck-cards.json nach (via deckId).
+        if not fmt or fmt == "?":
+            looked_up = deck_cards_format_map.get(str(deck_id))
+            if looked_up:
+                fmt = looked_up
+        if not fmt:
+            fmt = "?"
         legalities = deck.get("formatLegalities", {})
         legal = ", ".join(f for f, v in legalities.items() if v)[:40] or "?"
         is_precon = bool(deck.get("isPrecon"))

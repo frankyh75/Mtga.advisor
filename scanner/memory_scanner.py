@@ -175,7 +175,18 @@ def write_collection_artifacts(
     *,
     scan_result: MemoryScanResult | None = None,
 ) -> tuple[Path, Path]:
-    """Schreibt Memory-Scan-Ergebnisse im bestehenden Artefaktformat."""
+    """Schreibt Memory-Scan-Ergebnisse im bestehenden Artefaktformat.
+
+    Schreibschutz (P0): Wenn der neue Scan ``valid: false`` liefert UND bereits
+    eine gültige ``collection.json`` (``valid: true``) existiert, wird die
+    bestehende gültige Collection **nicht überschrieben**.  Stattdessen wird
+    nur ein run-report mit einer Warnung geschrieben.  Dadurch wird
+    Datenverlust verhindert, wenn z.B. der Helper-Daemon nicht antwortet und
+    der Scan nur wenige Karten liefert.
+
+    Ein legitimer erster Scan (keine bestehende Datei) schreibt immer.  Ein
+    valider neuer Scan überschreibt die alte Collection (Datenaktualisierung).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     collection_path = output_dir / "collection.json"
     run_report_path = output_dir / "run-report.json"
@@ -183,6 +194,81 @@ def write_collection_artifacts(
     started_at = _iso_now()
     validation = scan_result.validation if scan_result is not None else validate_collection(collection)
     warnings = list(validation.get("warnings", []))
+
+    # --- P0: Schreibschutz gegen Überschreiben gültiger Collection ---
+    new_valid = validation.get("valid", False)
+    if not new_valid and collection_path.exists():
+        existing = _read_existing_collection(collection_path)
+        if existing is not None:
+            existing_valid = (
+                existing.get("diagnostics", {})
+                .get("validation", {})
+                .get("valid", False)
+            )
+            existing_count = len(existing.get("cards", {}))
+            new_count = len(collection)
+            if existing_valid and existing_count > new_count:
+                # Gültige Collection nicht durch ungültige überschreiben
+                warnings.append(
+                    "write-protected: existing valid collection "
+                    f"({existing_count} cards) NOT overwritten by invalid scan "
+                    f"({new_count} cards, valid={new_valid})"
+                )
+                run_report_payload = {
+                    "schema": "run-report.v1",
+                    "runId": f"run-{started_at}",
+                    "startedAt": started_at,
+                    "finishedAt": _iso_now(),
+                    "source": "memory-scan",
+                    "logs": [
+                        f"WARNING: Scan produced invalid collection "
+                        f"({new_count} cards, valid={new_valid}). "
+                        f"Existing valid collection ({existing_count} cards) "
+                        f"was kept — not overwritten."
+                    ],
+                    "outputs": {
+                        "collection": collection_path.as_posix(),
+                        "rawSamples": None,
+                    },
+                    "summary": {
+                        "cardsCount": new_count,
+                        "totalCards": sum(collection.values()),
+                        "wildcardsIncluded": False,
+                        "valid": False,
+                        "writeProtected": True,
+                        "existingCardsCount": existing_count,
+                    },
+                    "diagnostics": {
+                        "completeness": {
+                            "cards": "incomplete",
+                            "wildcards": "unknown",
+                            "source": "incomplete",
+                        },
+                        "warnings": warnings,
+                        "evidence": ["memory-scan"],
+                        "validation": validation,
+                    },
+                }
+                scan_payload: dict[str, Any] | None = None
+                if scan_result is not None and scan_result.scan_stats is not None:
+                    stats = scan_result.scan_stats
+                    scan_payload = {
+                        "regions": stats.regions,
+                        "bytesScanned": stats.bytes_scanned,
+                        "readFailures": stats.read_failures,
+                        "matches": stats.matches,
+                        "regionStop": stats.region_error,
+                        "anchorMatches": {str(card_id): count for card_id, count in sorted(scan_result.anchor_matches.items())},
+                        "anchors": [
+                            {"arenaId": card_id, "name": name, "expectedQuantity": quantity}
+                            for card_id, quantity, name in scan_result.anchors
+                        ],
+                    }
+                if scan_payload is not None:
+                    run_report_payload["scan"] = scan_payload
+                _write_json(run_report_path, run_report_payload)
+                return collection_path, run_report_path
+
     collection_payload = {
         "schema": "collection.v1",
         "source": "memory-scan",
@@ -239,6 +325,16 @@ def write_collection_artifacts(
     _write_json(collection_path, collection_payload)
     _write_json(run_report_path, run_report_payload)
     return collection_path, run_report_path
+
+
+def _read_existing_collection(path: Path) -> dict[str, Any] | None:
+    """Lese eine bestehende collection.json sicher (gibt None bei Fehler)."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
