@@ -65,6 +65,18 @@ def analyze_deck(
         "mythic": _safe_int(wc.get("mythics", 0)),
     }
 
+    # Namens-Index aus der Karten-DB: name(lower) → {grpIds}.
+    # MTGA zählt Karten über ALLE Prints (verschiedene grpIds mit demselben
+    # Kartennamen). Für die owned-Berechnung muss die Collection-Summe über
+    # alle grpIds mit identischem Namen gebildet werden, nicht nur über die
+    # eine grpId, die in der Deckliste steht.
+    name_to_grp_ids: dict[str, set[int]] = {}
+    if card_db:
+        for gid, meta in card_db.items():
+            n = _card_name_key(meta.get("name"))
+            if n:
+                name_to_grp_ids.setdefault(n, set()).add(int(gid))
+
     # Alle Karten des Decks aggregieren (MainDeck + Sideboard + CommandZone + Companions)
     all_card_entries = _collect_deck_cards(deck)
     total_cards = sum(e["quantity"] for e in all_card_entries)
@@ -76,16 +88,19 @@ def analyze_deck(
         card_id = entry["cardId"]
         needed = entry["quantity"]
         zone = entry["zone"]
-        owned_qty = collection_cards.get(card_id, 0)
 
         meta = (card_db or {}).get(card_id, {})
         name = meta.get("name", f"#{card_id}")
         rarity = str(meta.get("rarity", "unknown")).lower()
 
         # Grundländer sind in MTGA unbegrenzt verfügbar → immer owned, nie fehlend.
-        is_basic_land = name.strip().lower() in _BASIC_LAND_NAMES
+        is_basic_land = _card_name_key(name) in _BASIC_LAND_NAMES
         if is_basic_land:
             owned_qty = needed
+        else:
+            owned_qty = _owned_across_prints(
+                card_id, name, collection_cards, name_to_grp_ids
+            )
 
         missing_qty = max(0, needed - owned_qty)
 
@@ -242,6 +257,48 @@ def load_deck_cards(
         f"Deck nicht gefunden in {deck_cards_path}: "
         f"deckId={deck_id!r}, name={name!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+
+def _card_name_key(name: Any) -> str:
+    """Normalisiere einen Kartennamen für Print-übergreifendes Matching.
+
+    MTGA speichert Grundländer und Reprints unter verschiedenen grpIds, aber
+    mit identischem (oder fast identischem) Namen. Für die owned-Berechnung
+    muss über alle Prints summiert werden.
+    """
+    if not name:
+        return ""
+    # Normierung: lower-case, stripped, ASCII-Doppel-Faces-Trenner "//" entfernen,
+    # so dass z.B. "Swamp" == "swamp" und Reprints mit identischem Namen matchen.
+    return str(name).strip().lower()
+
+
+def _owned_across_prints(
+    card_id: int,
+    name: str,
+    collection_cards: dict[int, int],
+    name_to_grp_ids: dict[str, set[int]],
+) -> int:
+    """Berechne die owned-Menge über alle Prints (grpIds) einer Karte.
+
+    MTGA zählt Karten über alle Prints mit demselben Namen. Die Deckliste
+    referenziert nur eine grpId, aber in der Collection kann die Karte unter
+    mehreren grpIds liegen (Reprints, verschiedene Sets). Wir summieren die
+    Collection-Mengen über alle grpIds, deren Name mit dem der Deck-Karte
+    übereinstimmt.
+
+    Fallback: keine Karten-DB oder Name nicht gefunden → exakter grpId-Match
+    (wie bisher).
+    """
+    name_key = _card_name_key(name)
+    if name_key and name_key in name_to_grp_ids:
+        return sum(
+            collection_cards.get(gid, 0) for gid in name_to_grp_ids[name_key]
+        )
+    # Keine Karten-DB oder Name unbekannt → exakter grpId-Match (altes Verhalten).
+    return collection_cards.get(card_id, 0)
 
 
 # ---------------------------------------------------------------------------
