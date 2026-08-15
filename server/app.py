@@ -49,6 +49,17 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _card_name_for_id(card_id: int) -> str:
+    """Löse eine grpId in einen Kartennamen auf (aus der Karten-DB)."""
+    try:
+        from scanner.card_database import load_card_database
+        db = load_card_database()
+        meta = db.get(int(card_id), {})
+        return meta.get("name", f"ID:{card_id}")
+    except Exception:
+        return f"ID:{card_id}"
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict[str, Any], *, status: int) -> None:
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     handler.send_response(status)
@@ -554,14 +565,35 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
         return "<p>Keine Decks gefunden.</p>"
 
     # Deck-IDs mit Kartenliste aus deck-cards.json laden (für Badge + Sortierung)
+    # UND: Decks aus deck-cards.json, die NICHT in decks.json sind, als
+    # synthetische Einträge hinzufügen, damit sie in der GUI erscheinen.
     deck_cards_ids: set[str] = set()
+    extra_decks: list[dict[str, Any]] = []
     if output_dir is not None:
         dc = _read_json(output_dir / "deck-cards.json")
         if dc:
+            existing_ids = set()
+            for d in deck_list:
+                dk = str(d.get("deckKey") or d.get("deckId") or "")
+                if dk:
+                    existing_ids.add(dk)
             for d in dc.get("decks", []):
                 did = d.get("deckId")
                 if did:
                     deck_cards_ids.add(str(did))
+                    if str(did) not in existing_ids:
+                        # Deck nur in deck-cards.json → synthetischer Eintrag
+                        fmt = d.get("format", "unknown")
+                        extra_decks.append({
+                            "deckId": did,
+                            "deckKey": did,
+                            "name": d.get("name", "Unnamed"),
+                            "attributes": {"Format": fmt},
+                            "formatLegalities": {},
+                            "isPrecon": False,
+                        })
+    if extra_decks:
+        deck_list = deck_list + extra_decks
 
     # Sortierung: Decks mit Kartenliste zuerst, dann alphabetisch nach Name
     def _sort_key(deck: dict[str, Any]) -> tuple[int, str]:
@@ -1724,24 +1756,66 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 _json_response(self, {"error": "Keine Frage"}, status=HTTPStatus.BAD_REQUEST)
                 return
 
-            # Deck finden
+            # Deck finden — erst in decks.json, dann als Fallback in deck-cards.json
             decks = _read_json(output_dir / "decks.json")
-            if not decks:
-                _json_response(self, {"error": "decks.json fehlt"}, status=HTTPStatus.NOT_FOUND)
-                return
+            deck_cards_data = _read_json(output_dir / "deck-cards.json")
 
             deck = None
-            for d in decks.get("decks", []):
-                if str(deck_id) in _deck_keys_for_payload(d):
-                    deck = d
-                    break
+            if decks:
+                for d in decks.get("decks", []):
+                    if str(deck_id) in _deck_keys_for_payload(d):
+                        deck = d
+                        break
 
             if not deck:
-                _json_response(self, {"error": f"Deck {deck_id} nicht gefunden"}, status=HTTPStatus.NOT_FOUND)
+                # Fallback: Deck nur in deck-cards.json (nicht in decks.json)
+                if deck_cards_data:
+                    for dc in deck_cards_data.get("decks", []):
+                        if str(dc.get("deckId")) == str(deck_id):
+                            deck = {
+                                "deckId": dc.get("deckId", ""),
+                                "deckKey": dc.get("deckId", ""),
+                                "name": dc.get("name", "Unnamed"),
+                                "attributes": {"Format": dc.get("format", "unknown")},
+                                "formatLegalities": {},
+                                "isPrecon": False,
+                            }
+                            break
+
+            if not deck:
+                if not decks and not deck_cards_data:
+                    _json_response(self, {"error": "decks.json und deck-cards.json fehlen"}, status=HTTPStatus.NOT_FOUND)
+                else:
+                    _json_response(self, {"error": f"Deck {deck_id} nicht gefunden"}, status=HTTPStatus.NOT_FOUND)
                 return
 
             # Collection laden
             collection = _read_json(output_dir / "collection.json")
+
+            # Deck-Kartenliste aus deck-cards.json laden (falls vorhanden)
+            # und an das Deck anhängen, damit das LLM die Kartenliste bekommt.
+            if deck_cards_data:
+                for dc in deck_cards_data.get("decks", []):
+                    if str(dc.get("deckId")) == str(deck_id):
+                        deck["cards"] = {
+                            "mainboard": [
+                                {"name": _card_name_for_id(c.get("cardId")), "count": c.get("quantity", 1)}
+                                for c in dc.get("mainDeck", [])
+                            ],
+                            "sideboard": [
+                                {"name": _card_name_for_id(c.get("cardId")), "count": c.get("quantity", 1)}
+                                for c in dc.get("sideboard", [])
+                            ],
+                            "commandZone": [
+                                {"name": _card_name_for_id(c.get("cardId")), "count": c.get("quantity", 1)}
+                                for c in dc.get("commandZone", [])
+                            ],
+                            "companions": [
+                                {"name": _card_name_for_id(c.get("cardId")), "count": c.get("quantity", 1)}
+                                for c in dc.get("companions", [])
+                            ],
+                        }
+                        break
 
             # Prompt bauen
             prompt = _build_chat_prompt(deck, collection, question)
