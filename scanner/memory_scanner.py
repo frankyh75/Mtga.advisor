@@ -711,9 +711,18 @@ def _select_best_block(
 
         scored.append((blk, score, anchors_exact, known_count, dupes, blk_len))
 
-    # Sortiere nach (dupes==0, score, anchors_exact, known, size) absteigend
+    # Sortierung: score → Anker-Treffer → bekannte IDs → Duplikat-Anteil → Größe.
+    #
+    # WICHTIG: ``dupes == 0`` darf NICHT das dominierende Kriterium sein.  Als
+    # Boolean an erster Stelle der Sortierung schlägt es jeden Score: ein
+    # riesiger Fremd-Block ohne Duplikate gewinnt dann gegen den echten
+    # Collection-Block, sobald dieser ein einziges Duplikat enthält — obwohl
+    # er alle Anker trägt.  Genau das führte am 26.09.2026 zu einem Export mit
+    # 6944 Einträgen und nur 1/10 Ankern (Validierung: ``anchor-missing``).
+    # Duplikate fließen bereits gewichtet über ``(1 - dup_ratio)`` in den Score
+    # ein; hier dienen sie nur noch als Tiebreak.
     scored.sort(
-        key=lambda x: (x[4] == 0, x[1], x[2], x[3], x[5]),
+        key=lambda x: (x[1], x[2], x[3], -(x[4] / max(1, x[5] + x[4])), x[5]),
         reverse=True,
     )
 

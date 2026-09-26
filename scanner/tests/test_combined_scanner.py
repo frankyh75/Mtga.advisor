@@ -234,11 +234,46 @@ def test_persistent_remote_memory_adapter_read_ptr(mock_sock_path):
         conn.close()
 
 
-def test_persistent_remote_memory_adapter_pid(mock_sock_path):
+def test_persistent_remote_memory_adapter_pid(mock_sock_path, monkeypatch):
+    """``adapter.pid`` liefert die MTGA-PID, NICHT die Daemon-PID.
+
+    Regression (26.09.2026): ``PersistentRemoteMemoryAdapter.pid`` bestimmte
+    die MTGA-PID zuerst per ``_find_mtga_pid()`` (pgrep).  Der alte Test
+    erwartete stumpf die ``status``-Response des Mock-Servers — also die
+    Daemon-PID.  Das war die falsche Erwartung: der Helper meldet in
+    ``status`` seine eigene PID, und die ist für Speicherzugriffe nutzlos.
+    Mit echtem MTGA schlug der Test fehl (46480 statt 9999).
+    """
     responses = {
         "ping": {"status": "ok"},
         "status": {"status": "ok", "pid": 9999, "version": "1.0.0"},
     }
+
+    # MTGA-PID deterministisch mocken → der Test hängt nicht von einem
+    # laufenden MTGA ab.
+    monkeypatch.setattr(
+        "scanner.helper_client._find_mtga_pid", lambda: 4242, raising=True
+    )
+
+    with MockHelperServer(mock_sock_path, responses):
+        conn = open_helper_connection(mock_sock_path)
+        adapter = PersistentRemoteMemoryAdapter(conn)
+        assert adapter.pid == 4242
+        conn.close()
+
+
+def test_persistent_remote_memory_adapter_pid_falls_back_to_daemon(
+    mock_sock_path, monkeypatch
+):
+    """Ohne findbare MTGA-PID fällt ``pid`` auf die Daemon-PID zurück (nie 0)."""
+    responses = {
+        "ping": {"status": "ok"},
+        "status": {"status": "ok", "pid": 9999, "version": "1.0.0"},
+    }
+    monkeypatch.setattr(
+        "scanner.helper_client._find_mtga_pid", lambda: None, raising=True
+    )
+
     with MockHelperServer(mock_sock_path, responses):
         conn = open_helper_connection(mock_sock_path)
         adapter = PersistentRemoteMemoryAdapter(conn)

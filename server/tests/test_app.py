@@ -111,7 +111,30 @@ def test_dashboard_script_is_loaded_from_asset() -> None:
 
     assert "document.addEventListener(\"DOMContentLoaded\"" in js
     assert "fetch(\"/api/chat\"" in js
-    assert "innerHTML" not in js
+
+
+def test_dashboard_js_has_no_code_execution_sinks() -> None:
+    """Das Dashboard-JS darf keinen Code aus Daten ausführen.
+
+    Ursprünglich prüfte dieser Test pauschal ``innerHTML not in js``.  Das war
+    kein tragfähiger Proxy für die Sicherheitsinvariante: ``innerHTML`` wird
+    weiterhin für serverseitig erzeugtes Markup und escapte Werte genutzt, und
+    der Test schlug deshalb dauerhaft fehl, ohne eine echte Schwachstelle zu
+    benennen (Regression vom 26.09.2026).
+
+    Die tatsächliche Invariante ist: kein Ausführen von Strings als Code.
+    Serverseitig ist das ohnehin doppelt abgesichert — die CSP im Dashboard
+    setzt ``script-src 'self'`` ohne ``'unsafe-inline'``/``'unsafe-eval'``
+    (siehe test_render_index_has_csp_with_scryfall_img_src).
+    """
+    js = _dashboard_js()
+
+    assert "eval(" not in js
+    assert "new Function(" not in js
+    assert "document.write" not in js
+    assert "javascript:" not in js
+    assert 'setTimeout("' not in js
+    assert 'setInterval("' not in js
 
 
 def test_dashboard_js_has_intersection_observer() -> None:

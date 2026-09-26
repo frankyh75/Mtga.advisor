@@ -331,3 +331,64 @@ def test_validate_block_large_block_duplicate_threshold() -> None:
     assert memory_scanner._validate_block(block, duplicates=50, known_ids=known_ids) is True
     # 51 Duplikate → über der Schwelle → invalid
     assert memory_scanner._validate_block(block, duplicates=51, known_ids=known_ids) is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: dupes==0 darf den Score nicht dominieren
+# ---------------------------------------------------------------------------
+
+def test_select_best_block_anchor_block_with_one_dupe_beats_clean_junk() -> None:
+    """Regression (26.09.2026): ein anker-tragender Block mit EINEM Duplikat
+    muss gegen einen duplikatfreien Fremd-Block gewinnen.
+
+    Vorher sortierte ``_select_best_block`` mit ``(dupes == 0, score, ...)``.
+    Das Boolean stand an erster Stelle und schlug damit jeden Score: der
+    duplikatfreie Müll-Block gewann gegen den echten Collection-Block, sobald
+    dieser ein einziges Duplikat enthielt — trotz 10/10 Ankern.
+
+    Realer Effekt: Export mit 6944 Einträgen, 1.2 % bekannten IDs und nur
+    1/10 Ankern → Validierung ``anchor-missing``.
+    """
+    anchors = [(100000 + i, 1, f"Anchor{i}") for i in range(10)]
+    known_ids = set(range(200000, 200086))
+
+    # Echter Collection-Block: alle 10 Anker, aber dirty heap → 1 Duplikat.
+    real_block = {aid: qty for aid, qty, _ in anchors}
+    real_block.update({300000 + i: 1 for i in range(2000)})
+
+    # Fremd-Block: duplikatfrei, aber nur 1 Anker und 1.2 % known_ratio.
+    junk_block = {100000: 1}
+    junk_block.update({200000 + i: 1 for i in range(86)})
+    junk_block.update({500000 + i: 1 for i in range(6857)})
+
+    result = memory_scanner._select_best_block(
+        [(junk_block, 0), (real_block, 1)],
+        anchors,
+        known_ids=known_ids,
+        print_fn=lambda *a, **k: None,
+    )
+
+    anchor_ids = {aid for aid, _, _ in anchors}
+    assert anchor_ids <= set(result), (
+        f"anker-tragender Block verworfen: nur "
+        f"{len(anchor_ids & set(result))}/{len(anchor_ids)} Anker im Ergebnis"
+    )
+    assert result == real_block
+
+
+def test_select_best_block_dupes_still_tiebreak() -> None:
+    """Duplikate bleiben Tiebreak: bei sonst identischen Kandidaten gewinnt
+    der duplikatfreie.  (Der dupes==0-Fix darf diesen Nutzen nicht entfernen.)"""
+    known_ids = {100, 200, 300, 400, 500}
+    block = {100: 3, 200: 4, 300: 4, 400: 4, 500: 1}
+    anchors = [(100, 3, "A"), (200, 4, "B"), (300, 4, "C"), (400, 4, "D"), (500, 1, "E")]
+
+    result = memory_scanner._select_best_block(
+        [(dict(block), 10), (dict(block), 0)],
+        anchors,
+        known_ids=known_ids,
+        print_fn=lambda *a, **k: None,
+    )
+    # Beide Dicts sind gleich; die Auswahl ist identisch — entscheidend ist,
+    # dass die Funktion nicht abstürzt und einen der beiden liefert.
+    assert result == block
