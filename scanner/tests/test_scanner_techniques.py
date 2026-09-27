@@ -197,7 +197,9 @@ def test_select_best_block_dupes_penalty() -> None:
         known_ids=known_ids,
         print_fn=lambda *a, **k: None,
     )
-    # clean hat dupes=0, dirty hat dupes=10 → clean gewinnt durch (dupes==0) Sortierschlüssel
+    # Beide Blöcke sind inhaltlich identisch und treffen dieselben Anker — clean
+    # gewinnt allein über den Score-Term (1 - dup_ratio), nicht über einen
+    # Vorfilter auf duplicates==0.
     assert result == block_clean
 
 

@@ -633,7 +633,10 @@ def _select_best_block(
       die echte Collection.
     - **(1 - dup_ratio)**: Weniger Duplikate = sauberer Speicherbereich.
 
-    Sortierung: (dupes==0, score, anchors_exact, known, size) absteigend.
+    Sortierung: (score, anchors_exact, known, -dup_ratio, size) absteigend.
+    Duplikate sind damit nur noch Tiebreak — sie dürfen die Score-Ordnung
+    nicht überstimmen (siehe Regressionstest
+    ``test_select_best_block_anchor_block_with_one_dupe_beats_clean_junk``).
 
     **Backward-Kompatibilität**: Ohne ``known_ids`` fällt known_ratio auf
     1.0 (alle IDs als "bekannt" angenommen) — die alte anchor-presence-Logik
