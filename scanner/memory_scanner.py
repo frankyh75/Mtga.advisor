@@ -9,7 +9,7 @@ from __future__ import annotations
 import struct
 import sys
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -33,6 +33,8 @@ from .pattern_scanner import ScanStats, scan_process_memory_many_with_stats
 # Scan-Konfiguration (aus Community-Tool v3.4 übernommen)
 # ---------------------------------------------------------------------------
 SCAN_RANGE_MB = 8
+READ_CHUNK_SIZE = 256 * 1024
+MIN_READ_SIZE = 64 * 1024
 MIN_ARENA_ID = 1000
 MAX_ARENA_ID = 900_000
 MIN_QTY = 1
@@ -72,10 +74,105 @@ class MemoryScanResult:
     anchor_matches: dict[int, int]
     validation: dict[str, Any]
     scan_stats: ScanStats | None = None
+    read_coverage: dict[str, Any] = field(default_factory=dict)
 
 
 def _anchor_file() -> Path:
     return get_default_cache_dir() / "last_anchors.json"
+
+
+def _read_window_with_coverage(
+    backend: MemoryBackend, block_start: int, scan_bytes: int
+) -> tuple[bytearray, list[tuple[int, int]]]:
+    """Liest ein Anker-Fenster fehlertolerant und liefert seine Abdeckung.
+
+    ``mach_vm_read_overwrite`` ist atomar: ein ungültiges Byte lässt den
+    ganzen Read fehlschlagen. Deshalb werden große Chunks bei einem Fehler
+    bis auf ``MIN_READ_SIZE`` geteilt. Nicht gelesene Bereiche werden nur im
+    Puffer repräsentiert; sie werden später nie an den Block-Parser gegeben.
+    """
+    buffer = bytearray(scan_bytes)
+    ranges: list[tuple[int, int]] = []
+
+    def read_piece(offset: int, size: int) -> None:
+        try:
+            data = backend.read_bytes(block_start + offset, size)
+        except Exception:
+            data = None
+        if data:
+            read_size = min(len(data), size)
+            buffer[offset:offset + read_size] = data[:read_size]
+            ranges.append((offset, offset + read_size))
+            if read_size < size:
+                read_piece(offset + read_size, size - read_size)
+            return
+        if size > MIN_READ_SIZE:
+            left_size = max(MIN_READ_SIZE, size // 2)
+            left_size = min(left_size, size - MIN_READ_SIZE)
+            read_piece(offset, left_size)
+            read_piece(offset + left_size, size - left_size)
+
+    for offset in range(0, scan_bytes, READ_CHUNK_SIZE):
+        read_piece(offset, min(READ_CHUNK_SIZE, scan_bytes - offset))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return buffer, merged
+
+
+def _find_blocks_with_dupes_and_coverage(
+    backend: MemoryBackend, addr: int
+) -> tuple[list[tuple[dict[int, int], int]], dict[str, Any]]:
+    """Wie :func:`find_blocks_with_dupes`, zusätzlich mit Read-Coverage."""
+    scan_bytes = SCAN_RANGE_MB * 1024 * 1024
+    block_start = max(0, addr - scan_bytes // 2)
+    data, ranges = _read_window_with_coverage(backend, block_start, scan_bytes)
+    bytes_read = sum(end - start for start, end in ranges)
+    coverage = {
+        "address": addr,
+        "windowStart": block_start,
+        "bytesRead": bytes_read,
+        "windowBytes": scan_bytes,
+        "complete": bytes_read == scan_bytes,
+    }
+    if not ranges:
+        return [], coverage
+
+    results: list[tuple[dict[int, int], int]] = []
+    for start, end in ranges:
+        # Ein Kandidat darf nie über eine ungelesene Lücke hinweg entstehen.
+        # Bei einer Lücke am Rand wird der potenziell abgeschnittene erste bzw.
+        # letzte Block verworfen; abgeschlossene innere Blöcke bleiben erhalten.
+        segment = bytes(data[start:end])
+        for stride_w in STRIDES_WORDS:
+            for off_w in range(stride_w):
+                adjusted_off = (off_w - (start // 4)) % stride_w
+                candidates = _extract_blocks(segment, stride_w, adjusted_off)
+                # Ein Block an einer ungelesenen Grenze kann abgeschnitten sein.
+                # Nur Kandidaten behalten, die auch nach dem Ausschneiden einer
+                # kompletten max-gap-Zone noch extrahiert werden: dann liegt der
+                # gesamte Kandidat sicher innerhalb des gelesenen Intervalls.
+                edge_margin = (MAX_GAP + 1) * stride_w * 4
+                safe_start = edge_margin if start > 0 else 0
+                safe_end = len(segment) - edge_margin if end < scan_bytes else len(segment)
+                if safe_end <= safe_start:
+                    candidates = []
+                elif safe_start or safe_end != len(segment):
+                    safe_off = (off_w - ((start + safe_start) // 4)) % stride_w
+                    safe_candidates = _extract_blocks(
+                        segment[safe_start:safe_end], stride_w, safe_off
+                    )
+                    safe_keys = {(tuple(sorted(block.items())), dupes) for block, dupes in safe_candidates}
+                    candidates = [
+                        candidate for candidate in candidates
+                        if (tuple(sorted(candidate[0].items())), candidate[1]) in safe_keys
+                    ]
+                results.extend(candidates)
+    return results, coverage
 
 
 def find_blocks_with_dupes(
@@ -96,20 +193,8 @@ def find_blocks_with_dupes(
     Returns:
         Liste von (block_dict, duplicates_count)-Tupeln
     """
-    try:
-        scan_bytes = SCAN_RANGE_MB * 1024 * 1024
-        block_start = max(0, addr - scan_bytes // 2)
-        data = backend.read_bytes(block_start, scan_bytes)
-        if data is None:
-            return []
-
-        results: list[tuple[dict[int, int], int]] = []
-        for stride_w in STRIDES_WORDS:
-            for off_w in range(stride_w):
-                results.extend(_extract_blocks(data, stride_w, off_w))
-        return results
-    except Exception:
-        return []
+    results, _coverage = _find_blocks_with_dupes_and_coverage(backend, addr)
+    return results
 
 
 def find_blocks(backend: MemoryBackend, addr: int) -> list[dict[int, int]]:
@@ -344,6 +429,7 @@ def write_collection_artifacts(
                 "warnings": warnings,
                 "evidence": ["memory-scan"],
                 "validation": validation,
+                "readCoverage": scan_result.read_coverage if scan_result is not None else {},
             },
         }
         scan_payload: dict[str, Any] | None = None
@@ -394,6 +480,7 @@ def write_collection_artifacts(
             "warnings": warnings,
             "evidence": ["memory-scan"],
             "validation": validation,
+            "readCoverage": scan_result.read_coverage if scan_result is not None else {},
         },
     }
     scan_payload: dict[str, Any] | None = None
@@ -994,6 +1081,7 @@ def scan_collection_detailed(
     # ein zufälliges 8-Byte-Pattern im Heap matcht extrem gering ist.
     print_fn("\n🔍 Scanne Speicher nach (arena_id, quantity)-Paaren...")
     matches: list[int] = []
+    match_anchor_ids: dict[int, set[int]] = {}
     total = len(anchors)
     anchor_matches: dict[int, int] = {}
     aggregate_stats: ScanStats | None = None
@@ -1009,6 +1097,8 @@ def scan_collection_detailed(
             anchor_matches[aid] = len(found)
             print_fn(f"   [{i}/{total}] {display}: {len(found)} Fundstellen")
             matches.extend(found)
+            for address in found:
+                match_anchor_ids.setdefault(address, set()).add(aid)
         if debug:
             stats = multi_result.stats
             print_fn(
@@ -1029,6 +1119,8 @@ def scan_collection_detailed(
             anchor_matches[aid] = len(found)
             print_fn(f"     → {len(found)} Fundstellen")
             matches.extend(found)
+            for address in found:
+                match_anchor_ids.setdefault(address, set()).add(aid)
 
     if not matches:
         print_fn("❌ Keine Anker-Karten im Speicher gefunden.")
@@ -1044,8 +1136,40 @@ def scan_collection_detailed(
     # find_blocks_with_dupes).  Dupes-Count wird für Score + Validation
     # gebraucht.
     raw_candidates: list[tuple[dict[int, int], int]] = []
+    read_coverage: dict[str, Any] = {
+        "windows_total": 0,
+        "windows_complete": 0,
+        "windows_partial": 0,
+        "windows_unreadable": 0,
+        "bytes_unreadable": 0,
+        "anchors": [],
+    }
+    coverage_warnings: list[str] = []
     for m in matches:
-        result = block_parser(backend, m)
+        if block_parser is find_blocks_with_dupes:
+            result, window_coverage = _find_blocks_with_dupes_and_coverage(backend, m)
+            bytes_read = window_coverage["bytesRead"]
+            window_bytes = window_coverage["windowBytes"]
+            read_coverage["windows_total"] += 1
+            read_coverage["bytes_unreadable"] += window_bytes - bytes_read
+            anchor_ids = sorted(match_anchor_ids.get(m, set()))
+            read_coverage["anchors"].append({**window_coverage, "arenaIds": anchor_ids})
+            if bytes_read == 0:
+                read_coverage["windows_unreadable"] += 1
+                warning_name = "anchor-window-unreadable"
+            elif bytes_read < window_bytes:
+                read_coverage["windows_partial"] += 1
+                warning_name = "anchor-window-partial"
+            else:
+                read_coverage["windows_complete"] += 1
+                warning_name = None
+            if warning_name is not None:
+                for aid in anchor_ids:
+                    coverage_warnings.append(
+                        f"{warning_name}: address={m:#x} arenaId={aid} read={bytes_read}/{window_bytes}"
+                    )
+        else:
+            result = block_parser(backend, m)
         for item in result:
             if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], dict):
                 blk_dict: dict[int, int] = item[0]
@@ -1056,6 +1180,13 @@ def scan_collection_detailed(
 
     if not raw_candidates:
         print_fn("❌ Keine validen Datenblöcke gefunden.")
+        if read_coverage["windows_total"]:
+            validation = validate_collection({}, db=db, anchors=anchors)
+            validation["warnings"] = sorted(set(validation["warnings"] + coverage_warnings))
+            return MemoryScanResult(
+                collection={}, anchors=list(anchors), anchor_matches=anchor_matches,
+                validation=validation, scan_stats=aggregate_stats, read_coverage=read_coverage,
+            )
         return None
 
     # Dedup: Mehrere Anker im selben Collection-Array parsen denselben
@@ -1096,6 +1227,7 @@ def scan_collection_detailed(
         print_fn("   ⚠ Block-Validierung fehlgeschlagen (known_ratio/dupes/total)")
 
     validation = validate_collection(collection, db=db, anchors=anchors)
+    validation["warnings"] = sorted(set(validation["warnings"] + coverage_warnings))
     if validation["valid"]:
         print_fn(f"\n✅ {len(collection)} unique Einträge gefunden!")
     else:
@@ -1107,6 +1239,7 @@ def scan_collection_detailed(
         anchor_matches=anchor_matches,
         validation=validation,
         scan_stats=aggregate_stats,
+        read_coverage=read_coverage,
     )
 
 
