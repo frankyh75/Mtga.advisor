@@ -951,6 +951,19 @@ def _is_helper_available() -> bool:
     return _check()
 
 
+def _print_read_coverage_warning(result: Any) -> None:
+    """Macht unvollständig lesbare Anker-Fenster am CLI-Ende sichtbar."""
+    coverage = getattr(result, "read_coverage", {}) or {}
+    partial = coverage.get("windows_partial", 0)
+    unreadable = coverage.get("windows_unreadable", 0)
+    if partial or unreadable:
+        print(
+            "⚠ Anker-Fenster nicht vollständig lesbar: "
+            f"{partial} teilweise, {unreadable} unlesbar "
+            f"({coverage.get('bytes_unreadable', 0)} Bytes nicht gelesen)."
+        )
+
+
 def _run_wildcards(args: argparse.Namespace) -> int:
     """Exportiert Wildcards aus StartHook-InventoryInfo-Events."""
     if args.logs:
@@ -1036,6 +1049,7 @@ def _run_scan_via_helper(args: argparse.Namespace) -> int:
     collection_path, run_report_path = write_collection_artifacts(
         result.collection, args.output, scan_result=result
     )
+    _print_read_coverage_warning(result)
     print(f"Collection exportiert: {collection_path}")
     print(f"Run-Report: {run_report_path}")
     return 0
@@ -1068,6 +1082,7 @@ def _run_scan_all(args: argparse.Namespace) -> int:
         collection_path, run_report_path = write_collection_artifacts(
             result.collection.collection, args.output, scan_result=result.collection
         )
+        _print_read_coverage_warning(result.collection)
         print(f"\nCollection exportiert: {collection_path}")
         print(f"Run-Report: {run_report_path}")
     elif not args.no_collection:
@@ -1136,6 +1151,7 @@ def _run_scan(args: argparse.Namespace) -> int:
     collection_path, run_report_path = write_collection_artifacts(
         result.collection, args.output, scan_result=result
     )
+    _print_read_coverage_warning(result)
     print(f"Collection exportiert: {collection_path}")
     print(f"Run-Report: {run_report_path}")
     return 0
