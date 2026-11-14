@@ -495,7 +495,9 @@ static char *handle_read_memory(const char *request) {
     if (!json_get_int(request, "size", &size) || size <= 0) {
         return build_error("Missing or invalid 'size' field");
     }
-    if (size > MAX_READ_SIZE) size = MAX_READ_SIZE;
+    if (size > MAX_READ_SIZE) {
+        return build_error("size_too_large");
+    }
 
     /* Find MTGA process */
     pid_t pid = find_process_by_name("MTGA");

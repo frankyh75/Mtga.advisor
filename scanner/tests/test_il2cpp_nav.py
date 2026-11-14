@@ -13,6 +13,7 @@ from __future__ import annotations
 import struct
 import pytest
 
+from scanner.helper_client import MemoryReadError
 from scanner.il2cpp_nav import (
     IL2CPP_OFFSETS,
     MAX_VALID_PTR,
@@ -809,6 +810,20 @@ class TestScanDecksIl2cpp:
         assert main.get(12345) == 4
         assert main.get(67890) == 3
         assert main.get(11111) == 2
+
+    def test_read_error_returns_unknown_diagnostic_not_zero_data(self):
+        class FailingMemory:
+            def read_bytes(self, addr: int, size: int) -> bytes:
+                raise MemoryReadError(addr, size, "mock read failure")
+
+        result = scan_decks_il2cpp(
+            FailingMemory(), papa_instance=0x500000, papa_class=0x200000,
+        )
+
+        assert result.decks == []
+        assert len(result.warnings) == 1
+        assert "nicht lesbar bei Adresse 0x500000" in result.warnings[0]
+        assert "mock read failure" in result.warnings[0]
 
 
 class TestDataSegmentDiscovery:

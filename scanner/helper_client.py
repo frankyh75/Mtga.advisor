@@ -21,6 +21,7 @@ import os
 import socket
 import subprocess
 import base64
+import binascii
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,22 @@ class HelperStatus:
     socket_path: str
     pid: int | None = None
     version: str | None = None
+
+
+class MemoryReadError(Exception):
+    """Ein angeforderter Speicherbereich konnte nicht verlässlich gelesen werden.
+
+    Nullbytes sind gültige Daten; ein Read-Fehler darf deshalb nie als
+    Nullbytes dargestellt werden.
+    """
+
+    def __init__(self, address: int, size: int, reason: str) -> None:
+        self.address = address
+        self.size = size
+        self.reason = reason
+        super().__init__(
+            f"Speicher nicht lesbar bei Adresse {address:#x} ({size} Bytes): {reason}"
+        )
 
 
 def _send_request(request: dict[str, Any], sock_path: str = DEFAULT_SOCK_PATH, *,
@@ -176,9 +193,19 @@ def request_read_memory(sock_path: str = DEFAULT_SOCK_PATH, *,
     if "error" in resp:
         raise HelperError(resp["error"])
     data_b64 = resp.get("data")
-    if data_b64 is None:
-        raise HelperProtocolError(f"read_memory-Response fehlt 'data'-Feld: {resp}")
-    return base64.b64decode(data_b64)
+    if not isinstance(data_b64, str):
+        raise HelperProtocolError(f"read_memory-Response fehlt gültiges 'data'-Feld: {resp}")
+    try:
+        data = base64.b64decode(data_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HelperProtocolError(f"read_memory-Response enthält ungültiges Base64: {exc}") from exc
+    bytes_read = resp.get("bytes_read")
+    if not isinstance(bytes_read, int) or bytes_read != size or len(data) != size:
+        raise HelperProtocolError(
+            "read_memory-Response hat keine vollständige Leseantwort "
+            f"(angefordert={size}, bytes_read={bytes_read!r}, Datenlänge={len(data)})"
+        )
+    return data
 
 
 # --- HelperBackend (MemoryBackend-kompatibel) ---
@@ -191,13 +218,24 @@ class HelperBackend:
     ohne Änderungen über den Helper funktionieren.
     """
 
-    def __init__(self, sock_path: str = DEFAULT_SOCK_PATH) -> None:
+    def __init__(
+        self,
+        sock_path: str = DEFAULT_SOCK_PATH,
+        *,
+        on_error: Callable[[MemoryReadError], None] | None = None,
+    ) -> None:
         self._sock_path = sock_path
+        self.read_failures = 0
+        self._on_error = on_error
 
     def read_bytes(self, addr: int, size: int) -> bytes | None:
         try:
             return request_read_memory(self._sock_path, address=addr, size=size)
-        except (HelperConnectionError, HelperProtocolError, HelperError):
+        except (HelperConnectionError, HelperProtocolError, HelperError) as exc:
+            error = MemoryReadError(addr, size, str(exc))
+            self.read_failures += 1
+            if self._on_error is not None:
+                self._on_error(error)
             return None
 
     def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
@@ -233,8 +271,14 @@ class RemoteMemoryAdapter:
     def read_bytes(self, addr: int, size: int) -> bytes:
         try:
             return request_read_memory(self._sock_path, address=addr, size=size)
-        except (HelperConnectionError, HelperProtocolError, HelperError):
-            return b"\x00" * size
+        except (HelperConnectionError, HelperProtocolError, HelperError) as exc:
+            raise MemoryReadError(addr, size, str(exc)) from exc
+
+    def try_read_bytes(self, addr: int, size: int) -> bytes | None:
+        try:
+            return self.read_bytes(addr, size)
+        except MemoryReadError:
+            return None
 
     def read_ptr(self, addr: int) -> int:
         raw = self.read_bytes(addr, 8)
@@ -512,13 +556,31 @@ class PersistentRemoteMemoryAdapter:
                 {"action": "read_memory", "address": addr, "size": size}
             )
             if "error" in resp:
-                return b"\x00" * size
+                raise MemoryReadError(addr, size, str(resp["error"]))
             data_b64 = resp.get("data")
-            if data_b64 is None:
-                return b"\x00" * size
-            return base64.b64decode(data_b64)
-        except (HelperConnectionError, HelperProtocolError, HelperError):
-            return b"\x00" * size
+            if not isinstance(data_b64, str):
+                raise MemoryReadError(addr, size, "read_memory-Response fehlt gültiges 'data'-Feld")
+            try:
+                data = base64.b64decode(data_b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise MemoryReadError(addr, size, f"ungültiges Base64: {exc}") from exc
+            bytes_read = resp.get("bytes_read")
+            if not isinstance(bytes_read, int) or bytes_read != size or len(data) != size:
+                raise MemoryReadError(
+                    addr, size,
+                    f"unvollständige Leseantwort (bytes_read={bytes_read!r}, Datenlänge={len(data)})",
+                )
+            return data
+        except MemoryReadError:
+            raise
+        except (HelperConnectionError, HelperProtocolError, HelperError) as exc:
+            raise MemoryReadError(addr, size, str(exc)) from exc
+
+    def try_read_bytes(self, addr: int, size: int) -> bytes | None:
+        try:
+            return self.read_bytes(addr, size)
+        except MemoryReadError:
+            return None
 
     def read_ptr(self, addr: int) -> int:
         raw = self.read_bytes(addr, 8)

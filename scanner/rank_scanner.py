@@ -38,7 +38,7 @@ from typing import Any
 from .il2cpp_nav import (
     Il2CppReader,
     MemoryReader,
-    MockMemory,
+    NavigationReadError,
     PymemMemoryAdapter,
     discover_data_segment_base,
     discover_wrapper_controller_via_backref,
@@ -456,7 +456,7 @@ class FullRankScanResult:
         }
 
 
-def scan_ranks_and_account(
+def _scan_ranks_and_account_impl(
     reader: Il2CppReader | MemoryReader,
     *,
     wrapper_instance: int = 0,
@@ -553,6 +553,31 @@ def scan_ranks_and_account(
         warnings=warnings,
         wrapper_instance=wrapper_instance,
     )
+
+
+def scan_ranks_and_account(
+    reader: Il2CppReader | MemoryReader,
+    *,
+    wrapper_instance: int = 0,
+    wrapper_class: int = 0,
+    type_info_table: int = 0,
+    data_segment_base: int = 0,
+    read_account: bool = True,
+    debug: bool = False,
+) -> FullRankScanResult:
+    """Scan ranks; represent unreadable memory as an explicit unknown result."""
+    try:
+        return _scan_ranks_and_account_impl(
+            reader,
+            wrapper_instance=wrapper_instance,
+            wrapper_class=wrapper_class,
+            type_info_table=type_info_table,
+            data_segment_base=data_segment_base,
+            read_account=read_account,
+            debug=debug,
+        )
+    except NavigationReadError as exc:
+        return FullRankScanResult(warnings=[str(exc)], wrapper_instance=wrapper_instance)
 
 
 # ---------------------------------------------------------------------------
