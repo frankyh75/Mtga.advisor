@@ -14,6 +14,7 @@ from __future__ import annotations
 import struct
 import pytest
 
+from scanner.helper_client import MemoryReadError
 from scanner.il2cpp_nav import (
     IL2CPP_OFFSETS,
     MockMemory,
@@ -38,9 +39,19 @@ from scanner.rank_scanner import (
     scan_ranks_from_instance,
 )
 
+def test_rank_read_error_is_reported_as_unknown_not_zero():
+    class FailingMemory:
+        def read_bytes(self, addr: int, size: int) -> bytes:
+            raise MemoryReadError(addr, size, "mock rank read failure")
 
-# ---------------------------------------------------------------------------
-# Helpers — build mock IL2CPP memory layouts (same patterns as test_il2cpp_nav)
+    result = scan_ranks_and_account(
+        FailingMemory(), wrapper_instance=0x600000, wrapper_class=0x300000,
+    )
+
+    assert result.ranks.constructed.class_name == "None"
+    assert len(result.warnings) == 1
+    assert "nicht lesbar bei Adresse 0x300080" in result.warnings[0]
+    assert "mock rank read failure" in result.warnings[0]
 # ---------------------------------------------------------------------------
 
 def _pack_ptr(v: int) -> bytes:

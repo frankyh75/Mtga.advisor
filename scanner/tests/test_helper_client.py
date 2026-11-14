@@ -24,6 +24,7 @@ from scanner.helper_client import (  # noqa: E402
     HelperError,
     HelperProtocolError,
     HelperStatus,
+    MemoryReadError,
     RemoteMemoryAdapter,
     _send_request,
     get_status,
@@ -210,6 +211,17 @@ def test_helper_backend_iterate_readable_regions(mock_sock_path):
         assert regions[1] == (4296015872, 2097152)
 
 
+def test_helper_backend_counts_and_reports_read_errors(mock_sock_path):
+    reported: list[MemoryReadError] = []
+    with MockHelperServer(mock_sock_path, {"read_memory": {"error": "failed"}}):
+        backend = HelperBackend(mock_sock_path, on_error=reported.append)
+        assert backend.read_bytes(0x1000, 4) is None
+    assert backend.read_failures == 1
+    assert len(reported) == 1
+    assert reported[0].address == 0x1000
+    assert reported[0].size == 4
+
+
 # --- Tests für RemoteMemoryAdapter ---
 
 
@@ -223,11 +235,13 @@ def test_remote_memory_adapter_read_bytes(mock_sock_path):
         assert result == raw
 
 
-def test_remote_memory_adapter_read_bytes_fallback_on_error(mock_sock_path):
+def test_remote_memory_adapter_raises_on_read_error_and_try_read_is_none(mock_sock_path):
     with MockHelperServer(mock_sock_path, {"read_memory": {"error": "failed"}}):
         adapter = RemoteMemoryAdapter(mock_sock_path)
-        result = adapter.read_bytes(0x1000, 4)
-        assert result == b"\x00" * 4
+        with pytest.raises(MemoryReadError, match="0x1000") as exc_info:
+            adapter.read_bytes(0x1000, 4)
+        assert exc_info.value.reason == "failed"
+        assert adapter.try_read_bytes(0x1000, 4) is None
 
 
 def test_remote_memory_adapter_read_ptr(mock_sock_path):
@@ -252,9 +266,9 @@ def test_remote_memory_adapter_read_u32(mock_sock_path):
 
 def test_remote_memory_adapter_read_string(mock_sock_path):
     import base64
-    raw = b"Hello\x00world"
+    raw = b"Hello\x00world" + b"\x00" * (256 - len(b"Hello\x00world"))
     b64 = base64.b64encode(raw).decode("utf-8")
-    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 11}}):
+    with MockHelperServer(mock_sock_path, {"read_memory": {"status": "ok", "data": b64, "bytes_read": 256}}):
         adapter = RemoteMemoryAdapter(mock_sock_path)
         assert adapter.read_string(0x1000) == "Hello"
 
@@ -318,6 +332,21 @@ def test_request_read_memory_raises_helper_error(mock_sock_path):
     with MockHelperServer(mock_sock_path, {"read_memory": {"error": "Invalid address"}}):
         with pytest.raises(HelperError, match="Invalid address"):
             request_read_memory(mock_sock_path, address=0, size=64)
+
+
+def test_request_read_memory_raises_helper_error_for_size_too_large(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"read_memory": {"error": "size_too_large"}}):
+        with pytest.raises(HelperError, match="size_too_large"):
+            request_read_memory(mock_sock_path, address=0x1000, size=16 * 1024 * 1024 + 1)
+
+
+def test_request_read_memory_rejects_short_success_response(mock_sock_path):
+    import base64
+    with MockHelperServer(mock_sock_path, {
+        "read_memory": {"status": "ok", "data": base64.b64encode(b"abc").decode(), "bytes_read": 3}
+    }):
+        with pytest.raises(HelperProtocolError, match="vollständige"):
+            request_read_memory(mock_sock_path, address=0x1000, size=4)
 
 
 def test_request_read_memory_raises_protocol_error_when_no_data(mock_sock_path):

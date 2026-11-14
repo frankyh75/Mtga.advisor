@@ -131,6 +131,20 @@ class MemoryReader(Protocol):
     def read_bytes(self, addr: int, size: int) -> bytes: ...
 
 
+class NavigationReadError(Exception):
+    """Ein Speicher-Read hat eine IL2CPP-Navigationskette abgebrochen."""
+
+    def __init__(self, address: int, size: int, step: str, reason: str) -> None:
+        self.address = address
+        self.size = size
+        self.step = step
+        self.reason = reason
+        super().__init__(
+            f"IL2CPP-Navigation nicht lesbar bei Adresse {address:#x} "
+            f"({step}, {size} Bytes): {reason}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Mock memory — for testing without a live MTGA process
 # ---------------------------------------------------------------------------
@@ -270,13 +284,13 @@ def read_il2cpp_string(mem: MemoryReader, addr: int) -> str:
         return ""
 
     # Read length field at +0x10
-    length_raw = mem.read_bytes(addr + IL2CPP_OFFSETS["string_length"], 4)
+    length_raw = _read_exact(mem, addr + IL2CPP_OFFSETS["string_length"], 4, "string length")
     char_count = struct.unpack_from("<i", length_raw)[0]
     if char_count <= 0 or char_count > 10000:
         return ""
 
     # Read UTF-16LE characters at +0x14
-    char_bytes = mem.read_bytes(addr + IL2CPP_OFFSETS["string_chars"], char_count * 2)
+    char_bytes = _read_exact(mem, addr + IL2CPP_OFFSETS["string_chars"], char_count * 2, "string chars")
     try:
         return char_bytes.decode("utf-16-le", errors="strict")
     except (UnicodeDecodeError, ValueError):
@@ -356,7 +370,7 @@ def get_class_fields(mem: MemoryReader, class_addr: int) -> list[FieldInfo]:
     if fields_ptr == 0 or fields_ptr < MIN_VALID_PTR:
         return []
 
-    field_count_raw = mem.read_bytes(class_addr + IL2CPP_OFFSETS["class_field_count"], 4)
+    field_count_raw = _read_exact(mem, class_addr + IL2CPP_OFFSETS["class_field_count"], 4, "class field count")
     field_count = struct.unpack_from("<I", field_count_raw)[0]
     if field_count == 0 or field_count > 200:
         field_count = 50  # fallback to scanning up to 50
@@ -374,7 +388,7 @@ def get_class_fields(mem: MemoryReader, class_addr: int) -> list[FieldInfo]:
         if not field_name:
             break
 
-        offset_raw = mem.read_bytes(field_addr + IL2CPP_OFFSETS["field_offset"], 4)
+        offset_raw = _read_exact(mem, field_addr + IL2CPP_OFFSETS["field_offset"], 4, "field offset")
         field_offset = struct.unpack_from("<I", offset_raw)[0]
 
         # Read type info for static detection
@@ -382,9 +396,8 @@ def get_class_fields(mem: MemoryReader, class_addr: int) -> list[FieldInfo]:
         is_static = False
         type_name = "Unknown"
         if type_ptr > MIN_VALID_PTR:
-            type_attrs_raw = mem.read_bytes(type_ptr + IL2CPP_OFFSETS["field_type"] + 8, 4)
-            # TYPE_ATTRS is at type_ptr + 0x08
-            type_attrs_raw = mem.read_bytes(type_ptr + 0x08, 4)
+            # TYPE_ATTRS is at type_ptr + 0x08.
+            type_attrs_raw = _read_exact(mem, type_ptr + 0x08, 4, "field type attributes")
             type_attrs = struct.unpack_from("<I", type_attrs_raw)[0]
             is_static = (type_attrs & 0x10) != 0
 
@@ -408,7 +421,6 @@ def _read_string_ascii_at(mem: MemoryReader, addr: int) -> str:
     """Read a null-terminated ASCII string at addr (for type class names)."""
     if addr == 0 or addr < MIN_VALID_PTR:
         return ""
-    raw = mem.read_bytes(addr + IL2CPP_OFFSETS["class_name"], 256)
     # For class names, the name pointer is at class+0x10
     name_ptr = _read_ptr(mem, addr + IL2CPP_OFFSETS["class_name"])
     if name_ptr > MIN_VALID_PTR:
@@ -439,7 +451,7 @@ def find_papa_instance(mem: MemoryReader, papa_class: int) -> int | None:
     """
     for region_start, region_end in PAPA_HEAP_REGIONS:
         for chunk_start in range(region_start, region_end, PAPA_SCAN_STEP):
-            chunk = mem.read_bytes(chunk_start, PAPA_SCAN_STEP)
+            chunk = _read_exact(mem, chunk_start, PAPA_SCAN_STEP, "PAPA heap chunk")
             # `all(b == 0 for b in chunk)` iterates byte-by-byte in pure
             # Python — over a million iterations per 1 MB chunk. Comparing
             # against a same-length zero-filled bytes object instead uses
@@ -504,7 +516,7 @@ def _bulk_read(mem: MemoryReader, base: int, size: int, chunk_size: int = 0x4000
     offset = 0
     while offset < size:
         n = min(chunk_size, size - offset)
-        buf.extend(mem.read_bytes(base + offset, n))
+        buf.extend(_read_exact(mem, base + offset, n, "bulk navigation read"))
         offset += n
     return bytes(buf)
 
@@ -678,9 +690,8 @@ def _find_string_in_metadata_regions(
     global-metadata.dat region(s), without relying on a hardcoded file
     offset (which shifts between game builds/patches).
 
-    Polymorph: Wenn der Helper die read-only metadata-Region nicht lesen kann
-    (liefert Nullen), wird die String-Suche auf die Datei
-    global-metadata.dat ausgewichen und die Memory-Adresse berechnet.
+    Wenn eine metadata-Region nicht lesbar ist, wird der Read-Fehler an den
+    aufrufenden Scan propagiert; er darf nicht als leerer Datenblock gelten.
     """
     needle = b"\x00" + name.encode("ascii") + b"\x00"
     for addr, size in metadata_regions:
@@ -793,7 +804,7 @@ def _validate_class_struct(mem: MemoryReader, klass: int, expected_name: str | N
     if not (MIN_VALID_PTR < fields_ptr < MAX_VALID_PTR):
         return False
 
-    field_count_raw = mem.read_bytes(klass + IL2CPP_OFFSETS["class_field_count"], 4)
+    field_count_raw = _read_exact(mem, klass + IL2CPP_OFFSETS["class_field_count"], 4, "class field count")
     field_count = struct.unpack_from("<I", field_count_raw)[0]
     return 0 < field_count < 200
 
@@ -1618,7 +1629,7 @@ class Il2CppScanResult:
     all_decks_addr: int = 0
 
 
-def scan_decks_il2cpp(
+def _scan_decks_il2cpp_impl(
     reader: Il2CppReader | MemoryReader,
     *,
     papa_instance: int = 0,
@@ -1745,25 +1756,63 @@ def scan_decks_il2cpp(
     )
 
 
+def scan_decks_il2cpp(
+    reader: Il2CppReader | MemoryReader,
+    *,
+    papa_instance: int = 0,
+    papa_class: int = 0,
+    type_info_table: int = 0,
+    data_segment_base: int = 0,
+    debug: bool = False,
+) -> Il2CppScanResult:
+    """Scan decks and return an explicit unknown-data diagnostic on read failure."""
+    try:
+        result = _scan_decks_il2cpp_impl(
+            reader,
+            papa_instance=papa_instance,
+            papa_class=papa_class,
+            type_info_table=type_info_table,
+            data_segment_base=data_segment_base,
+            debug=debug,
+        )
+    except NavigationReadError as exc:
+        logger.warning("%s", exc)
+        return Il2CppScanResult(warnings=[str(exc)], papa_instance=papa_instance)
+    return result or Il2CppScanResult(warnings=["IL2CPP deck scan returned no result"])
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _read_exact(mem: MemoryReader, addr: int, size: int, step: str) -> bytes:
+    """Read exactly ``size`` bytes or stop navigation with a diagnostic."""
+    try:
+        raw = mem.read_bytes(addr, size)
+    except Exception as exc:
+        raise NavigationReadError(addr, size, step, str(exc)) from exc
+    if len(raw) != size:
+        raise NavigationReadError(
+            addr, size, step, f"unvollständiger Read (erhalten={len(raw)} Bytes)",
+        )
+    return raw
+
+
 def _read_ptr(mem: MemoryReader, addr: int) -> int:
     """Read a 64-bit pointer from memory."""
-    raw = mem.read_bytes(addr, 8)
+    raw = _read_exact(mem, addr, 8, "pointer")
     return struct.unpack_from("<Q", raw)[0]
 
 
 def _read_u32(mem: MemoryReader, addr: int) -> int:
     """Read a 32-bit unsigned integer from memory."""
-    raw = mem.read_bytes(addr, 4)
+    raw = _read_exact(mem, addr, 4, "u32")
     return struct.unpack_from("<I", raw)[0]
 
 
 def _read_i32(mem: MemoryReader, addr: int) -> int:
     """Read a 32-bit signed integer from memory."""
-    raw = mem.read_bytes(addr, 4)
+    raw = _read_exact(mem, addr, 4, "i32")
     return struct.unpack_from("<i", raw)[0]
 
 
@@ -1771,7 +1820,7 @@ def _read_string_ascii(mem: MemoryReader, addr: int) -> str:
     """Read a null-terminated ASCII string from memory."""
     if addr == 0 or addr < MIN_VALID_PTR:
         return ""
-    raw = mem.read_bytes(addr, 256)
+    raw = _read_exact(mem, addr, 256, "ASCII string")
     end = raw.find(b"\x00")
     if end == -1:
         end = len(raw)
@@ -1783,10 +1832,10 @@ def _read_string_ascii(mem: MemoryReader, addr: int) -> str:
 # ---------------------------------------------------------------------------
 
 class PymemMemoryAdapter:
-    """Adapter that wraps a Pymem instance to implement the MemoryReader protocol.
+    """Adapter that wraps a live Pymem process for IL2CPP navigation.
 
-    Uses pattern_scanner._read_bytes_silent (mach_vm_read_overwrite) for reads,
-    returning empty bytes on failure instead of raising.
+    A failed or short low-level read is reported as a MemoryReadError instead
+    of being padded with zero bytes, because zeros are valid IL2CPP values.
     """
 
     def __init__(self, pm: Any) -> None:
@@ -1799,11 +1848,15 @@ class PymemMemoryAdapter:
 
     def read_bytes(self, addr: int, size: int) -> bytes:
         from . import pattern_scanner as _ps
+        from .helper_client import MemoryReadError
+
         raw = _ps._read_bytes_silent(self.pm, addr, size)
         if raw is None:
-            return b"\x00" * size
-        if len(raw) < size:
-            raw = raw + b"\x00" * (size - len(raw))
+            raise MemoryReadError(addr, size, "lokaler mach_vm_read_overwrite-Read fehlgeschlagen")
+        if len(raw) != size:
+            raise MemoryReadError(
+                addr, size, f"unvollständiger lokaler Read (erhalten={len(raw)} Bytes)",
+            )
         return raw
 
     def read_ptr(self, addr: int) -> int:
@@ -1898,7 +1951,7 @@ def _region_filename(pid: int, addr: int) -> str:
 
 def _read_macho_segments(mem: MemoryReader, image_base: int) -> list[_MachOSegmentInfo]:
     """Parse LC_SEGMENT_64 entries from a Mach-O image header."""
-    header = mem.read_bytes(image_base, MACHO_HEADER_SCAN_SIZE)
+    header = _read_exact(mem, image_base, MACHO_HEADER_SCAN_SIZE, "Mach-O header")
     if len(header) < MACHO_HEADER_64_SIZE:
         return []
 
