@@ -102,6 +102,7 @@ def scan_all(
         scan_decks=scan_decks,
         scan_ranks=scan_ranks,
         read_account=read_account,
+        non_interactive=non_interactive,
         result=result,
     )
 
@@ -198,6 +199,7 @@ def _scan_all_direct(
     scan_decks: bool,
     scan_ranks: bool,
     read_account: bool,
+    non_interactive: bool = False,
     result: CombinedScanResult,
 ) -> CombinedScanResult:
     """Kombinierter Scan über direkten Pymem-Zugriff (erfordert sudo)."""
@@ -220,6 +222,7 @@ def _scan_all_direct(
             use_helper=False,
             debug=debug,
             print_fn=print_fn,
+            non_interactive=non_interactive,
         )
         result.collection = coll_result
         if coll_result is None:

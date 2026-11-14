@@ -127,7 +127,7 @@ def test_scan_command_exports_memory_scan_result(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: MemoryScanResult(
+        lambda **kwargs: MemoryScanResult(
             collection={100: 4, 200: 1},
             anchors=[],
             anchor_matches={},

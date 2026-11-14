@@ -69,7 +69,7 @@ def test_scan_command_falls_back_to_direct_when_helper_unavailable(tmp_path, mon
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: _make_result({100: 4}),
+        lambda **kwargs: _make_result({100: 4}),
     )
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
@@ -85,7 +85,7 @@ def test_scan_command_warns_when_helper_unavailable(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: _make_result({100: 4}),
+        lambda **kwargs: _make_result({100: 4}),
     )
 
     main(["scan", "--output", str(tmp_path / "out")])
@@ -122,7 +122,7 @@ def test_run_command_falls_back_on_macos_without_helper(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli_module,
         "scan_memory_collection_detailed",
-        lambda debug=False: _make_result({100: 4}),
+        lambda **kwargs: _make_result({100: 4}),
     )
 
     exit_code = main(["run", "--output", str(tmp_path / "out")])
@@ -135,7 +135,7 @@ def test_scan_command_returns_error_when_helper_fails_and_direct_fails(tmp_path,
     import cli.main as cli_module
 
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: False)
-    monkeypatch.setattr(cli_module, "scan_memory_collection_detailed", lambda debug=False: None)
+    monkeypatch.setattr(cli_module, "scan_memory_collection_detailed", lambda **kwargs: None)
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
     assert exit_code == 1
@@ -151,6 +151,90 @@ def test_scan_command_returns_error_when_helper_available_but_scan_fails(tmp_pat
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
     assert exit_code == 1
+
+
+def test_scan_non_interactive_flag_reaches_scanner(tmp_path, monkeypatch):
+    """--non-interactive muss bis scan_collection_detailed durchkommen.
+
+    Ohne diesen Test blieb der Flag unbemerkt in der CLI hängen: der Scanner
+    kannte ihn, die CLI reichte ihn nie durch — und jeder Scan fragte nach
+    Ankern.
+    """
+    import cli.main as cli_module
+    import scanner.memory_scanner as ms_mod
+
+    monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
+
+    captured: dict[str, object] = {}
+
+    def fake_scan(**kwargs):
+        captured.update(kwargs)
+        return _make_result({100: 4})
+
+    monkeypatch.setattr(ms_mod, "scan_collection_detailed", fake_scan)
+
+    exit_code = main([
+        "scan",
+        "--non-interactive",
+        "--output",
+        str(tmp_path / "out"),
+    ])
+
+    assert exit_code == 0
+    assert captured.get("non_interactive") is True
+
+
+def test_scan_defaults_to_interactive_when_flag_absent(tmp_path, monkeypatch):
+    """Ohne Flag bleibt der interaktive Weg — Verhalten unverändert."""
+    import cli.main as cli_module
+    import scanner.memory_scanner as ms_mod
+
+    monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
+
+    captured: dict[str, object] = {}
+
+    def fake_scan(**kwargs):
+        captured.update(kwargs)
+        return _make_result({100: 4})
+
+    monkeypatch.setattr(ms_mod, "scan_collection_detailed", fake_scan)
+
+    exit_code = main(["scan", "--output", str(tmp_path / "out")])
+
+    assert exit_code == 0
+    assert captured.get("non_interactive") is False
+
+
+def test_scan_all_non_interactive_flag_reaches_scanner(tmp_path, monkeypatch):
+    """--all --non-interactive muss ebenfalls durchkommen."""
+    import cli.main as cli_module
+    import scanner.combined_scanner as combined
+
+    captured: dict[str, object] = {}
+
+    class FakeResult:
+        collection = None
+        decks = None
+        ranks = None
+        account = None
+        rank_warnings: list[str] = []
+        errors = ["kein MTGA"]
+
+    def fake_scan_all(**kwargs):
+        captured.update(kwargs)
+        return FakeResult()
+
+    monkeypatch.setattr(combined, "scan_all", fake_scan_all)
+
+    main([
+        "scan",
+        "--all",
+        "--non-interactive",
+        "--output",
+        str(tmp_path / "out"),
+    ])
+
+    assert captured.get("non_interactive") is True
 
 
 def test_run_command_uses_logs_on_macos_when_specified(tmp_path, monkeypatch):

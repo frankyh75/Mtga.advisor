@@ -45,6 +45,25 @@ STRIDES_WORDS = (2, 3, 4)
 MAX_COLLECTION_ENTRIES = 100_000  # Ceiling-Guard: echte Collection ~8k, >100k = Müll
 MIN_KNOWN_RATIO = 0.30            # Quality-Guard: <30% bekannte IDs = nicht real
 
+# ---------------------------------------------------------------------------
+# Vorgegebene Anker (Standard-Set)
+# ---------------------------------------------------------------------------
+# Ohne Anker kann der Scanner die echte Collection nicht von Speichermüll
+# unterscheiden. Statt bei jedem Lauf 5 Karten abzufragen, ist hier ein
+# bewährtes Set hinterlegt: Karten, deren Besitz im Scan vom 2026-08-02 mit
+# 5/5 exakten Ankern bestätigt wurde (valid=true).
+#
+# Vorrang hat immer ~/.mtga_advisor/last_anchors.json: wer andere Karten
+# will, lässt sich die Datei einmal interaktiv schreiben. Dieses Set ist nur
+# der Fallback, damit der Scan NIE nach Ankern fragt.
+DEFAULT_ANCHORS: tuple[tuple[int, int, str], ...] = (
+    (105645, 1, "Quantum Reduction"),
+    (105771, 1, "TVA Bureaucrat"),
+    (105653, 1, "Virtual Assistant"),
+    (104977, 2, "We Say Thee Nay!"),
+    (104945, 1, "Echo, Perceptive Prodigy"),
+)
+
 
 @dataclass(frozen=True)
 class MemoryScanResult:
@@ -505,6 +524,33 @@ def validate_collection(
     }
 
 
+def _normalize_anchor(entry: Any) -> tuple[int, int, str] | None:
+    """Bringt einen Anker-Eintrag in die Form ``(grpId, quantity, name)``.
+
+    Nötig, weil die Anker-Datei JSON ist: Tupel kommen dort als Listen
+    zurück, und ältere/abgewandelte Dateien können dicts enthalten
+    (``{"arenaId": ...}``). Ohne Normalisierung wäre der Rückgabetyp
+    gelogen und nachgelagerter Code müsste beide Formen kennen.
+
+    Returns:
+        Normalisierter Anker oder None, wenn der Eintrag unbrauchbar ist.
+    """
+    try:
+        if isinstance(entry, dict):
+            grp_id = entry.get("arenaId", entry.get("grpId", entry.get("cardID")))
+            qty = entry.get("expected", entry.get("quantity", 1))
+            name = entry.get("name", "")
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 3:
+            grp_id, qty, name = entry[0], entry[1], entry[2]
+        else:
+            return None
+        if grp_id is None:
+            return None
+        return (int(grp_id), int(qty), str(name))
+    except (TypeError, ValueError):
+        return None
+
+
 def get_user_anchors(
     name_to_id: dict[str, int],
     *,
@@ -536,17 +582,41 @@ def get_user_anchors(
             with anchor_file.open("r", encoding="utf-8") as f:
                 saved = json.load(f)
             if saved and isinstance(saved, list):
-                print_fn("\n📌 [Gespeicherte Anker gefunden]")
-                for i, (_, qty, name) in enumerate(saved, 1):
-                    print_fn(f"   {i}. {name} (x{qty})")
-                if non_interactive:
-                    print_fn("   (nicht-interaktiv: gespeicherte Anker verwendet)")
-                    return saved
-                choice = input_fn("   Diese verwenden? [Y/n]: ").strip().lower()
-                if choice not in ("n", "no"):
-                    return saved
+                # JSON kennt keine Tupel — normalisieren, damit der
+                # Rückgabetyp (int, int, str) überall stimmt.
+                normalized = [a for a in (_normalize_anchor(e) for e in saved) if a]
+                if normalized:
+                    saved = normalized
+                    print_fn("\n📌 [Gespeicherte Anker gefunden]")
+                    for i, (_, qty, name) in enumerate(saved, 1):
+                        print_fn(f"   {i}. {name} (x{qty})")
+                    if non_interactive:
+                        print_fn("   (nicht-interaktiv: gespeicherte Anker verwendet)")
+                        return saved
+                    choice = input_fn("   Diese verwenden? [Y/n]: ").strip().lower()
+                    if choice not in ("n", "no"):
+                        return saved
         except Exception:
             pass
+
+    # Nicht-interaktiv und keine (brauchbare) Datei: Standard-Anker nehmen.
+    # Wichtig für Skripte/Launcher — der Scan darf NIE nach Karten fragen.
+    if non_interactive:
+        print_fn("\n📌 [Standard-Anker] (nicht-interaktiv, keine gespeicherten Anker)")
+        for i, (_, qty, name) in enumerate(DEFAULT_ANCHORS, 1):
+            print_fn(f"   {i}. {name} (x{qty})")
+        anchors = list(DEFAULT_ANCHORS)
+        # Einmal ablegen, damit beim nächsten Lauf sichtbar ist, womit
+        # gescannt wurde. Best effort: scheitert das (z.B. root-eigener
+        # Ordner), läuft der Scan trotzdem weiter.
+        try:
+            anchor_file.parent.mkdir(parents=True, exist_ok=True)
+            with anchor_file.open("w", encoding="utf-8") as f:
+                json.dump(anchors, f, indent=2)
+            print_fn(f"   → gespeichert in {anchor_file}")
+        except Exception as exc:
+            print_fn(f"   (Anker nicht speicherbar: {exc})")
+        return anchors
 
     print_fn("\n🔧 [Setup] Gib 5 Karten ein, die du sicher besitzt (Rares/Mythics am besten).")
 

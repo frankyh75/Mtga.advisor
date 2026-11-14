@@ -317,6 +317,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken pro Anker aus.")
     scan.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help=(
+            "Anker ohne Rückfrage verwenden (Datei ~/.mtga_advisor/last_anchors.json, "
+            "sonst das eingebaute Standard-Set). Nie nach Karten fragen — für Skripte "
+            "und Launcher."
+        ),
+    )
+    scan.add_argument(
         "--all",
         action="store_true",
         help="Kombinierter Scan: Collection + Decks + Ranks in einem Durchlauf (über eine Helper-Verbindung).",
@@ -1017,7 +1026,11 @@ def _run_scan_via_helper(args: argparse.Namespace) -> int:
     """Führt den Memory-Scan über den Helper-Daemon aus (sudo-frei)."""
     from scanner.memory_scanner import scan_collection_detailed
 
-    result = scan_collection_detailed(debug=args.debug, use_helper=True)
+    result = scan_collection_detailed(
+        debug=args.debug,
+        use_helper=True,
+        non_interactive=getattr(args, "non_interactive", False),
+    )
     if result is None:
         return 1
     collection_path, run_report_path = write_collection_artifacts(
@@ -1042,6 +1055,7 @@ def _run_scan_all(args: argparse.Namespace) -> int:
         scan_decks=not args.no_decks,
         scan_ranks=not args.no_ranks,
         read_account=not args.no_account,
+        non_interactive=getattr(args, "non_interactive", False),
         print_fn=print,
     )
 
@@ -1113,7 +1127,10 @@ def _run_scan(args: argparse.Namespace) -> int:
         "  Siehe: docs/helper-installation.md",
         file=sys.stderr,
     )
-    result = scan_memory_collection_detailed(debug=args.debug)
+    result = scan_memory_collection_detailed(
+        debug=args.debug,
+        non_interactive=getattr(args, "non_interactive", False),
+    )
     if result is None:
         return 1
     collection_path, run_report_path = write_collection_artifacts(
