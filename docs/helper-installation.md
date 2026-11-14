@@ -364,9 +364,15 @@ ps aux | grep -i "mtga\|magic" | grep -v grep
 
 - Der Daemon läuft als root — nur das Binary in
   `/Library/PrivilegedHelperTools/` wird akzeptiert
-- Der UNIX Socket hat Berechtigungen `0660` (rw-rw----). Peer-Credential-Check
-  via `getpeereid()` verifiziert die UID des Clients — nur root und der
-  Console-User (Desktop-User) dürfen zugreifen
+- Der UNIX Socket hat Berechtigungen `0666` (rw-rw-rw-) — der Zugriff wird
+  nicht über Dateirechte, sondern über Peer-Credentials geregelt:
+  `getpeereid()` verifiziert die UID des Clients. Zugelassen sind root (0),
+  der Console-User (Desktop-User) und die in `EXTRA_ALLOWED_UIDS`
+  (`helper/main.c`) eingetragenen Automatisierungs-Accounts — derzeit
+  uid 502 (`agent`), damit Scans auch ohne GUI-Session des Desktop-Users
+  laufen können. Jeder zusätzliche Eintrag erweitert den Zugriff auf
+  beliebigen Prozessspeicher (der Daemon läuft als root) und muss bewusst
+  erfolgen — Änderung erfordert Rebuild und Reinstall.
 - Der Helper validiert alle JSON-Kommandos und lehnt unbekannte Aktionen ab
 - Keine Remote-Netzwerk-Schnittstelle — nur lokaler UNIX Socket
 - Code-Signing verhindert Manipulation des Helper-Bundles (nur bei

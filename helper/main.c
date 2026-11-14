@@ -601,9 +601,21 @@ static int setup_socket(void) {
     return 0;
 }
 
+/* Additional local UIDs that are allowed to connect, besides root (0) and
+ * the console user. Keep this list as short as possible: the daemon runs as
+ * root and can read arbitrary process memory. Each entry needs a comment
+ * saying who it is and why it is trusted.
+ *
+ * 502 = "agent", the automation user that runs the MTGA Advisor CLI/scanner
+ *       (Hermes profile), so scans can run unattended (cron, agent sessions).
+ */
+static const uid_t EXTRA_ALLOWED_UIDS[] = { 502 };
+#define EXTRA_ALLOWED_COUNT (sizeof(EXTRA_ALLOWED_UIDS) / sizeof(EXTRA_ALLOWED_UIDS[0]))
+
 static int check_peer_credentials(int client_fd) {
     /* Verify the connecting client's UID via getpeereid().
-     * Access policy: root (uid 0) and the console user are allowed.
+     * Access policy: root (uid 0), the console user, and the UIDs listed in
+     * EXTRA_ALLOWED_UIDS (automation accounts) are allowed.
      * All other local users are rejected. */
     uid_t peer_uid = (uid_t)-1;
     gid_t peer_gid = (gid_t)-1;
@@ -615,6 +627,13 @@ static int check_peer_credentials(int client_fd) {
 
     /* root is always allowed */
     if (peer_uid == 0) return 0;
+
+    /* configured automation accounts are allowed */
+    for (size_t i = 0; i < EXTRA_ALLOWED_COUNT; i++) {
+        if (EXTRA_ALLOWED_UIDS[i] == peer_uid) {
+            return 0;
+        }
+    }
 
     /* console (login) user is allowed — this is the desktop user running
      * the MTGA Advisor app / CLI */
@@ -628,7 +647,8 @@ static int check_peer_credentials(int client_fd) {
         return 0;
     }
 
-    /* No fallback — reject. Only root and the console user are allowed. */
+    /* No fallback — reject. Only root, the console user and
+     * EXTRA_ALLOWED_UIDS are allowed. */
     fprintf(stderr, "mtga-helper: rejected connection from uid %d gid %d\n",
             (int)peer_uid, (int)peer_gid);
     return -1;
