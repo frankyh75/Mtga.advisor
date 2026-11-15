@@ -23,6 +23,19 @@ from scanner import memory_scanner
 from scanner.memory_scanner import DEFAULT_ANCHORS, get_user_anchors
 
 
+class DummyBackend:
+    """Minimaler Backend-Stub; Scanner und Parser werden im Test ersetzt."""
+
+    def read_bytes(self, addr: int, size: int) -> bytes | None:
+        return b"\x00" * size
+
+    def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
+        return []
+
+    def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
+        return [], None
+
+
 @pytest.fixture()
 def anchor_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Anker-Datei in ein temporäres Verzeichnis umleiten."""
@@ -69,6 +82,47 @@ def test_non_interactive_never_prompts(anchor_file: Path) -> None:
     assert len(anchors) == 5
 
 
+def test_no_tty_uses_defaults_without_reading_stdin_and_records_warning(
+    anchor_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI/Launcher ohne TTY dürfen ohne --non-interactive nicht blockieren."""
+    monkeypatch.setattr(memory_scanner.sys.stdin, "isatty", lambda: False)
+    warnings: list[str] = []
+
+    def exploding_input(_prompt: str) -> str:
+        raise AssertionError("Scan hat trotz fehlendem TTY stdin gelesen")
+
+    anchors = get_user_anchors(
+        {},
+        input_fn=exploding_input,
+        print_fn=lambda *a, **k: None,
+        warnings=warnings,
+    )
+
+    assert anchors == list(DEFAULT_ANCHORS)
+    assert warnings == ["anchor input skipped: no tty"]
+
+
+def test_no_tty_warning_is_in_scan_result(
+    anchor_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Der automatisierte Fallback muss im exportierbaren Ergebnis sichtbar sein."""
+    monkeypatch.setattr(memory_scanner.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(memory_scanner, "DEFAULT_ANCHORS", ((114001, 1, "Card A"),))
+
+    result = memory_scanner.scan_collection_detailed(
+        backend=DummyBackend(),
+        db_loader=lambda: {114001: {"name": "Card A"}},
+        memory_scanner=lambda _backend, _needle: [0x2000],
+        block_parser=lambda _backend, _address: [{114001: 1}],
+        input_fn=lambda _prompt: pytest.fail("stdin darf ohne TTY nicht gelesen werden"),
+        print_fn=lambda *a, **k: None,
+    )
+
+    assert result is not None
+    assert "anchor input skipped: no tty" in result.validation["warnings"]
+
+
 def test_non_interactive_persists_defaults(anchor_file: Path) -> None:
     assert not anchor_file.exists()
 
@@ -105,8 +159,11 @@ def test_saved_file_wins_over_defaults(anchor_file: Path) -> None:
     assert anchors == custom
 
 
-def test_interactive_without_file_still_asks(anchor_file: Path) -> None:
+def test_interactive_without_file_still_asks(
+    anchor_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Der interaktive Weg muss unverändert bleiben."""
+    monkeypatch.setattr(memory_scanner.sys.stdin, "isatty", lambda: True)
     answers = iter(["Card A", "2", "", "", "", "", ""])
     prompts: list[str] = []
     lines: list[str] = []
