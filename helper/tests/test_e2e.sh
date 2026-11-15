@@ -136,10 +136,10 @@ info "Test 4: Sende list_regions-Kommando..."
 REGIONS_RESP=$(sock_send "$SOCK_PATH" '{"action":"list_regions"}')
 if echo "$REGIONS_RESP" | grep -q '"regions"'; then
     pass "list_regions-Antwort enthält 'regions'-Feld"
-    if echo "$REGIONS_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'regions' in d; assert isinstance(d['regions'], list); assert d.get('truncated') is False" 2>/dev/null; then
-        pass "list_regions-Antwort ist valides JSON mit regions-Liste und truncated=false"
+    if echo "$REGIONS_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'regions' in d; assert isinstance(d['regions'], list); assert d.get('truncated') is False; assert d.get('map_valid') is True; assert d.get('gaps') == []" 2>/dev/null; then
+        pass "list_regions-Antwort enthält vollständige Karten-Diagnose"
     else
-        fail "list_regions-Antwort enthält keine gültige regions-Liste oder kein truncated=false"
+        fail "list_regions-Antwort enthält keine gültige regions-Liste oder Karten-Diagnose"
     fi
 else
     fail "list_regions-Antwort enthält kein 'regions'-Feld: '$REGIONS_RESP'"

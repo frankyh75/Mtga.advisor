@@ -315,6 +315,36 @@ def test_request_list_regions_preserves_truncation_flag(mock_sock_path, truncate
     assert result.truncated is truncated
 
 
+def test_request_list_regions_preserves_map_diagnostics(mock_sock_path):
+    """Große Helper-Lücken bleiben für Aufrufer sichtbar."""
+    regions_response = {
+        "status": "ok",
+        "regions": [{"address": 4294967296, "size": 1048576}],
+        "truncated": False,
+        "map_valid": True,
+        "gaps": [{"address": 4296015872, "size": 2 * 1024 * 1024 * 1024}],
+    }
+    with MockHelperServer(mock_sock_path, {"list_regions": regions_response}):
+        result = request_list_regions(mock_sock_path)
+    assert result.map_valid is True
+    assert result.gaps == [{"address": 4296015872, "size": 2 * 1024 * 1024 * 1024}]
+
+
+def test_helper_backend_warns_but_continues_for_large_region_gap(mock_sock_path):
+    regions_response = {
+        "status": "ok",
+        "regions": [{"address": 4294967296, "size": 1048576}],
+        "truncated": False,
+        "gaps": [{"address": 4296015872, "size": 2 * 1024 * 1024 * 1024}],
+    }
+    with MockHelperServer(mock_sock_path, {"list_regions": regions_response}):
+        backend = HelperBackend(mock_sock_path)
+        with pytest.warns(RuntimeWarning, match="große Lücken"):
+            regions, error = backend.iterate_readable_regions()
+    assert regions == [(4294967296, 1048576)]
+    assert error is None
+
+
 def test_request_list_regions_raises_helper_error(mock_sock_path):
     with MockHelperServer(mock_sock_path, {"list_regions": {"error": "MTGA not found"}}):
         with pytest.raises(HelperError, match="MTGA not found"):
