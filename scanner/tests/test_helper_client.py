@@ -30,6 +30,7 @@ from scanner.helper_client import (  # noqa: E402
     get_status,
     is_helper_available,
     ping,
+    request_target,
     request_list_regions,
     request_read_memory,
 )
@@ -159,6 +160,23 @@ def test_get_status_running(mock_sock_path):
 def test_get_status_not_running_when_socket_missing(tmp_path):
     status = get_status(str(tmp_path / "no.sock"))
     assert status.running is False
+
+
+def test_request_target_returns_pid_and_path(mock_sock_path):
+    target = {
+        "status": "ok",
+        "pid": 52783,
+        "path": "/Users/Shared/Epic Games/MagicTheGathering/MTGA.app/Contents/MacOS/MTGA",
+    }
+    with MockHelperServer(mock_sock_path, {"target": target}) as server:
+        assert request_target(mock_sock_path) == {"pid": 52783, "path": target["path"]}
+        assert server.received_requests == [{"action": "target"}]
+
+
+def test_request_target_rejects_invalid_response(mock_sock_path):
+    with MockHelperServer(mock_sock_path, {"target": {"status": "ok", "pid": 0, "path": ""}}):
+        with pytest.raises(HelperProtocolError, match="pid/path"):
+            request_target(mock_sock_path)
 
 
 def test_send_request_raises_connection_error_when_socket_missing(tmp_path):

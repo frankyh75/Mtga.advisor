@@ -247,25 +247,105 @@ static char *base64_encode(const unsigned char *data, size_t len) {
 
 /* --- Process discovery --- */
 
-/* Find PID by process name (case-insensitive substring match).
- * Returns PID > 0 on success, 0 if not found, -1 on error. */
+typedef struct {
+    pid_t pid;
+    const char *name;
+    const char *comm;
+    const char *path;
+} process_candidate_t;
+
+/* Choose an MTGA candidate without talking to the kernel. Keeping the policy
+ * separate makes the self-exclusion invariant regression-testable without
+ * root or a running game. */
+static pid_t select_process_candidate(
+    const process_candidate_t *candidates, int count, pid_t self_pid, const char *name
+) {
+    const char *canonical_path = "/MTGA.app/Contents/MacOS/MTGA";
+    size_t canonical_len = strlen(canonical_path);
+
+    /* Prefer the game's executable path; process-list order is not stable. */
+    for (int i = 0; i < count; i++) {
+        const process_candidate_t *candidate = &candidates[i];
+        size_t path_len = candidate->path ? strlen(candidate->path) : 0;
+        if (candidate->pid != 0 && candidate->pid != self_pid &&
+            path_len >= canonical_len &&
+            strcmp(candidate->path + path_len - canonical_len, canonical_path) == 0) {
+            return candidate->pid;
+        }
+    }
+    /* Then prefer an exact process name. */
+    for (int i = 0; i < count; i++) {
+        const process_candidate_t *candidate = &candidates[i];
+        if (candidate->pid != 0 && candidate->pid != self_pid &&
+            ((candidate->name && strcmp(candidate->name, name) == 0) ||
+             (candidate->comm && strcmp(candidate->comm, name) == 0))) {
+            return candidate->pid;
+        }
+    }
+    /* Last resort: legacy case-insensitive substring lookup, never self. */
+    for (int i = 0; i < count; i++) {
+        const process_candidate_t *candidate = &candidates[i];
+        if (candidate->pid != 0 && candidate->pid != self_pid &&
+            ((candidate->name && strcasestr(candidate->name, name) != NULL) ||
+             (candidate->comm && strcasestr(candidate->comm, name) != NULL))) {
+            return candidate->pid;
+        }
+    }
+    return 0;
+}
+
+/* Find PID by process name. Returns PID > 0 on success, 0 if not found. */
 static pid_t find_process_by_name(const char *name) {
     pid_t pids[4096];
     int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
     if (count <= 0) return 0;
     count /= sizeof(pid_t);
 
+    process_candidate_t candidates[4096];
+    int candidate_count = 0;
     for (int i = 0; i < count; i++) {
         if (pids[i] == 0) continue;
         struct proc_bsdinfo info;
         int st = proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0,
                               &info, sizeof(info));
         if (st <= 0) continue;
-        /* Case-insensitive substring match */
-        if (strcasestr(info.pbi_name, name) != NULL) {
-            return pids[i];
-        }
+        char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        (void)proc_pidpath(pids[i], path, sizeof(path));
+        candidates[candidate_count++] = (process_candidate_t){
+            .pid = pids[i], .name = strdup(info.pbi_name),
+            .comm = strdup(info.pbi_comm), .path = strdup(path),
+        };
     }
+    pid_t selected = select_process_candidate(candidates, candidate_count, getpid(), name);
+    for (int i = 0; i < candidate_count; i++) {
+        free((void *)candidates[i].name);
+        free((void *)candidates[i].comm);
+        free((void *)candidates[i].path);
+    }
+    return selected;
+}
+
+static pid_t resolve_mtga_target(char *path, size_t path_size) {
+    pid_t pid = find_process_by_name("MTGA");
+    if (pid > 0 && path && path_size > 0 &&
+        proc_pidpath(pid, path, (uint32_t)path_size) <= 0) {
+        path[0] = '\0';
+    }
+    return pid;
+}
+
+static int run_process_selection_test(void) {
+    const process_candidate_t candidates[] = {
+        { .pid = 101, .name = "mtga-helper", .comm = "mtga-helper", .path = "/Library/PrivilegedHelperTools/mtga-helper" },
+        { .pid = 202, .name = "MTGA", .comm = "MTGA", .path = "/Users/Shared/Epic Games/MagicTheGathering/MTGA.app/Contents/MacOS/MTGA" },
+        { .pid = 303, .name = "mtga-preview", .comm = "mtga-preview", .path = "/tmp/mtga-preview" },
+    };
+    pid_t selected = select_process_candidate(candidates, 3, 101, "MTGA");
+    if (selected != 202) {
+        fprintf(stderr, "mtga-helper: process selection regression failed: expected 202, got %d\n", selected);
+        return 1;
+    }
+    printf("process selection regression passed (selected pid %d)\n", selected);
     return 0;
 }
 
@@ -292,6 +372,17 @@ static mach_port_t attach_to_process(pid_t pid) {
         fprintf(stderr, "mtga-helper: task_for_pid(%d) failed: %s\n",
                 pid, mach_error_string(kr));
         return MACH_PORT_NULL;
+    }
+    return task;
+}
+
+static mach_port_t attach_to_mtga(void) {
+    char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    pid_t pid = resolve_mtga_target(path, sizeof(path));
+    if (pid <= 0) return MACH_PORT_NULL;
+    mach_port_t task = attach_to_process(pid);
+    if (task != MACH_PORT_NULL) {
+        fprintf(stderr, "mtga-helper: attached pid %d (%s)\n", (int)pid, path);
     }
     return task;
 }
@@ -444,6 +535,27 @@ static char *handle_status(void) {
     return strdup(resp);
 }
 
+/* Resolve the process only; diagnostics must not trigger task_for_pid. */
+static char *handle_target(void) {
+    if (g_test_mode) {
+        char response[128];
+        snprintf(response, sizeof(response),
+                 "{\"status\":\"ok\",\"pid\":%d,\"path\":\"/test/MTGA.app/Contents/MacOS/MTGA\"}",
+                 (int)getpid());
+        return strdup(response);
+    }
+    char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    pid_t pid = resolve_mtga_target(path, sizeof(path));
+    if (pid <= 0) return build_error("MTGA process not found. Is the game running?");
+    char *escaped_path = json_escape(path);
+    if (!escaped_path) return build_error("Out of memory");
+    char response[PROC_PIDPATHINFO_MAXSIZE + 80];
+    snprintf(response, sizeof(response), "{\"status\":\"ok\",\"pid\":%d,\"path\":%s}",
+             (int)pid, escaped_path);
+    free(escaped_path);
+    return strdup(response);
+}
+
 /* --- Low-Level Primitives --- */
 
 /* Forward declarations — these functions are defined later in the file
@@ -464,15 +576,9 @@ static char *handle_list_regions(void) {
                        "],\"truncated\":false,\"map_valid\":true,\"gaps\":[]}");
     }
 
-    /* Find MTGA process */
-    pid_t pid = find_process_by_name("MTGA");
-    if (pid <= 0) {
-        return build_error("MTGA process not found. Is the game running?");
-    }
-
-    mach_port_t task = attach_to_process(pid);
+    mach_port_t task = attach_to_mtga();
     if (task == MACH_PORT_NULL) {
-        return build_error("task_for_pid failed (helper needs root)");
+        return build_error("MTGA process not found or task_for_pid failed (helper needs root)");
     }
 
     /* This buffer must remain on the heap: 16k regions can exceed a safe
@@ -565,15 +671,9 @@ static char *handle_read_memory(const char *request) {
         return build_error("size_too_large");
     }
 
-    /* Find MTGA process */
-    pid_t pid = find_process_by_name("MTGA");
-    if (pid <= 0) {
-        return build_error("MTGA process not found. Is the game running?");
-    }
-
-    mach_port_t task = attach_to_process(pid);
+    mach_port_t task = attach_to_mtga();
     if (task == MACH_PORT_NULL) {
-        return build_error("task_for_pid failed (helper needs root)");
+        return build_error("MTGA process not found or task_for_pid failed (helper needs root)");
     }
 
     /* Read memory */
@@ -763,6 +863,8 @@ static int process_request(int client_fd, const char *buf) {
         response = build_ok();
     } else if (strcmp(action, "status") == 0) {
         response = handle_status();
+    } else if (strcmp(action, "target") == 0) {
+        response = handle_target();
     } else if (strcmp(action, "shutdown") == 0) {
         response = build_ok();
         free(action);
@@ -844,6 +946,7 @@ static void usage(const char *prog) {
         "  --test-mode     Mock mode: return dummy data, no task_for_pid\n"
         "  --dump-regions  Print leaf regions as address size protection\n"
         "  --pid PID       Target process for --dump-regions (default: self)\n"
+        "  --self-test-process-selection  Run root-free target-selection regression\n"
         "  --version       Print version and exit\n"
         "  --help, -h      Show this help\n",
         prog, DEFAULT_SOCK_PATH);
@@ -855,15 +958,17 @@ int main(int argc, char *argv[]) {
         {"test-mode", no_argument,       0, 't'},
         {"dump-regions", no_argument,    0, 'd'},
         {"pid",       required_argument, 0, 'p'},
+        {"self-test-process-selection", no_argument, 0, 'T'},
         {"version",   no_argument,       0, 'V'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int dump_regions_mode = 0;
+    int process_selection_test_mode = 0;
     pid_t dump_pid = 0;
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:tdp:Vh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:tdp:TVh", long_opts, NULL)) != -1) {
         switch (opt) {
             case 's':
                 strncpy(g_sock_path, optarg, sizeof(g_sock_path) - 1);
@@ -885,6 +990,9 @@ int main(int argc, char *argv[]) {
                 dump_pid = (pid_t)parsed_pid;
                 break;
             }
+            case 'T':
+                process_selection_test_mode = 1;
+                break;
             case 'V':
                 printf("mtga-helper %s\n", VERSION);
                 return 0;
@@ -901,6 +1009,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "mtga-helper: --pid requires --dump-regions\n");
         return 1;
     }
+    if (process_selection_test_mode) return run_process_selection_test();
     if (dump_regions_mode) return dump_regions(dump_pid);
 
     signal(SIGPIPE, SIG_IGN);

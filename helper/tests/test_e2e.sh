@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HELPER_DIR="$PROJECT_ROOT/helper"
 SOCK_PATH="${MTGA_HELPER_SOCK:-/tmp/mtga-helper-test.sock}"
-HELPER_BIN="$HELPER_DIR/mtga-helper"
+HELPER_BIN="$HELPER_DIR/build/mtga-helper"
 TIMEOUT=10
 
 # --- Farben ---
@@ -147,8 +147,17 @@ else
     fail "Ping-Antwort ungültig: '$PING_RESP'"
 fi
 
-# --- Test 5: list_regions (Mock-Modus) ---
-info "Test 5: Sende list_regions-Kommando..."
+# --- Test 5: target (Mock-Modus, ohne Attach) ---
+info "Test 5: Sende target-Kommando..."
+TARGET_RESP=$(sock_send "$SOCK_PATH" '{"action":"target"}')
+if echo "$TARGET_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['status'] == 'ok'; assert d['pid'] > 0; assert d['path'].endswith('/MTGA.app/Contents/MacOS/MTGA')" 2>/dev/null; then
+    pass "target-Antwort enthält PID und kanonischen MTGA-Pfad"
+else
+    fail "target-Antwort ungültig: '$TARGET_RESP'"
+fi
+
+# --- Test 6: list_regions (Mock-Modus) ---
+info "Test 6: Sende list_regions-Kommando..."
 REGIONS_RESP=$(sock_send "$SOCK_PATH" '{"action":"list_regions"}')
 if echo "$REGIONS_RESP" | grep -q '"regions"'; then
     pass "list_regions-Antwort enthält 'regions'-Feld"
@@ -161,8 +170,8 @@ else
     fail "list_regions-Antwort enthält kein 'regions'-Feld: '$REGIONS_RESP'"
 fi
 
-# --- Test 6: read_memory (Mock-Modus) ---
-info "Test 6: Sende read_memory-Kommando (Mock-Adresse 4294967296)..."
+# --- Test 7: read_memory (Mock-Modus) ---
+info "Test 7: Sende read_memory-Kommando (Mock-Adresse 4294967296)..."
 READ_RESP=$(sock_send "$SOCK_PATH" '{"action":"read_memory","address":4294967296,"size":64}')
 if echo "$READ_RESP" | grep -q '"data"'; then
     pass "read_memory-Antwort enthält 'data'-Feld"
@@ -183,8 +192,8 @@ else
     fail "read_memory-Antwort enthält kein 'data'-Feld: '$READ_RESP'"
 fi
 
-# --- Test 7: Ungültiges Kommando ---
-info "Test 7: Sende ungültiges Kommando..."
+# --- Test 8: Ungültiges Kommando ---
+info "Test 8: Sende ungültiges Kommando..."
 ERR_RESP=$(sock_send "$SOCK_PATH" '{"action":"unknown"}')
 if echo "$ERR_RESP" | grep -q '"error"'; then
     pass "Ungültiges Kommando liefert Fehler-Antwort"
@@ -196,7 +205,7 @@ fi
 echo ""
 if [[ $FAILED -eq 0 ]]; then
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}Alle Tests bestanden (7/7)${NC}"
+    echo -e "${GREEN}Alle Tests bestanden (8/8)${NC}"
     echo -e "${GREEN}========================================${NC}"
     exit 0
 else
