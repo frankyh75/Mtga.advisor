@@ -38,9 +38,10 @@ IL2CPP_OFFSETS: dict[str, int] = {
     "class_name": 0x10,
     "class_namespace": 0x18,
     "class_parent": 0x48,
+    "class_element_class": 0x40,
     "class_fields": 0x80,
     "class_field_count": 0x124,
-    "class_static_fields": 0xA8,
+    "class_static_fields": 0xB8,
     "class_methods": 0x88,
     "class_instance_size": 0xF8,
     "class_flags": 0xFC,
@@ -308,6 +309,8 @@ class FieldInfo:
     type_name: str
     offset: int
     is_static: bool = False
+    type_code: int = 0
+    is_thread_static: bool = False
 
 
 def find_class_by_name(
@@ -391,21 +394,20 @@ def get_class_fields(mem: MemoryReader, class_addr: int) -> list[FieldInfo]:
         offset_raw = _read_exact(mem, field_addr + IL2CPP_OFFSETS["field_offset"], 4, "field offset")
         field_offset = struct.unpack_from("<I", offset_raw)[0]
 
-        # Read type info for static detection
-        type_ptr = _read_ptr(mem, field_addr + IL2CPP_OFFSETS["field_type"])
+        # Unity 6 may expose an Il2CppType whose type-data is unreadable.
+        # A bad type name must not discard the otherwise valid FieldInfo list.
         is_static = False
         type_name = "Unknown"
-        if type_ptr > MIN_VALID_PTR:
-            # TYPE_ATTRS is at type_ptr + 0x08.
-            type_attrs_raw = _read_exact(mem, type_ptr + 0x08, 4, "field type attributes")
-            type_attrs = struct.unpack_from("<I", type_attrs_raw)[0]
-            is_static = (type_attrs & 0x10) != 0
-
-            type_data = _read_ptr(mem, type_ptr)
-            if type_data > MIN_VALID_PTR:
-                tn = _read_string_ascii_at(mem, type_data)
-                if tn:
-                    type_name = tn
+        try:
+            type_ptr = _read_ptr(mem, field_addr + IL2CPP_OFFSETS["field_type"])
+            if type_ptr > MIN_VALID_PTR:
+                type_attrs = _read_u32(mem, type_ptr + 0x08)
+                is_static = (type_attrs & 0x10) != 0
+                type_data = _read_ptr(mem, type_ptr)
+                if type_data > MIN_VALID_PTR:
+                    type_name = _read_string_ascii_at(mem, type_data) or "Unknown"
+        except Exception:
+            type_name = "Unknown"
 
         fields.append(FieldInfo(
             name=field_name,
@@ -426,6 +428,145 @@ def _read_string_ascii_at(mem: MemoryReader, addr: int) -> str:
     if name_ptr > MIN_VALID_PTR:
         return _read_string_ascii(mem, name_ptr)
     return ""
+
+
+# Metadata-driven helpers for object fields and Dictionary<int, int> arrays.
+FIELD_ATTR_STATIC = 0x10
+FIELD_ATTR_LITERAL = 0x40
+
+
+def class_of(mem: MemoryReader, obj: int) -> int:
+    return _read_ptr(mem, obj) if obj >= MIN_VALID_PTR else 0
+
+
+def class_parent(mem: MemoryReader, klass: int) -> int:
+    return _read_ptr(mem, klass + IL2CPP_OFFSETS["class_parent"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_element_class(mem: MemoryReader, klass: int) -> int:
+    return _read_ptr(mem, klass + IL2CPP_OFFSETS["class_element_class"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_instance_size(mem: MemoryReader, klass: int) -> int:
+    return _read_u32(mem, klass + IL2CPP_OFFSETS["class_instance_size"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_static_storage(mem: MemoryReader, klass: int) -> int:
+    return _read_ptr(mem, klass + IL2CPP_OFFSETS["class_static_fields"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_fields_raw(mem: MemoryReader, klass: int) -> list[FieldInfo]:
+    """Read exactly this class's fields; parent mismatch terminates the list."""
+    if klass < MIN_VALID_PTR:
+        return []
+    fields_ptr = _read_ptr(mem, klass + IL2CPP_OFFSETS["class_fields"])
+    if fields_ptr < MIN_VALID_PTR:
+        return []
+    count = _read_u32(mem, klass + IL2CPP_OFFSETS["class_field_count"])
+    result: list[FieldInfo] = []
+    for index in range(min(count if 0 < count <= 200 else 200, 200)):
+        addr = fields_ptr + index * IL2CPP_OFFSETS["field_info_size"]
+        if _read_ptr(mem, addr + IL2CPP_OFFSETS["field_parent"]) != klass:
+            break
+        name = _read_string_ascii(mem, _read_ptr(mem, addr + IL2CPP_OFFSETS["field_name"]))
+        if not name:
+            break
+        type_ptr = _read_ptr(mem, addr + IL2CPP_OFFSETS["field_type"])
+        bits = _read_u32(mem, type_ptr + 8) if type_ptr >= MIN_VALID_PTR else 0
+        attrs, code = bits & 0xffff, (bits >> 16) & 0xff
+        if attrs & FIELD_ATTR_LITERAL:
+            continue
+        offset = _read_i32(mem, addr + IL2CPP_OFFSETS["field_offset"])
+        result.append(FieldInfo(name, "Unknown", offset, bool(attrs & FIELD_ATTR_STATIC), code, offset == -1))
+    return result
+
+
+def find_field_deep(mem: MemoryReader, klass: int, name: str) -> FieldInfo | None:
+    for _ in range(32):
+        if klass < MIN_VALID_PTR:
+            return None
+        found = next((item for item in class_fields_raw(mem, klass) if item.name == name), None)
+        if found is not None:
+            return found
+        klass = class_parent(mem, klass)
+    return None
+
+
+def read_ref_field(mem: MemoryReader, obj: int, name: str) -> tuple[int, FieldInfo] | None:
+    info = find_field_deep(mem, class_of(mem, obj), name)
+    if info is None or info.is_static or info.is_thread_static:
+        return None
+    return _read_ptr(mem, obj + info.offset), info
+
+
+def read_num_field(mem: MemoryReader, obj: int, name: str) -> tuple[int, FieldInfo] | None:
+    info = find_field_deep(mem, class_of(mem, obj), name)
+    if info is None or info.is_static or info.is_thread_static:
+        return None
+    return _read_i32(mem, obj + info.offset), info
+
+
+def array_element_size(mem: MemoryReader, array_class: int, elem_class: int) -> int:
+    size = class_instance_size(mem, elem_class) - 0x10
+    if 0 < size <= 0x10000:
+        return size
+    for offset in (0xf8, 0xfc, 0x100, 0x108, 0x110):
+        size = _read_u32(mem, array_class + offset)
+        if 0 < size <= 0x10000:
+            return size
+    return 8
+
+
+def array_info(mem: MemoryReader, array: int) -> tuple[int, int, int, int]:
+    array_class = class_of(mem, array)
+    elem_class = class_element_class(mem, array_class)
+    return (elem_class, array_element_size(mem, array_class, elem_class),
+            _read_i32(mem, array + IL2CPP_OFFSETS["array_length"]), array + IL2CPP_OFFSETS["array_elements"])
+
+
+def entry_layout(mem: MemoryReader, elem_class: int) -> dict[str, int]:
+    layout: dict[str, int] = {}
+    for name in ("hashCode", "key", "value"):
+        info = find_field_deep(mem, elem_class, name)
+        if info is None:
+            raise NavigationReadError(elem_class, 0, "entry layout", f"Feld fehlt: {name}")
+        layout[name] = info.offset - 0x10
+        if name != "hashCode":
+            layout[f"{name}_code"] = info.type_code
+    return layout
+
+
+def _decode_int(blob: bytes, offset: int, code: int) -> int:
+    formats = {4: ("<B", 1), 5: ("<B", 1), 6: ("<h", 2), 7: ("<H", 2), 8: ("<i", 4), 9: ("<I", 4), 10: ("<q", 8), 11: ("<Q", 8), 0x18: ("<i", 4), 0x19: ("<I", 4)}
+    fmt, width = formats.get(code, ("<i", 4))
+    if offset < 0 or offset + width > len(blob):
+        raise NavigationReadError(offset, width, "dictionary entry", "Wert ausserhalb des Entry-Layouts")
+    return int(struct.unpack_from(fmt, blob, offset)[0])
+
+
+def read_dict_int_int_bulk(mem: MemoryReader, dict_addr: int) -> tuple[dict[int, int], dict[str, int]]:
+    entries = _read_ptr(mem, dict_addr + IL2CPP_OFFSETS["dict_entries"])
+    if entries < MIN_VALID_PTR:
+        raise NavigationReadError(dict_addr, 8, "entries", "ungueltiger entries-Array-Zeiger")
+    elem_class, stride, length, data = array_info(mem, entries)
+    if length < 0 or stride <= 0:
+        raise NavigationReadError(entries, 4, "entries", "ungueltige Array-Metadaten")
+    layout = entry_layout(mem, elem_class)
+    count = max(0, min(_read_i32(mem, dict_addr + IL2CPP_OFFSETS["dict_count"]), length))
+    blob, skipped = _bulk_read(mem, data, count * stride, return_skipped=True)
+    cards: dict[int, int] = {}
+    free_slots = 0
+    for index in range(count):
+        base = index * stride
+        if _decode_int(blob, base + layout["hashCode"], 8) < 0:
+            free_slots += 1
+            continue
+        key = _decode_int(blob, base + layout["key"], layout["key_code"])
+        value = _decode_int(blob, base + layout["value"], layout["value_code"])
+        if key > 0:
+            cards[key] = value
+    layout.update(stride=stride, length=length, count=count, free_slots=free_slots, skipped=skipped)
+    return cards, layout
 
 
 # ---------------------------------------------------------------------------
@@ -510,15 +651,23 @@ def find_papa_instance(mem: MemoryReader, papa_class: int) -> int | None:
 
 
 
-def _bulk_read(mem: MemoryReader, base: int, size: int, chunk_size: int = 0x400000) -> bytes:
-    """Read a large region in bounded chunks (single huge reads can fail)."""
+def _bulk_read(
+    mem: MemoryReader, base: int, size: int, chunk_size: int = 0x400000, *, return_skipped: bool = False,
+) -> bytes | tuple[bytes, int]:
+    """Read bounded chunks; unreadable chunks are zeroed and reported on request."""
     buf = bytearray()
     offset = 0
+    skipped = 0
     while offset < size:
         n = min(chunk_size, size - offset)
-        buf.extend(_read_exact(mem, base + offset, n, "bulk navigation read"))
+        try:
+            buf.extend(_read_exact(mem, base + offset, n, "bulk navigation read"))
+        except Exception:
+            buf.extend(b"\x00" * n)
+            skipped += 1
         offset += n
-    return bytes(buf)
+    data = bytes(buf)
+    return (data, skipped) if return_skipped else data
 
 
 def _find_metadata_regions(pm: Any) -> list[tuple[int, int]]:
@@ -544,6 +693,23 @@ def _find_metadata_regions(pm: Any) -> list[tuple[int, int]]:
     # nicht die read-only mapped-file Region. Daher überspringen wir Pfad A
     # für Helper-Adapter und gehen direkt zu Pfad C (proc-basiert).
     is_helper_adapter = hasattr(pm, "iterate_writable_private_regions") and not hasattr(pm, "task")
+
+    # Unity 6 / foreign PID: region filenames are unavailable.  The metadata
+    # header's stable magic is the only reliable discriminator here.
+    if is_helper_adapter and hasattr(pm, "iterate_readable_regions"):
+        try:
+            regions, _ = pm.iterate_readable_regions()
+            magic_regions: list[tuple[int, int]] = []
+            for addr, size in regions:
+                try:
+                    if size >= 4 and _read_u32(pm, addr) == 0xFAB11BAF:
+                        magic_regions.append((addr, size))
+                except Exception:
+                    continue
+            if magic_regions:
+                return magic_regions
+        except Exception:
+            pass
 
     if not is_helper_adapter and hasattr(pm, "iterate_readable_regions"):
         regions, _ = pm.iterate_readable_regions()
@@ -1135,10 +1301,11 @@ def discover_decks_manager_via_backref(
     _log(f"OK: _deckDataProvider field offset = {ddp_field.offset:#x}")
 
     def _validate(candidate: int) -> bool:
-        ddp_ptr = _read_ptr(mem, candidate + ddp_field.offset)
-        if not (MIN_VALID_PTR < ddp_ptr < MAX_VALID_PTR):
+        try:
+            ddp_ptr = _read_ptr(mem, candidate + ddp_field.offset)
+            return MIN_VALID_PTR < ddp_ptr < MAX_VALID_PTR and _read_ptr(mem, ddp_ptr) == ddp_class
+        except Exception:
             return False
-        return _read_ptr(mem, ddp_ptr) == ddp_class
 
     dm_instance = _find_instance_by_klass_in_regions(mem, writable_regions, dm_class, validate=_validate)
     if dm_instance is None:
@@ -1238,10 +1405,11 @@ def discover_wrapper_controller_via_backref(
     _log(f"OK: rank-wrapper field offset = {wc_rank_field.offset:#x}")
 
     def _validate(candidate: int) -> bool:
-        prsw_ptr = _read_ptr(mem, candidate + wc_rank_field.offset)
-        if not (MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR):
+        try:
+            prsw_ptr = _read_ptr(mem, candidate + wc_rank_field.offset)
+            return MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR and _read_ptr(mem, prsw_ptr) == prsw_class
+        except Exception:
             return False
-        return _read_ptr(mem, prsw_ptr) == prsw_class
 
     wc_instance = _find_instance_by_klass_in_regions(mem, writable_regions, wc_class, validate=_validate)
     if wc_instance is None:

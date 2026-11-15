@@ -916,7 +916,7 @@ class TestIl2CppOffsets:
         assert IL2CPP_OFFSETS["class_fields"] == 0x80
 
     def test_class_static_fields_offset(self):
-        assert IL2CPP_OFFSETS["class_static_fields"] == 0xA8
+        assert IL2CPP_OFFSETS["class_static_fields"] == 0xB8
 
     def test_field_info_size(self):
         assert IL2CPP_OFFSETS["field_info_size"] == 32
