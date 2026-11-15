@@ -7,7 +7,7 @@
  * JSON-Protokoll (siehe scanner/helper_client.py):
  *   {"action":"ping"}                                      → {"status":"ok"}
  *   {"action":"status"}                                    → {"status":"ok","pid":N,"version":"...","socket_path":"..."}
- *   {"action":"list_regions"}                              → {"status":"ok","regions":[{"address":..,"size":..},...],"truncated":false}
+ *   {"action":"list_regions"}                              → {"status":"ok","regions":[{"address":..,"size":..},...],"truncated":false,"map_valid":true,"gaps":[...]}
  *   {"action":"read_memory","address":123456,"size":4096}   → {"status":"ok","data":"<base64>","bytes_read":4096}
  *   {"action":"shutdown"}                                  → {"status":"ok"}
  *
@@ -43,13 +43,14 @@
 
 /* --- Constants --- */
 
-#define VERSION "1.1.0"
+#define VERSION "1.2.0"
 #define DEFAULT_SOCK_PATH "/var/run/mtga-helper.sock"
 #define MAX_CLIENTS 8
 #define BUF_SIZE 65536
 #define MAX_RESPONSE 1048576    /* 1 MB */
 #define READ_CHUNK (4 * 1024 * 1024)
 #define MAX_REGIONS 16384
+#define LARGE_GAP_THRESHOLD (1ULL << 30) /* 1 GiB */
 
 /* --- Globals --- */
 
@@ -331,29 +332,21 @@ typedef struct {
  * scanner found only 8–16 regions instead of ~80+ and never saw the
  * collection anchor patterns.
  *
- * We keep mach_vm_region_recurse (not mach_vm_region) because the submap
- * traversal logic is already debugged and correct. The only change from
- * the old get_writable_regions is the filter: VM_PROT_READ instead of
- * VM_PROT_WRITE + !is_shared. mach_vm_read_overwrite (which we use for
- * actual reads) can read read-only regions just fine.
+ * We deliberately remain at depth 0. Descending into a submap makes `depth`
+ * stateful: after a child map ends it is easy to continue at the wrong level
+ * and silently omit sibling maps. This was observed as a multi-GiB hole in
+ * the live MTGA map. A submap is therefore emitted as one coarse region and
+ * skipped with address += size. mach_vm_read_overwrite can read inside it.
  *
  * Fills regions[] up to max_regions. Returns count or -1 on error. */
 static int get_readable_regions(mach_port_t task, region_t *regions, int max_regions) {
     mach_vm_address_t address = 0;
     mach_vm_size_t size = 0;
-    natural_t depth = 0;
     int count = 0;
 
-    /* Guard gegen Endlosschleifen bei leeren Submaps: merke uns die
-     * letzte Submap (address+size+depth). Wenn mach_vm_region_recurse
-     * nach depth++ dieselbe Submap nochmal liefert, ist sie leer —
-     * dann überspringen wir sie (address += size; depth--). */
-    mach_vm_address_t last_submap_addr = 0;
-    mach_vm_size_t last_submap_size = 0;
-    natural_t last_submap_depth = 0;
-    int submap_retry = 0;
-
     while (count < max_regions) {
+        /* Reset on every call: enumerate only the top-level map. */
+        natural_t depth = 0;
         mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
         struct vm_region_submap_info_64 info;
         memset(&info, 0, sizeof(info));
@@ -364,39 +357,10 @@ static int get_readable_regions(mach_port_t task, region_t *regions, int max_reg
                                                    &info_count);
         if (kr != KERN_SUCCESS) break;
 
-        if (info.is_submap) {
-            /* Guard: wenn wir gerade depth++ für diese exakte Submap gemacht
-             * haben und sie wiederkehrt, ist sie leer → überspringen. */
-            if (submap_retry && address == last_submap_addr && size == last_submap_size) {
-                address += size;
-                depth = last_submap_depth;  /* zurück auf die Ebene vor der Submap */
-                submap_retry = 0;
-                continue;
-            }
-            /* In die Submap eintauchen: nur depth++ (nicht address += size!).
-             * mach_vm_region_recurse verwaltet depth als in/out-Parameter:
-             *   - depth++ → nächste Iteration liefert Regionen INNERHALB der
-             *     Submap (address wird auf die erste innere Region gesetzt)
-             *   - Wenn alle inneren Regionen enumeriert sind, fährt die
-             *     Enumeration automatisch nach der Submap fort.
-             *
-             * Der alte Bug: depth++ UND address += size übersprang die
-             * gesamte Submap → nur 12 statt ~80+ Regionen. */
-            last_submap_addr = address;
-            last_submap_size = size;
-            last_submap_depth = depth;
-            depth++;
-            submap_retry = 1;
-            continue;
-        }
-
-        submap_retry = 0;  /* non-submap region → reset guard */
-
-        /* Scan ALL readable regions (read-only, writable, shared, private).
-         * The collection data lives in read-only regions — filtering on
-         * VM_PROT_WRITE (the old behaviour) missed them entirely. */
+        /* A submap's aggregate protection may be VM_PROT_NONE even when it
+         * has readable children, so retain every non-empty top-level submap. */
         int readable = (info.protection & VM_PROT_READ) != 0;
-        if (readable && size > 0) {
+        if (size > 0 && (info.is_submap || readable)) {
             regions[count].address = address;
             regions[count].size = size;
             count++;
@@ -435,7 +399,7 @@ static char *handle_list_regions(void) {
         return strdup("{\"status\":\"ok\",\"regions\":["
                        "{\"address\":4294967296,\"size\":1048576},"
                        "{\"address\":4296015872,\"size\":2097152}"
-                       "],\"truncated\":false}");
+                       "],\"truncated\":false,\"map_valid\":true,\"gaps\":[]}");
     }
 
     /* Find MTGA process */
@@ -468,6 +432,30 @@ static char *handle_list_regions(void) {
      * the cap means the caller cannot safely treat this map as complete. */
     int truncated = n_regions == MAX_REGIONS;
 
+    /* Validate order/disjointness and report only actionable gaps. Small VM
+     * holes are normal; a gap above 1 GiB usually signals lost enumeration. */
+    int map_valid = 1;
+    int first_gap = 1;
+    sb_t gaps;
+    sb_init(&gaps, 256);
+    sb_append(&gaps, "[");
+    for (int i = 1; i < n_regions; i++) {
+        mach_vm_address_t previous_end = regions[i - 1].address + regions[i - 1].size;
+        if (previous_end < regions[i - 1].address || regions[i].address < previous_end) {
+            map_valid = 0;
+            continue;
+        }
+        mach_vm_size_t gap_size = regions[i].address - previous_end;
+        if (gap_size > LARGE_GAP_THRESHOLD) {
+            if (!first_gap) sb_append(&gaps, ",");
+            sb_appendf(&gaps, "{\"address\":%llu,\"size\":%llu}",
+                       (unsigned long long)previous_end,
+                       (unsigned long long)gap_size);
+            first_gap = 0;
+        }
+    }
+    sb_append(&gaps, "]");
+
     /* Build JSON response */
     sb_t resp;
     sb_init(&resp, 65536);
@@ -480,7 +468,9 @@ static char *handle_list_regions(void) {
                    (unsigned long long)regions[i].size);
     }
 
-    sb_appendf(&resp, "],\"truncated\":%s}", truncated ? "true" : "false");
+    sb_appendf(&resp, "],\"truncated\":%s,\"map_valid\":%s,\"gaps\":%s}",
+               truncated ? "true" : "false", map_valid ? "true" : "false", gaps.buf);
+    sb_free(&gaps);
     free(regions);
     return resp.buf;
 }

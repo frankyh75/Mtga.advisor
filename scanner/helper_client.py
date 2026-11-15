@@ -7,7 +7,7 @@ Socket-Kommunikation und das JSON-Protokoll.
 Protokoll (Low-Level):
   {"action": "ping"}                              → {"status": "ok"}
   {"action": "status"}                            → {"status": "ok", "pid": N, "version": "...", ...}
-  {"action": "list_regions"}                      → {"status": "ok", "regions": [{"address": ..., "size": ...}, ...]}
+  {"action": "list_regions"}                      → {"status": "ok", "regions": [{"address": ..., "size": ...}, ...], "gaps": [...]}
   {"action": "read_memory", "address": N, "size": N} → {"status": "ok", "data": "<base64>", "bytes_read": N}
   {"action": "shutdown"}                         → {"status": "ok"}
 
@@ -49,16 +49,25 @@ class HelperStatus:
 
 
 class RegionList(list[dict[str, int]]):
-    """Kompatible Regionsliste mit Vollständigkeitsstatus vom Helper.
+    """Kompatible Regionsliste mit Vollständigkeitsdiagnose vom Helper.
 
-    Das Listen-Interface bleibt für bestehende Aufrufer unverändert. Das
-    additive ``truncated``-Attribut zeigt jedoch, dass der Helper bei seinem
-    Regionslimit stoppen musste und ein Scan deshalb unvollständig wäre.
+    Das Listen-Interface bleibt für bestehende Aufrufer unverändert. Die
+    additiven Attribute ``truncated``, ``gaps`` und ``map_valid`` erlauben
+    aber Warnungen, ohne einen laufenden Scan abzubrechen.
     """
 
-    def __init__(self, regions: list[dict[str, int]], *, truncated: bool = False) -> None:
+    def __init__(
+        self,
+        regions: list[dict[str, int]],
+        *,
+        truncated: bool = False,
+        gaps: list[dict[str, int]] | None = None,
+        map_valid: bool = True,
+    ) -> None:
         super().__init__(regions)
         self.truncated = truncated
+        self.gaps = gaps or []
+        self.map_valid = map_valid
 
 
 class MemoryReadError(Exception):
@@ -163,7 +172,7 @@ def is_helper_available(sock_path: str = DEFAULT_SOCK_PATH) -> bool:
 # --- Low-Level Primitives ---
 
 def _parse_list_regions_response(resp: dict[str, Any]) -> RegionList:
-    """Validiert eine list_regions-Response samt additivem truncated-Flag."""
+    """Validiert eine list_regions-Response samt Diagnosefeldern."""
     if "error" in resp:
         raise HelperError(resp["error"])
     regions = resp.get("regions")
@@ -174,7 +183,20 @@ def _parse_list_regions_response(resp: dict[str, Any]) -> RegionList:
         raise HelperProtocolError(
             f"list_regions-Response enthält ungültiges 'truncated'-Flag: {resp}"
         )
-    return RegionList(regions, truncated=truncated)
+    gaps = resp.get("gaps", [])
+    if not isinstance(gaps, list) or not all(
+        isinstance(gap, dict)
+        and isinstance(gap.get("address"), int)
+        and isinstance(gap.get("size"), int)
+        and gap["address"] >= 0
+        and gap["size"] > 0
+        for gap in gaps
+    ):
+        raise HelperProtocolError(f"list_regions-Response enthält ungültige 'gaps': {resp}")
+    map_valid = resp.get("map_valid", True)
+    if not isinstance(map_valid, bool):
+        raise HelperProtocolError(f"list_regions-Response enthält ungültiges 'map_valid': {resp}")
+    return RegionList(regions, truncated=truncated, gaps=gaps, map_valid=map_valid)
 
 
 def _warn_truncated_regions() -> None:
@@ -183,6 +205,25 @@ def _warn_truncated_regions() -> None:
         RuntimeWarning,
         stacklevel=3,
     )
+
+
+def _warn_region_map_diagnostics(regions: RegionList) -> None:
+    """Warnt über eine verdächtige Karte, lässt den Scan aber weiterlaufen."""
+    if regions.gaps:
+        total_size = sum(gap["size"] for gap in regions.gaps)
+        warnings.warn(
+            "Helper list_regions meldet große Lücken in der Regionenkarte "
+            f"({len(regions.gaps)} Lücke(n), insgesamt {total_size} Bytes); der Scan läuft weiter.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    if not regions.map_valid:
+        warnings.warn(
+            "Helper list_regions meldet eine überlappende oder unsortierte Regionenkarte; "
+            "der Scan läuft weiter.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def request_list_regions(sock_path: str = DEFAULT_SOCK_PATH, *,
@@ -277,6 +318,7 @@ class HelperBackend:
         self._regions_truncated = regions.truncated
         if regions.truncated:
             _warn_truncated_regions()
+        _warn_region_map_diagnostics(regions)
         return [(r["address"], r["size"]) for r in regions]
 
     def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
@@ -284,6 +326,7 @@ class HelperBackend:
         self._regions_truncated = regions.truncated
         if regions.truncated:
             _warn_truncated_regions()
+        _warn_region_map_diagnostics(regions)
         return ([(r["address"], r["size"]) for r in regions], None)
 
     def regions_truncated(self) -> bool:
@@ -521,6 +564,7 @@ class PersistentHelperBackend:
         self._regions_truncated = regions.truncated
         if regions.truncated:
             _warn_truncated_regions()
+        _warn_region_map_diagnostics(regions)
         return [(r["address"], r["size"]) for r in regions]
 
     def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
@@ -529,6 +573,7 @@ class PersistentHelperBackend:
         self._regions_truncated = regions.truncated
         if regions.truncated:
             _warn_truncated_regions()
+        _warn_region_map_diagnostics(regions)
         return ([(r["address"], r["size"]) for r in regions], None)
 
     def regions_truncated(self) -> bool:
@@ -666,6 +711,7 @@ class PersistentRemoteMemoryAdapter:
         self._regions_truncated = regions.truncated
         if regions.truncated:
             _warn_truncated_regions()
+        _warn_region_map_diagnostics(regions)
         return [(r["address"], r["size"]) for r in regions]
 
     def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
@@ -679,6 +725,7 @@ class PersistentRemoteMemoryAdapter:
         self._regions_truncated = regions.truncated
         if regions.truncated:
             _warn_truncated_regions()
+        _warn_region_map_diagnostics(regions)
         return ([(r["address"], r["size"]) for r in regions], None)
 
     def regions_truncated(self) -> bool:

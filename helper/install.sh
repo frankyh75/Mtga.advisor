@@ -14,7 +14,6 @@
 #   5.  Socket-Verfügbarkeit prüfen
 #
 # Voraussetzungen:
-#   - make -C helper wurde erfolgreich ausgeführt (Binary existiert)
 #   - Skript wird mit sudo ausgeführt (root-Rechte für /Library)
 #
 # Usage:
@@ -40,7 +39,7 @@ DAEMON_LABEL="com.mtga.helper"
 SOCK_PATH="/var/run/mtga-helper.sock"
 HELPER_LOG="/var/log/mtga-helper.log"
 HELPER_ERR="/var/log/mtga-helper.err.log"
-HELPER_VERSION="1.1.0"
+HELPER_VERSION="1.2.0"
 
 # --- Farben ---
 RED='\033[0;31m'
@@ -59,6 +58,29 @@ check_root() {
         echo "  sudo $0"
         exit 1
     fi
+}
+
+# --- Build nur bei veraltetem/fehlendem Binary ---
+build_if_stale() {
+    local needs_build=false
+    if [[ ! -x "$BIN_SRC" || "$SCRIPT_DIR/main.c" -nt "$BIN_SRC" || "$SCRIPT_DIR/Makefile" -nt "$BIN_SRC" ]]; then
+        needs_build=true
+    fi
+
+    if ! $needs_build; then
+        info "Helper-Binary ist aktuell: $BIN_SRC"
+        return
+    fi
+
+    if [[ -z "${SUDO_USER:-}" || "$SUDO_USER" == "root" ]]; then
+        fail "Aktuelles Helper-Binary fehlt; sudo benötigt einen aufrufenden Benutzer für den Build."
+        echo "  Als normaler Benutzer ausführen: make -C $SCRIPT_DIR"
+        exit 1
+    fi
+
+    info "Baue aktuelles Helper-Binary als $SUDO_USER..."
+    sudo -u "$SUDO_USER" make -C "$SCRIPT_DIR"
+    pass "Helper-Binary gebaut: $BIN_SRC"
 }
 
 # --- Voraussetzungen prüfen ---
@@ -215,6 +237,7 @@ status() {
 
 # --- Installation ---
 install() {
+    build_if_stale
     check_prerequisites
 
     info "Installiere mtga-helper $HELPER_VERSION..."
