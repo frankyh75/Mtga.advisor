@@ -38,9 +38,10 @@ IL2CPP_OFFSETS: dict[str, int] = {
     "class_name": 0x10,
     "class_namespace": 0x18,
     "class_parent": 0x48,
+    "class_element_class": 0x40,
     "class_fields": 0x80,
     "class_field_count": 0x124,
-    "class_static_fields": 0xA8,
+    "class_static_fields": 0xB8,
     "class_methods": 0x88,
     "class_instance_size": 0xF8,
     "class_flags": 0xFC,
@@ -308,6 +309,8 @@ class FieldInfo:
     type_name: str
     offset: int
     is_static: bool = False
+    type_code: int = 0
+    is_thread_static: bool = False
 
 
 def find_class_by_name(
@@ -426,6 +429,145 @@ def _read_string_ascii_at(mem: MemoryReader, addr: int) -> str:
     if name_ptr > MIN_VALID_PTR:
         return _read_string_ascii(mem, name_ptr)
     return ""
+
+
+# Metadata-driven helpers for object fields and Dictionary<int, int> arrays.
+FIELD_ATTR_STATIC = 0x10
+FIELD_ATTR_LITERAL = 0x40
+
+
+def class_of(mem: MemoryReader, obj: int) -> int:
+    return _read_ptr(mem, obj) if obj >= MIN_VALID_PTR else 0
+
+
+def class_parent(mem: MemoryReader, klass: int) -> int:
+    return _read_ptr(mem, klass + IL2CPP_OFFSETS["class_parent"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_element_class(mem: MemoryReader, klass: int) -> int:
+    return _read_ptr(mem, klass + IL2CPP_OFFSETS["class_element_class"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_instance_size(mem: MemoryReader, klass: int) -> int:
+    return _read_u32(mem, klass + IL2CPP_OFFSETS["class_instance_size"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_static_storage(mem: MemoryReader, klass: int) -> int:
+    return _read_ptr(mem, klass + IL2CPP_OFFSETS["class_static_fields"]) if klass >= MIN_VALID_PTR else 0
+
+
+def class_fields_raw(mem: MemoryReader, klass: int) -> list[FieldInfo]:
+    """Read exactly this class's fields; parent mismatch terminates the list."""
+    if klass < MIN_VALID_PTR:
+        return []
+    fields_ptr = _read_ptr(mem, klass + IL2CPP_OFFSETS["class_fields"])
+    if fields_ptr < MIN_VALID_PTR:
+        return []
+    count = _read_u32(mem, klass + IL2CPP_OFFSETS["class_field_count"])
+    result: list[FieldInfo] = []
+    for index in range(min(count if 0 < count <= 200 else 200, 200)):
+        addr = fields_ptr + index * IL2CPP_OFFSETS["field_info_size"]
+        if _read_ptr(mem, addr + IL2CPP_OFFSETS["field_parent"]) != klass:
+            break
+        name = _read_string_ascii(mem, _read_ptr(mem, addr + IL2CPP_OFFSETS["field_name"]))
+        if not name:
+            break
+        type_ptr = _read_ptr(mem, addr + IL2CPP_OFFSETS["field_type"])
+        bits = _read_u32(mem, type_ptr + 8) if type_ptr >= MIN_VALID_PTR else 0
+        attrs, code = bits & 0xffff, (bits >> 16) & 0xff
+        if attrs & FIELD_ATTR_LITERAL:
+            continue
+        offset = _read_i32(mem, addr + IL2CPP_OFFSETS["field_offset"])
+        result.append(FieldInfo(name, "Unknown", offset, bool(attrs & FIELD_ATTR_STATIC), code, offset == -1))
+    return result
+
+
+def find_field_deep(mem: MemoryReader, klass: int, name: str) -> FieldInfo | None:
+    for _ in range(32):
+        if klass < MIN_VALID_PTR:
+            return None
+        found = next((item for item in class_fields_raw(mem, klass) if item.name == name), None)
+        if found is not None:
+            return found
+        klass = class_parent(mem, klass)
+    return None
+
+
+def read_ref_field(mem: MemoryReader, obj: int, name: str) -> tuple[int, FieldInfo] | None:
+    info = find_field_deep(mem, class_of(mem, obj), name)
+    if info is None or info.is_static or info.is_thread_static:
+        return None
+    return _read_ptr(mem, obj + info.offset), info
+
+
+def read_num_field(mem: MemoryReader, obj: int, name: str) -> tuple[int, FieldInfo] | None:
+    info = find_field_deep(mem, class_of(mem, obj), name)
+    if info is None or info.is_static or info.is_thread_static:
+        return None
+    return _read_i32(mem, obj + info.offset), info
+
+
+def array_element_size(mem: MemoryReader, array_class: int, elem_class: int) -> int:
+    size = class_instance_size(mem, elem_class) - 0x10
+    if 0 < size <= 0x10000:
+        return size
+    for offset in (0xf8, 0xfc, 0x100, 0x108, 0x110):
+        size = _read_u32(mem, array_class + offset)
+        if 0 < size <= 0x10000:
+            return size
+    return 8
+
+
+def array_info(mem: MemoryReader, array: int) -> tuple[int, int, int, int]:
+    array_class = class_of(mem, array)
+    elem_class = class_element_class(mem, array_class)
+    return (elem_class, array_element_size(mem, array_class, elem_class),
+            _read_i32(mem, array + IL2CPP_OFFSETS["array_length"]), array + IL2CPP_OFFSETS["array_elements"])
+
+
+def entry_layout(mem: MemoryReader, elem_class: int) -> dict[str, int]:
+    layout: dict[str, int] = {}
+    for name in ("hashCode", "key", "value"):
+        info = find_field_deep(mem, elem_class, name)
+        if info is None:
+            raise NavigationReadError(elem_class, 0, "entry layout", f"Feld fehlt: {name}")
+        layout[name] = info.offset - 0x10
+        if name != "hashCode":
+            layout[f"{name}_code"] = info.type_code
+    return layout
+
+
+def _decode_int(blob: bytes, offset: int, code: int) -> int:
+    formats = {4: ("<B", 1), 5: ("<B", 1), 6: ("<h", 2), 7: ("<H", 2), 8: ("<i", 4), 9: ("<I", 4), 10: ("<q", 8), 11: ("<Q", 8), 0x18: ("<i", 4), 0x19: ("<I", 4)}
+    fmt, width = formats.get(code, ("<i", 4))
+    if offset < 0 or offset + width > len(blob):
+        raise NavigationReadError(offset, width, "dictionary entry", "Wert ausserhalb des Entry-Layouts")
+    return int(struct.unpack_from(fmt, blob, offset)[0])
+
+
+def read_dict_int_int_bulk(mem: MemoryReader, dict_addr: int) -> tuple[dict[int, int], dict[str, int]]:
+    entries = _read_ptr(mem, dict_addr + IL2CPP_OFFSETS["dict_entries"])
+    if entries < MIN_VALID_PTR:
+        raise NavigationReadError(dict_addr, 8, "entries", "ungueltiger entries-Array-Zeiger")
+    elem_class, stride, length, data = array_info(mem, entries)
+    if length < 0 or stride <= 0:
+        raise NavigationReadError(entries, 4, "entries", "ungueltige Array-Metadaten")
+    layout = entry_layout(mem, elem_class)
+    count = max(0, min(_read_i32(mem, dict_addr + IL2CPP_OFFSETS["dict_count"]), length))
+    blob = _bulk_read(mem, data, count * stride)
+    cards: dict[int, int] = {}
+    free_slots = 0
+    for index in range(count):
+        base = index * stride
+        if _decode_int(blob, base + layout["hashCode"], 8) < 0:
+            free_slots += 1
+            continue
+        key = _decode_int(blob, base + layout["key"], layout["key_code"])
+        value = _decode_int(blob, base + layout["value"], layout["value_code"])
+        if key > 0:
+            cards[key] = value
+    layout.update(stride=stride, length=length, count=count, free_slots=free_slots)
+    return cards, layout
 
 
 # ---------------------------------------------------------------------------
