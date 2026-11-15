@@ -23,6 +23,7 @@ import subprocess
 import base64
 import binascii
 import struct
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -45,6 +46,19 @@ class HelperStatus:
     socket_path: str
     pid: int | None = None
     version: str | None = None
+
+
+class RegionList(list[dict[str, int]]):
+    """Kompatible Regionsliste mit Vollständigkeitsstatus vom Helper.
+
+    Das Listen-Interface bleibt für bestehende Aufrufer unverändert. Das
+    additive ``truncated``-Attribut zeigt jedoch, dass der Helper bei seinem
+    Regionslimit stoppen musste und ein Scan deshalb unvollständig wäre.
+    """
+
+    def __init__(self, regions: list[dict[str, int]], *, truncated: bool = False) -> None:
+        super().__init__(regions)
+        self.truncated = truncated
 
 
 class MemoryReadError(Exception):
@@ -148,22 +162,41 @@ def is_helper_available(sock_path: str = DEFAULT_SOCK_PATH) -> bool:
 
 # --- Low-Level Primitives ---
 
-def request_list_regions(sock_path: str = DEFAULT_SOCK_PATH, *,
-                         timeout: float = 60) -> list[dict[str, int]]:
-    """Listet beschreibbare Memory-Regionen des MTGA-Prozesses auf.
-
-    Returns:
-        Liste von {"address": int, "size": int} Dicts.
-    Raises:
-        HelperConnectionError, HelperProtocolError, HelperError.
-    """
-    resp = _send_request({"action": "list_regions"}, sock_path, timeout=timeout)
+def _parse_list_regions_response(resp: dict[str, Any]) -> RegionList:
+    """Validiert eine list_regions-Response samt additivem truncated-Flag."""
     if "error" in resp:
         raise HelperError(resp["error"])
     regions = resp.get("regions")
     if not isinstance(regions, list):
         raise HelperProtocolError(f"list_regions-Response fehlt 'regions'-Liste: {resp}")
-    return regions
+    truncated = resp.get("truncated", False)
+    if not isinstance(truncated, bool):
+        raise HelperProtocolError(
+            f"list_regions-Response enthält ungültiges 'truncated'-Flag: {resp}"
+        )
+    return RegionList(regions, truncated=truncated)
+
+
+def _warn_truncated_regions() -> None:
+    warnings.warn(
+        "Helper list_regions wurde abgeschnitten; der Memory-Scan ist unvollständig.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def request_list_regions(sock_path: str = DEFAULT_SOCK_PATH, *,
+                         timeout: float = 60) -> RegionList:
+    """Listet beschreibbare Memory-Regionen des MTGA-Prozesses auf.
+
+    Returns:
+        Liste von {"address": int, "size": int} Dicts. Die kompatible
+        Listen-Unterklasse hat zusätzlich das Bool-Attribut ``truncated``.
+    Raises:
+        HelperConnectionError, HelperProtocolError, HelperError.
+    """
+    resp = _send_request({"action": "list_regions"}, sock_path, timeout=timeout)
+    return _parse_list_regions_response(resp)
 
 
 def request_read_memory(sock_path: str = DEFAULT_SOCK_PATH, *,
@@ -227,6 +260,7 @@ class HelperBackend:
         self._sock_path = sock_path
         self.read_failures = 0
         self._on_error = on_error
+        self._regions_truncated = False
 
     def read_bytes(self, addr: int, size: int) -> bytes | None:
         try:
@@ -240,11 +274,21 @@ class HelperBackend:
 
     def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
         regions = request_list_regions(self._sock_path)
+        self._regions_truncated = regions.truncated
+        if regions.truncated:
+            _warn_truncated_regions()
         return [(r["address"], r["size"]) for r in regions]
 
     def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
         regions = request_list_regions(self._sock_path)
+        self._regions_truncated = regions.truncated
+        if regions.truncated:
+            _warn_truncated_regions()
         return ([(r["address"], r["size"]) for r in regions], None)
+
+    def regions_truncated(self) -> bool:
+        """True, wenn die zuletzt geholte Regionenkarte unvollständig war."""
+        return self._regions_truncated
 
 
 # --- RemoteMemoryAdapter (IL2CPP-kompatibel) ---
@@ -455,6 +499,7 @@ class PersistentHelperBackend:
 
     def __init__(self, conn: _PersistentConnection) -> None:
         self._conn = conn
+        self._regions_truncated = False
 
     def read_bytes(self, addr: int, size: int) -> bytes | None:
         try:
@@ -472,17 +517,23 @@ class PersistentHelperBackend:
 
     def iterate_writable_private_regions(self) -> list[tuple[int, int]]:
         resp = self._conn.request({"action": "list_regions"})
-        if "error" in resp:
-            raise HelperError(resp["error"])
-        regions = resp.get("regions", [])
+        regions = _parse_list_regions_response(resp)
+        self._regions_truncated = regions.truncated
+        if regions.truncated:
+            _warn_truncated_regions()
         return [(r["address"], r["size"]) for r in regions]
 
     def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
         resp = self._conn.request({"action": "list_regions"})
-        if "error" in resp:
-            raise HelperError(resp["error"])
-        regions = resp.get("regions", [])
+        regions = _parse_list_regions_response(resp)
+        self._regions_truncated = regions.truncated
+        if regions.truncated:
+            _warn_truncated_regions()
         return ([(r["address"], r["size"]) for r in regions], None)
+
+    def regions_truncated(self) -> bool:
+        """True, wenn die zuletzt geholte Regionenkarte unvollständig war."""
+        return self._regions_truncated
 
 
 def _find_mtga_pid() -> int | None:
@@ -532,6 +583,7 @@ class PersistentRemoteMemoryAdapter:
     def __init__(self, conn: _PersistentConnection) -> None:
         self._conn = conn
         self._pid: int | None = None
+        self._regions_truncated = False
 
     @property
     def pid(self) -> int:
@@ -610,9 +662,10 @@ class PersistentRemoteMemoryAdapter:
         aber für den RemoteMemoryAdapter (IL2CPP-Pfad).
         """
         resp = self._conn.request({"action": "list_regions"})
-        if "error" in resp:
-            raise HelperError(resp["error"])
-        regions = resp.get("regions", [])
+        regions = _parse_list_regions_response(resp)
+        self._regions_truncated = regions.truncated
+        if regions.truncated:
+            _warn_truncated_regions()
         return [(r["address"], r["size"]) for r in regions]
 
     def iterate_readable_regions(self) -> tuple[list[tuple[int, int]], int | None]:
@@ -622,10 +675,15 @@ class PersistentRemoteMemoryAdapter:
         aber für den RemoteMemoryAdapter (IL2CPP-Pfad).
         """
         resp = self._conn.request({"action": "list_regions"})
-        if "error" in resp:
-            raise HelperError(resp["error"])
-        regions = resp.get("regions", [])
+        regions = _parse_list_regions_response(resp)
+        self._regions_truncated = regions.truncated
+        if regions.truncated:
+            _warn_truncated_regions()
         return ([(r["address"], r["size"]) for r in regions], None)
+
+    def regions_truncated(self) -> bool:
+        """True, wenn die zuletzt geholte Regionenkarte unvollständig war."""
+        return self._regions_truncated
 
 
 def open_helper_connection(

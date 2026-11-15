@@ -297,12 +297,43 @@ def test_request_list_regions_success(mock_sock_path):
         assert result[0]["address"] == 4294967296
         assert result[0]["size"] == 1048576
         assert result[1]["address"] == 4296015872
+        assert result.truncated is False
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_request_list_regions_preserves_truncation_flag(mock_sock_path, truncated):
+    """Das additive Flag darf die etablierte Listen-API nicht brechen."""
+    regions_response = {
+        "status": "ok",
+        "regions": [{"address": 4294967296, "size": 1048576}],
+        "truncated": truncated,
+    }
+    with MockHelperServer(mock_sock_path, {"list_regions": regions_response}):
+        result = request_list_regions(mock_sock_path)
+    assert isinstance(result, list)
+    assert result == [{"address": 4294967296, "size": 1048576}]
+    assert result.truncated is truncated
 
 
 def test_request_list_regions_raises_helper_error(mock_sock_path):
     with MockHelperServer(mock_sock_path, {"list_regions": {"error": "MTGA not found"}}):
         with pytest.raises(HelperError, match="MTGA not found"):
             request_list_regions(mock_sock_path)
+
+
+def test_helper_backend_warns_and_exposes_truncated_regions(mock_sock_path):
+    regions_response = {
+        "status": "ok",
+        "regions": [{"address": 4294967296, "size": 1048576}],
+        "truncated": True,
+    }
+    with MockHelperServer(mock_sock_path, {"list_regions": regions_response}):
+        backend = HelperBackend(mock_sock_path)
+        with pytest.warns(RuntimeWarning, match="unvollständig"):
+            regions, error = backend.iterate_readable_regions()
+    assert regions == [(4294967296, 1048576)]
+    assert error is None
+    assert backend.regions_truncated() is True
 
 
 def test_request_list_regions_raises_protocol_error_when_no_regions(mock_sock_path):

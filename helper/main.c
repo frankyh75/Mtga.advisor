@@ -7,7 +7,7 @@
  * JSON-Protokoll (siehe scanner/helper_client.py):
  *   {"action":"ping"}                                      → {"status":"ok"}
  *   {"action":"status"}                                    → {"status":"ok","pid":N,"version":"...","socket_path":"..."}
- *   {"action":"list_regions"}                              → {"status":"ok","regions":[{"address":..,"size":..},...]}
+ *   {"action":"list_regions"}                              → {"status":"ok","regions":[{"address":..,"size":..},...],"truncated":false}
  *   {"action":"read_memory","address":123456,"size":4096}   → {"status":"ok","data":"<base64>","bytes_read":4096}
  *   {"action":"shutdown"}                                  → {"status":"ok"}
  *
@@ -43,13 +43,13 @@
 
 /* --- Constants --- */
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 #define DEFAULT_SOCK_PATH "/var/run/mtga-helper.sock"
 #define MAX_CLIENTS 8
 #define BUF_SIZE 65536
 #define MAX_RESPONSE 1048576    /* 1 MB */
 #define READ_CHUNK (4 * 1024 * 1024)
-#define MAX_REGIONS 4096
+#define MAX_REGIONS 16384
 
 /* --- Globals --- */
 
@@ -435,7 +435,7 @@ static char *handle_list_regions(void) {
         return strdup("{\"status\":\"ok\",\"regions\":["
                        "{\"address\":4294967296,\"size\":1048576},"
                        "{\"address\":4296015872,\"size\":2097152}"
-                       "]}");
+                       "],\"truncated\":false}");
     }
 
     /* Find MTGA process */
@@ -449,13 +449,24 @@ static char *handle_list_regions(void) {
         return build_error("task_for_pid failed (helper needs root)");
     }
 
-    region_t regions[MAX_REGIONS];
+    /* This buffer must remain on the heap: 16k regions can exceed a safe
+     * daemon stack budget. */
+    region_t *regions = calloc(MAX_REGIONS, sizeof(*regions));
+    if (!regions) {
+        mach_port_deallocate(mach_task_self(), task);
+        return build_error("Out of memory allocating region map");
+    }
     int n_regions = get_readable_regions(task, regions, MAX_REGIONS);
     mach_port_deallocate(mach_task_self(), task);
 
     if (n_regions <= 0) {
+        free(regions);
         return build_error("No readable memory regions found");
     }
+
+    /* get_readable_regions stops when max_regions is reached, so reaching
+     * the cap means the caller cannot safely treat this map as complete. */
+    int truncated = n_regions == MAX_REGIONS;
 
     /* Build JSON response */
     sb_t resp;
@@ -469,7 +480,8 @@ static char *handle_list_regions(void) {
                    (unsigned long long)regions[i].size);
     }
 
-    sb_append(&resp, "]}");
+    sb_appendf(&resp, "],\"truncated\":%s}", truncated ? "true" : "false");
+    free(regions);
     return resp.buf;
 }
 

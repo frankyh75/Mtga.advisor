@@ -40,6 +40,7 @@ DAEMON_LABEL="com.mtga.helper"
 SOCK_PATH="/var/run/mtga-helper.sock"
 HELPER_LOG="/var/log/mtga-helper.log"
 HELPER_ERR="/var/log/mtga-helper.err.log"
+HELPER_VERSION="1.1.0"
 
 # --- Farben ---
 RED='\033[0;31m'
@@ -138,7 +139,7 @@ uninstall() {
 
 # --- Status-Check ---
 status() {
-    info "Status-Check für $DAEMON_LABEL"
+    info "Status-Check für $DAEMON_LABEL (erwartete Helper-Version: $HELPER_VERSION)"
     echo ""
 
     local daemon_running=false
@@ -188,7 +189,9 @@ status() {
 
     # Binary im Ziel?
     if [[ -f "$BIN_DST" ]]; then
-        pass "Binary installiert: $BIN_DST"
+        local installed_version
+        installed_version="$("$BIN_DST" --version 2>/dev/null || echo "unbekannt")"
+        pass "Binary installiert: $BIN_DST ($installed_version)"
     else
         fail "Binary nicht installiert: $BIN_DST"
     fi
@@ -214,7 +217,7 @@ status() {
 install() {
     check_prerequisites
 
-    info "Installiere mtga-helper..."
+    info "Installiere mtga-helper $HELPER_VERSION..."
 
     # 1. PrivilegedHelperTools-Verzeichnis sicherstellen
     mkdir -p /Library/PrivilegedHelperTools
