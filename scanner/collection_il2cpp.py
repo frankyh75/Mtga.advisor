@@ -86,7 +86,12 @@ def read_collection(
         cards, layout = read_dict_int_int_bulk(reader, entries)
         result.cards = cards
         result.path[-1] += f" (Array, len={layout['length']}, stride={layout['stride']})"
-        result.path.append(f"  count={layout['count']}, gelesen={len(cards)}, freie Slots={layout['free_slots']}")
+        result.path.append(
+            f"  count={layout['count']}, gelesen={len(cards)}, freie Slots={layout['free_slots']}, "
+            f"uebersprungene Chunks={layout['skipped']}"
+        )
+        if layout["skipped"]:
+            result.warnings.append(f"{layout['skipped']} unlesbare Dictionary-Chunk(s) uebersprungen")
         if not cards:
             result.warnings.append("entries dekodiert, aber keine belegten Karten gefunden")
     except Exception as exc:  # Memory backends raise backend-specific read errors.

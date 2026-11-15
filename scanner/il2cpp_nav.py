@@ -394,21 +394,20 @@ def get_class_fields(mem: MemoryReader, class_addr: int) -> list[FieldInfo]:
         offset_raw = _read_exact(mem, field_addr + IL2CPP_OFFSETS["field_offset"], 4, "field offset")
         field_offset = struct.unpack_from("<I", offset_raw)[0]
 
-        # Read type info for static detection
-        type_ptr = _read_ptr(mem, field_addr + IL2CPP_OFFSETS["field_type"])
+        # Unity 6 may expose an Il2CppType whose type-data is unreadable.
+        # A bad type name must not discard the otherwise valid FieldInfo list.
         is_static = False
         type_name = "Unknown"
-        if type_ptr > MIN_VALID_PTR:
-            # TYPE_ATTRS is at type_ptr + 0x08.
-            type_attrs_raw = _read_exact(mem, type_ptr + 0x08, 4, "field type attributes")
-            type_attrs = struct.unpack_from("<I", type_attrs_raw)[0]
-            is_static = (type_attrs & 0x10) != 0
-
-            type_data = _read_ptr(mem, type_ptr)
-            if type_data > MIN_VALID_PTR:
-                tn = _read_string_ascii_at(mem, type_data)
-                if tn:
-                    type_name = tn
+        try:
+            type_ptr = _read_ptr(mem, field_addr + IL2CPP_OFFSETS["field_type"])
+            if type_ptr > MIN_VALID_PTR:
+                type_attrs = _read_u32(mem, type_ptr + 0x08)
+                is_static = (type_attrs & 0x10) != 0
+                type_data = _read_ptr(mem, type_ptr)
+                if type_data > MIN_VALID_PTR:
+                    type_name = _read_string_ascii_at(mem, type_data) or "Unknown"
+        except Exception:
+            type_name = "Unknown"
 
         fields.append(FieldInfo(
             name=field_name,
@@ -554,7 +553,7 @@ def read_dict_int_int_bulk(mem: MemoryReader, dict_addr: int) -> tuple[dict[int,
         raise NavigationReadError(entries, 4, "entries", "ungueltige Array-Metadaten")
     layout = entry_layout(mem, elem_class)
     count = max(0, min(_read_i32(mem, dict_addr + IL2CPP_OFFSETS["dict_count"]), length))
-    blob = _bulk_read(mem, data, count * stride)
+    blob, skipped = _bulk_read(mem, data, count * stride, return_skipped=True)
     cards: dict[int, int] = {}
     free_slots = 0
     for index in range(count):
@@ -566,7 +565,7 @@ def read_dict_int_int_bulk(mem: MemoryReader, dict_addr: int) -> tuple[dict[int,
         value = _decode_int(blob, base + layout["value"], layout["value_code"])
         if key > 0:
             cards[key] = value
-    layout.update(stride=stride, length=length, count=count, free_slots=free_slots)
+    layout.update(stride=stride, length=length, count=count, free_slots=free_slots, skipped=skipped)
     return cards, layout
 
 
@@ -652,15 +651,23 @@ def find_papa_instance(mem: MemoryReader, papa_class: int) -> int | None:
 
 
 
-def _bulk_read(mem: MemoryReader, base: int, size: int, chunk_size: int = 0x400000) -> bytes:
-    """Read a large region in bounded chunks (single huge reads can fail)."""
+def _bulk_read(
+    mem: MemoryReader, base: int, size: int, chunk_size: int = 0x400000, *, return_skipped: bool = False,
+) -> bytes | tuple[bytes, int]:
+    """Read bounded chunks; unreadable chunks are zeroed and reported on request."""
     buf = bytearray()
     offset = 0
+    skipped = 0
     while offset < size:
         n = min(chunk_size, size - offset)
-        buf.extend(_read_exact(mem, base + offset, n, "bulk navigation read"))
+        try:
+            buf.extend(_read_exact(mem, base + offset, n, "bulk navigation read"))
+        except Exception:
+            buf.extend(b"\x00" * n)
+            skipped += 1
         offset += n
-    return bytes(buf)
+    data = bytes(buf)
+    return (data, skipped) if return_skipped else data
 
 
 def _find_metadata_regions(pm: Any) -> list[tuple[int, int]]:
@@ -686,6 +693,23 @@ def _find_metadata_regions(pm: Any) -> list[tuple[int, int]]:
     # nicht die read-only mapped-file Region. Daher überspringen wir Pfad A
     # für Helper-Adapter und gehen direkt zu Pfad C (proc-basiert).
     is_helper_adapter = hasattr(pm, "iterate_writable_private_regions") and not hasattr(pm, "task")
+
+    # Unity 6 / foreign PID: region filenames are unavailable.  The metadata
+    # header's stable magic is the only reliable discriminator here.
+    if is_helper_adapter and hasattr(pm, "iterate_readable_regions"):
+        try:
+            regions, _ = pm.iterate_readable_regions()
+            magic_regions: list[tuple[int, int]] = []
+            for addr, size in regions:
+                try:
+                    if size >= 4 and _read_u32(pm, addr) == 0xFAB11BAF:
+                        magic_regions.append((addr, size))
+                except Exception:
+                    continue
+            if magic_regions:
+                return magic_regions
+        except Exception:
+            pass
 
     if not is_helper_adapter and hasattr(pm, "iterate_readable_regions"):
         regions, _ = pm.iterate_readable_regions()
@@ -1277,10 +1301,11 @@ def discover_decks_manager_via_backref(
     _log(f"OK: _deckDataProvider field offset = {ddp_field.offset:#x}")
 
     def _validate(candidate: int) -> bool:
-        ddp_ptr = _read_ptr(mem, candidate + ddp_field.offset)
-        if not (MIN_VALID_PTR < ddp_ptr < MAX_VALID_PTR):
+        try:
+            ddp_ptr = _read_ptr(mem, candidate + ddp_field.offset)
+            return MIN_VALID_PTR < ddp_ptr < MAX_VALID_PTR and _read_ptr(mem, ddp_ptr) == ddp_class
+        except Exception:
             return False
-        return _read_ptr(mem, ddp_ptr) == ddp_class
 
     dm_instance = _find_instance_by_klass_in_regions(mem, writable_regions, dm_class, validate=_validate)
     if dm_instance is None:
@@ -1380,10 +1405,11 @@ def discover_wrapper_controller_via_backref(
     _log(f"OK: rank-wrapper field offset = {wc_rank_field.offset:#x}")
 
     def _validate(candidate: int) -> bool:
-        prsw_ptr = _read_ptr(mem, candidate + wc_rank_field.offset)
-        if not (MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR):
+        try:
+            prsw_ptr = _read_ptr(mem, candidate + wc_rank_field.offset)
+            return MIN_VALID_PTR < prsw_ptr < MAX_VALID_PTR and _read_ptr(mem, prsw_ptr) == prsw_class
+        except Exception:
             return False
-        return _read_ptr(mem, prsw_ptr) == prsw_class
 
     wc_instance = _find_instance_by_klass_in_regions(mem, writable_regions, wc_class, validate=_validate)
     if wc_instance is None:
