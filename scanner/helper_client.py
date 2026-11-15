@@ -7,6 +7,7 @@ Socket-Kommunikation und das JSON-Protokoll.
 Protokoll (Low-Level):
   {"action": "ping"}                              → {"status": "ok"}
   {"action": "status"}                            → {"status": "ok", "pid": N, "version": "...", ...}
+  {"action": "target"}                            → {"status": "ok", "pid": N, "path": "..."}
   {"action": "list_regions"}                      → {"status": "ok", "regions": [{"address": ..., "size": ...}, ...], "gaps": [...]}
   {"action": "read_memory", "address": N, "size": N} → {"status": "ok", "data": "<base64>", "bytes_read": N}
   {"action": "shutdown"}                         → {"status": "ok"}
@@ -167,6 +168,22 @@ def get_status(sock_path: str = DEFAULT_SOCK_PATH) -> HelperStatus:
 def is_helper_available(sock_path: str = DEFAULT_SOCK_PATH) -> bool:
     """Prüft, ob der Helper-Daemon läuft und erreichbar ist."""
     return ping(sock_path)
+
+
+def request_target(sock_path: str = DEFAULT_SOCK_PATH) -> dict[str, Any]:
+    """Löst das aktuelle MTGA-Ziel auf, ohne den Prozess zu attachen.
+
+    Der Rückgabewert enthält genau ``pid`` und ``path`` und kann vor einem
+    Scan gegen ``pgrep -f 'MacOS/MTGA'`` geprüft werden.
+    """
+    resp = _send_request({"action": "target"}, sock_path, timeout=CONNECT_TIMEOUT)
+    if "error" in resp:
+        raise HelperError(resp["error"])
+    pid = resp.get("pid")
+    path = resp.get("path")
+    if not isinstance(pid, int) or pid <= 0 or not isinstance(path, str) or not path:
+        raise HelperProtocolError(f"target-Response enthält keine gültige pid/path: {resp}")
+    return {"pid": pid, "path": path}
 
 
 # --- Low-Level Primitives ---
