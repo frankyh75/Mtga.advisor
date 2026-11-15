@@ -44,6 +44,66 @@ bei **0xB8**; `0xA8` ist `implementedInterfaces`. Ein Read dort liefert einen pl
 danach stumm Müll — exakt unser bisheriges Fehlerbild (plausible Zahlen, kein Treffer). Wird in
 Aufgabe T1 korrigiert, auch wenn der Collection-Pfad ohne statische Felder auskommt.
 
+## 2b. Live-Befunde 2026-11-15 (verifiziert am laufenden Client 2026.65.0 / Unity 6000.3.14f1)
+
+Alle Punkte unten sind **gemessen**, nicht abgeleitet. Sie korrigieren mehrere Annahmen aus §2 und §3.
+
+**Adapter (kritisch, stille Fehlerquelle).** `RemoteMemoryAdapter` hat **keine** Regionen-Enumeration
+(`iterate_writable_private_regions` fehlt) → `discover_wrapper_controller_via_backref()` gibt **still
+`None`** zurück, ohne Fehler. Für Live-Reads zwingend
+`PersistentRemoteMemoryAdapter(_PersistentConnection(DEFAULT_SOCK_PATH))` aus `scanner/helper_client.py`.
+Zusätzlich meldet der Helper im Status seine **eigene** Daemon-PID (`getpid()`), nicht die Ziel-PID —
+PIDs aus dem Status sind für Adressierung unbrauchbar, die Ziel-PID kommt aus dem Adapter.
+
+**Metadata-Auffindung.** `proc_regionfilename()` liefert für uid 502 bei fremdem PID **nichts**
+(rc ≤ 0 für alle getesteten Adressen). Regionen kommen ohne Dateinamen. `global-metadata.dat` ist
+ausschließlich über die Magic **`0xFAB11BAF`** am Regionenanfang auffindbar (live: 1 Treffer,
+0x11821C000, 33,3 MB). Der Metadata-Scan läuft über `iterate_readable_regions()`, nicht über
+writable-private.
+
+**Klassenfelder-Layout (live bestätigt).** `class_fields = 0x80`, `field_count = 0x124`,
+`Il2CppClass.parent = 0x48` (Parent der WrapperController-Klasse zeigt auf sich selbst → Wurzel).
+`FieldInfo`-Stride **0x20**, `name@0x00`, `type@0x08`, `offset@0x18`, `token@0x1C`.
+Live-Beispiel: WrapperController-Klasse `0x11CA8C2E0`, erstes Feld `COMMON_WILDCARD_GRPID`.
+`<InventoryManager>k__BackingField` liegt in WrapperController bei **+0x30**.
+Die Klassenadresse ist **sitzungsinstabil** (nach Client-Neustart neu suchen).
+
+**`get_class_fields` ist auf diesem Client defekt (Unity-6-Layout).** Die Auflösung des Typ-Namens
+(`Il2CppType.type_data`) wirft eine Exception und **bricht die gesamte Feldliste ab** → live kamen
+**0 Felder** zurück, obwohl Klasse und Feldliste intakt sind. Pflicht-Fix in T1: Feldliste **ohne**
+Typ-Namen-Auflösung lesen, Typ-Namen pro Feld in eigenem `try/except` (dann `None`), Feldliste darf
+dadurch niemals leer werden. `type_code` ist ebenfalls nur best-effort.
+
+**`_bulk_read` bricht bei teilweise unlesbaren Regionen komplett ab.** Eine Region, die nur
+anfangs lesbar ist, killt den ganzen Lauf (`MemoryReadError`/`NavigationReadError`). Pflicht-Fix:
+chunkweise lesen, unlesbare Chunks **überspringen** und zählen, Rest zurückgeben. Für Pointer-Nadeln
+ist das risikolos (Null-Füllung kann keine Pointer-Falschtreffer erzeugen), für strukturierte
+Dekodierung muss der Aufrufer den `skipped`-Zähler sehen.
+
+**Validierungs-Callbacks müssen exceptionssicher sein.** `_read_ptr` auf eine Fremd-/Randregion wirft;
+ein `validate()`-Callback ohne `try/except` reißt die komplette Instanzsuche ab (live passiert).
+
+**Helper deckelt die Regionenkarte (Blocker).** `get_readable_regions` liefert **genau 4096
+Regionen / 7,58 GiB** (höchste Adresse 0x311290000). 4096 ist `MAX_REGIONS` im Helper → die Karte ist
+**abgeschnitten**, alles darüber ist unsichtbar. Folge: die WrapperController-**Instanz** wurde über
+alle gelisteten writable-private-Regionen **nicht gefunden** (Scan über Klassen-Zeiger als Nadel,
+0 Treffer) — obwohl die Klasse selbst gefunden wird. Ohne Anhebung von `MAX_REGIONS` (Vorschlag
+16384 + `truncated`-Flag in der Antwort) ist die Instanzsuche nicht belastbar. Aufgabe **T0**.
+
+**Statische `<Instance>`-Referenz: negativ, aber nicht ausgeschlossen.** Das Feld existiert live
+(`<Instance>k__BackingField`, offset 0). Die Kandidaten-Offsets 0x90–0xC8 im Klass-Struct lieferten
+**keinen** Wert, dessen Ziel-Objekt die Klasse WrapperController trägt. `class+0x90` zeigt auf ein
+Array-artiges Konstrukt (Wiederholmuster 0x28 Byte: 4 Pointer + Token-Wort), **nicht** auf die Instanz.
+`static_fields = 0xB8` (§2) ist damit weiterhin unbestätigt — T1 soll es empirisch prüfen, darf aber
+**nicht** davon abhängen: die Instanzsuche muss über `MAX_REGIONS`-festen Heap-Scan laufen.
+
+**Anker für Live-Validierung (Ground Truth, verbindlich).** Deckliste mit 29 Zeilen / 67 Karten,
+u. a. `4 Cryptic Coat`, `4 Hide in Plain Sight`, `4 Soulherder`, `1 Emrakul, the Aeons Torn`,
+`3 Verdant Dread`, `1 Ulamog, the Defiler`. Mengen-Anker: **TVA (105645) = 1**, **We Say Thee Nay!
+(104977) = 3**. Externe Referenz: Untapped.gg 7.803 unique (14.11.2026); eigener Snapshot
+02.08.2026 7.874 unique / 16.280 copies. Ein Lauf, der die Anker nicht trifft, gilt als
+**fehlgeschlagen** — auch wenn er 10.000 plausible Zeilen liefert.
+
 ## 3. Algorithmus
 
 Referenz-Implementierung (nur lesen, **nicht kopieren** — GPL-3):
