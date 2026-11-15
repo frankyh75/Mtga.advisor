@@ -29,6 +29,7 @@ from scanner.memory_scanner import scan_collection_detailed as scan_memory_colle
 from scanner.memory_scanner import validate_collection
 from scanner.memory_scanner import write_collection_artifacts
 from scanner.deck_scanner import scan_decks, write_deck_artifacts, DeckScanResult
+from scanner.collection_il2cpp import CollectionIl2CppResult
 from scanner.history import (
     save_snapshot as save_history_snapshot,
     list_snapshots as list_history_snapshots,
@@ -316,6 +317,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ausgabeverzeichnis (Standard: ./out-memory).",
     )
     scan.add_argument("--debug", action="store_true", help="Gibt Scan-Statistiken pro Anker aus.")
+    scan.add_argument(
+        "--method",
+        choices=["anchor", "il2cpp", "auto"],
+        default="auto",
+        help="Collection-Methode: anchor, il2cpp oder auto (IL2CPP mit validiertem Anker-Fallback).",
+    )
+    scan.add_argument(
+        "--anchors",
+        nargs="*",
+        type=int,
+        help="Optionale Anker-grpIds; Mengen stammen aus gespeicherten/Standard-Ankern (sonst 1).",
+    )
     scan.add_argument(
         "--non-interactive",
         action="store_true",
@@ -1055,6 +1068,96 @@ def _run_scan_via_helper(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_anchors(args: argparse.Namespace) -> list[tuple[int, int, str]]:
+    """Resolve explicit grpIds against persisted/default anchor quantities."""
+    from scanner.memory_scanner import DEFAULT_ANCHORS, _anchor_file, _normalize_anchor
+
+    anchors: list[tuple[int, int, str]] = list(DEFAULT_ANCHORS)
+    default_by_id = {grp_id: (quantity, name) for grp_id, quantity, name in DEFAULT_ANCHORS}
+    try:
+        saved = json.loads(_anchor_file().read_text(encoding="utf-8"))
+        normalized = [value for value in (_normalize_anchor(value) for value in saved) if value is not None]
+        # Persisted extras are useful, but the live-spec anchors (notably
+        # TVA=1 and We Say Thee Nay!=3) may not be weakened by stale cache.
+        merged = {grp_id: (quantity, name) for grp_id, quantity, name in normalized}
+        merged.update(default_by_id)
+        anchors = [(grp_id, quantity, name) for grp_id, (quantity, name) in merged.items()]
+    except (OSError, ValueError, TypeError):
+        pass
+    requested = getattr(args, "anchors", None)
+    if not requested:
+        return anchors
+    known = {grp_id: (quantity, name) for grp_id, quantity, name in anchors}
+    return [(grp_id, *known.get(grp_id, (1, f"grpId {grp_id}"))) for grp_id in requested]
+
+
+def _validate_il2cpp_result(result: Any, anchors: list[tuple[int, int, str]]) -> dict[str, Any]:
+    """Apply the T2 fail-closed gates before any IL2CPP artifact is written."""
+    cards = result.cards
+    errors: list[str] = []
+    anchor_results: list[dict[str, Any]] = []
+    for grp_id, expected, name in anchors:
+        actual = cards.get(grp_id)
+        ok = actual is not None and actual >= expected
+        anchor_results.append({"arenaId": grp_id, "name": name, "expected": expected, "actual": actual, "ok": ok})
+        if not ok:
+            errors.append(f"anchor-failed:{grp_id} expected>={expected} actual={actual}")
+    if not 5_000 <= result.unique_cards <= 12_000:
+        errors.append(f"unique-cards-out-of-range:{result.unique_cards}")
+    if result.total_copies < result.unique_cards:
+        errors.append(f"total-less-than-unique:{result.total_copies}<{result.unique_cards}")
+    if any(not isinstance(grp_id, int) or not 1_000 <= grp_id <= 900_000 for grp_id in cards):
+        errors.append("grp-id-out-of-range")
+    if any(not isinstance(quantity, int) or quantity < 1 or quantity > 400 for quantity in cards.values()):
+        errors.append("invalid-quantity")
+    warnings = list(result.warnings)
+    if result.total_copies == result.playset_copies:
+        warnings.append("total_copies equals playset_copies; verify collection is not capped")
+    return {"valid": not errors, "errors": errors, "warnings": warnings,
+            "cardsCount": result.unique_cards, "totalCards": result.total_copies,
+            "playsetCopies": result.playset_copies, "anchors": anchor_results}
+
+
+def _run_il2cpp_collection_scan(args: argparse.Namespace) -> int:
+    """Read the collection exclusively through the Helper + Backref adapter."""
+    from scanner.collection_il2cpp import scan_collection_il2cpp
+    from scanner.helper_client import DEFAULT_SOCK_PATH, PersistentRemoteMemoryAdapter, open_helper_connection, ping
+    from scanner.memory_scanner import MemoryScanResult
+
+    if not ping(DEFAULT_SOCK_PATH):
+        _error("IL2CPP-Scan abgebrochen: Helper-Ping fehlgeschlagen.")
+        return 1
+    anchors = _scan_anchors(args)
+    try:
+        conn = open_helper_connection(DEFAULT_SOCK_PATH)
+    except Exception as exc:
+        _error(f"IL2CPP-Scan abgebrochen: Helper-Verbindung fehlgeschlagen: {exc}")
+        return 1
+    try:
+        result = scan_collection_il2cpp(PersistentRemoteMemoryAdapter(conn), debug=args.debug)
+    finally:
+        conn.close()
+    validation = _validate_il2cpp_result(result, anchors)
+    if not validation["valid"]:
+        _error("IL2CPP-Collection verworfen (fail-closed): " + "; ".join(validation["errors"]))
+        for warning in result.warnings:
+            print(f"⚠ {warning}", file=sys.stderr)
+        return 1
+    artifact_result = MemoryScanResult(
+        collection=result.cards, anchors=anchors,
+        anchor_matches={grp_id: result.cards.get(grp_id, 0) for grp_id, _, _ in anchors},
+        validation=validation,
+    )
+    collection_path, run_report_path = write_collection_artifacts(
+        result.cards, args.output, scan_result=artifact_result, method="il2cpp",
+        path=result.path, extra_warnings=result.warnings,
+    )
+    print(f"Collection exportiert: {collection_path}")
+    print(f"Run-Report: {run_report_path}")
+    print(f"IL2CPP: {result.unique_cards} unique, {result.total_copies} total, {result.playset_copies} playset ({result.elapsed_ms} ms)")
+    return 0
+
+
 def _run_scan_all(args: argparse.Namespace) -> int:
     """Kombinierter Scan: Collection + Decks + Ranks in einem Durchlauf.
 
@@ -1070,6 +1173,7 @@ def _run_scan_all(args: argparse.Namespace) -> int:
         scan_ranks=not args.no_ranks,
         read_account=not args.no_account,
         non_interactive=getattr(args, "non_interactive", False),
+        method=getattr(args, "method", "anchor"),
         print_fn=print,
     )
 
@@ -1079,10 +1183,28 @@ def _run_scan_all(args: argparse.Namespace) -> int:
 
     # Collection-Artefakte schreiben
     if result.collection is not None:
-        collection_path, run_report_path = write_collection_artifacts(
-            result.collection.collection, args.output, scan_result=result.collection
-        )
-        _print_read_coverage_warning(result.collection)
+        collection_result = result.collection
+        if getattr(args, "method", "anchor") == "il2cpp" and isinstance(collection_result, CollectionIl2CppResult):
+            anchors = _scan_anchors(args)
+            validation = _validate_il2cpp_result(collection_result, anchors)
+            if not validation["valid"]:
+                _error("IL2CPP-Collection verworfen (fail-closed): " + "; ".join(validation["errors"]))
+                return 1
+            from scanner.memory_scanner import MemoryScanResult
+            artifact_result = MemoryScanResult(
+                collection=collection_result.cards, anchors=anchors,
+                anchor_matches={grp_id: collection_result.cards.get(grp_id, 0) for grp_id, _, _ in anchors},
+                validation=validation,
+            )
+            collection_path, run_report_path = write_collection_artifacts(
+                collection_result.cards, args.output, scan_result=artifact_result, method="il2cpp",
+                path=collection_result.path, extra_warnings=collection_result.warnings,
+            )
+        else:
+            collection_path, run_report_path = write_collection_artifacts(
+                collection_result.collection, args.output, scan_result=collection_result
+            )
+        _print_read_coverage_warning(collection_result)
         print(f"\nCollection exportiert: {collection_path}")
         print(f"Run-Report: {run_report_path}")
     elif not args.no_collection:
@@ -1130,7 +1252,18 @@ def _run_scan(args: argparse.Namespace) -> int:
     if getattr(args, "all", False):
         return _run_scan_all(args)
 
-    # Auto-Detect: Helper → direkt (sudo-frei), sonst Fallback mit Warnung
+    method = getattr(args, "method", "anchor")
+    # Keep old calls without --method on the proven anchor path even though
+    # argparse advertises auto as the default for newly explicit invocations.
+    if method == "auto" and not getattr(args, "method_explicit", False):
+        method = "anchor"
+    if method in ("il2cpp", "auto"):
+        exit_code = _run_il2cpp_collection_scan(args)
+        if exit_code == 0 or method == "il2cpp":
+            return exit_code
+        print("⚠ IL2CPP-Scan fehlgeschlagen; wechsle auf Anker-Scan.", file=sys.stderr)
+
+    # Anchor path: Helper → direkt (sudo-frei), sonst Fallback mit Warnung
     if _is_helper_available():
         return _run_scan_via_helper(args)
 
@@ -1925,7 +2058,11 @@ def _run_watch(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(raw_argv)
+    # The distinction preserves legacy ``scan`` behaviour while allowing the
+    # documented ``--method auto`` opt-in.
+    args.method_explicit = "--method" in raw_argv
 
     if args.command == "collection":
         return _run_collection(args)

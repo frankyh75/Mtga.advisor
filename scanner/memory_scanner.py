@@ -59,10 +59,11 @@ MIN_KNOWN_RATIO = 0.30            # Quality-Guard: <30% bekannte IDs = nicht rea
 # will, lässt sich die Datei einmal interaktiv schreiben. Dieses Set ist nur
 # der Fallback, damit der Scan NIE nach Ankern fragt.
 DEFAULT_ANCHORS: tuple[tuple[int, int, str], ...] = (
-    (105645, 1, "Quantum Reduction"),
+    # Live ground-truth anchors from the 2026-11-15 collection/deck validation.
+    (105645, 1, "TVA"),
     (105771, 1, "TVA Bureaucrat"),
     (105653, 1, "Virtual Assistant"),
-    (104977, 2, "We Say Thee Nay!"),
+    (104977, 3, "We Say Thee Nay!"),
     (104945, 1, "Echo, Perceptive Prodigy"),
 )
 
@@ -283,6 +284,9 @@ def write_collection_artifacts(
     *,
     scan_result: MemoryScanResult | None = None,
     known_ids: set[int] | None = None,
+    method: str | None = None,
+    path: Sequence[str] | None = None,
+    extra_warnings: Sequence[str] | None = None,
 ) -> tuple[Path, Path]:
     """Schreibt Memory-Scan-Ergebnisse im bestehenden Artefaktformat.
 
@@ -329,6 +333,15 @@ def write_collection_artifacts(
     started_at = _iso_now()
     validation = scan_result.validation if scan_result is not None else validate_collection(collection)
     warnings = list(validation.get("warnings", []))
+    if extra_warnings:
+        warnings.extend(str(warning) for warning in extra_warnings)
+    artifact_metadata = {
+        key: value for key, value in {
+            "method": method,
+            "path": list(path) if path is not None else None,
+            "warnings": warnings if method is not None else None,
+        }.items() if value is not None
+    }
 
     new_valid = validation.get("valid", False)
     new_count = len(collection)
@@ -449,6 +462,7 @@ def write_collection_artifacts(
             }
         if scan_payload is not None:
             run_report_payload["scan"] = scan_payload
+        run_report_payload.update(artifact_metadata)
         _write_json(run_report_path, run_report_payload)
         return collection_path, run_report_path
 
@@ -519,6 +533,8 @@ def write_collection_artifacts(
     }
     if scan_payload is not None:
         run_report_payload["scan"] = scan_payload
+    collection_payload.update(artifact_metadata)
+    run_report_payload.update(artifact_metadata)
 
     _write_json(collection_path, collection_payload)
     _write_json(run_report_path, run_report_payload)

@@ -135,6 +135,7 @@ def test_scan_command_exports_memory_scan_result(tmp_path: Path, monkeypatch: py
         ),
     )
 
+    monkeypatch.setattr(cli_module, "_is_helper_available", lambda: False)
     exit_code = main(["scan", "--output", str(tmp_path / "memory")])
 
     assert exit_code == 0
@@ -143,6 +144,35 @@ def test_scan_command_exports_memory_scan_result(tmp_path: Path, monkeypatch: py
     assert payload["cards"] == {"100": 4, "200": 1}
 
 
+def test_scan_method_selection_preserves_legacy_anchor_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cli.main as cli_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_run_il2cpp_collection_scan", lambda args: calls.append("il2cpp") or 1)
+    monkeypatch.setattr(cli_module, "_run_scan_via_helper", lambda args: calls.append("anchor") or 0)
+    monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
+
+    assert main(["scan", "--output", str(tmp_path / "default")]) == 0
+    assert calls == ["anchor"]
+    calls.clear()
+    assert main(["scan", "--method", "auto", "--output", str(tmp_path / "auto")]) == 0
+    assert calls == ["il2cpp", "anchor"]
+
+
+def test_il2cpp_validation_is_fail_closed_for_missing_anchor() -> None:
+    import cli.main as cli_module
+    from types import SimpleNamespace
+
+    result = SimpleNamespace(
+        cards={grp_id: 1 for grp_id in range(1_000, 6_000)},
+        unique_cards=5_000,
+        total_copies=5_000,
+        playset_copies=5_000,
+        warnings=[],
+    )
+    validation = cli_module._validate_il2cpp_result(result, [(105645, 2, "TVA")])
+    assert validation["valid"] is False
+    assert validation["errors"] == ["anchor-failed:105645 expected>=2 actual=None"]
 def test_deck_scan_auto_runs_pattern_on_il2cpp_warnings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
