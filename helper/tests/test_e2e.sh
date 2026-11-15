@@ -4,11 +4,11 @@
 #
 # Testablauf:
 #   1. Prüfe, ob das helper Binary existiert (make -C helper)
-#   2. Starte Helper im Hintergrund (--test-mode)
-#   3. Sende Ping-Kommando → erwarte {"status":"ok"}
-#   4. Sende list_regions → erwarte JSON-Response mit "regions"-Array
-#   5. Sende read_memory mit Mock-Adresse → erwarte "data"-Feld (Base64)
-#   6. Sende ungültiges Kommando → erwarte "error"-Feld
+#   2. Prüfe die reale Blatt-Regionenkarte des Helper-Prozesses ohne sudo
+#   3. Starte Helper im Hintergrund (--test-mode)
+#   4. Sende Ping-Kommando → erwarte {"status":"ok"}
+#   5. Sende list_regions → erwarte JSON-Response mit "regions"-Array
+#   6. Sende read_memory mit Mock-Adresse → erwarte "data"-Feld (Base64)
 #   7. Sende ungültiges Kommando → erwarte "error"-Feld
 #   8. Stoppe Helper, Cleanup Socket
 #
@@ -101,8 +101,24 @@ else
     pass "Helper Binary gefunden: $HELPER_BIN"
 fi
 
-# --- Test 2: Helper starten ---
-info "Test 2: Starte Helper..."
+# --- Test 2: Reale Regionenkarte des eigenen Prozesses ---
+# --dump-regions validiert im Binary zusätzlich, dass die Ausgabe die Region
+# von main() und mindestens eine Mach-O-Magic am Regionsanfang enthält.
+info "Test 2: Prüfe reale Blatt-Regionenkarte ohne sudo..."
+if DUMP_REGIONS=$("$HELPER_BIN" --dump-regions) && \
+   printf '%s\n' "$DUMP_REGIONS" | python3 -c "
+import sys
+rows = [line.split() for line in sys.stdin if line.strip()]
+assert rows
+assert all(len(row) == 3 and all(value.startswith('0x') for value in row) for row in rows)
+"; then
+    pass "--dump-regions lieferte $(printf '%s\n' "$DUMP_REGIONS" | wc -l | tr -d ' ') Blatt-Regionen; main()- und Mach-O-Check bestanden"
+else
+    fail "--dump-regions lieferte keine gültige Blatt-Regionenkarte"
+fi
+
+# --- Test 3: Helper starten ---
+info "Test 3: Starte Helper..."
 # Nutze Test-Socket-Pfad via Umgebungsvariable
 export MTGA_HELPER_SOCK="$SOCK_PATH"
 "$HELPER_BIN" --sock "$SOCK_PATH" --test-mode &
@@ -122,8 +138,8 @@ if [[ ! -S "$SOCK_PATH" ]]; then
 fi
 pass "Helper gestartet, Socket bereit: $SOCK_PATH"
 
-# --- Test 3: Ping ---
-info "Test 3: Sende Ping-Kommando..."
+# --- Test 4: Ping ---
+info "Test 4: Sende Ping-Kommando..."
 PING_RESP=$(sock_send "$SOCK_PATH" '{"action":"ping"}')
 if echo "$PING_RESP" | grep -q '"status":"ok"'; then
     pass "Ping-Antwort korrekt: $PING_RESP"
@@ -131,8 +147,8 @@ else
     fail "Ping-Antwort ungültig: '$PING_RESP'"
 fi
 
-# --- Test 4: list_regions (Mock-Modus) ---
-info "Test 4: Sende list_regions-Kommando..."
+# --- Test 5: list_regions (Mock-Modus) ---
+info "Test 5: Sende list_regions-Kommando..."
 REGIONS_RESP=$(sock_send "$SOCK_PATH" '{"action":"list_regions"}')
 if echo "$REGIONS_RESP" | grep -q '"regions"'; then
     pass "list_regions-Antwort enthält 'regions'-Feld"
@@ -145,8 +161,8 @@ else
     fail "list_regions-Antwort enthält kein 'regions'-Feld: '$REGIONS_RESP'"
 fi
 
-# --- Test 5: read_memory (Mock-Modus) ---
-info "Test 5: Sende read_memory-Kommando (Mock-Adresse 4294967296)..."
+# --- Test 6: read_memory (Mock-Modus) ---
+info "Test 6: Sende read_memory-Kommando (Mock-Adresse 4294967296)..."
 READ_RESP=$(sock_send "$SOCK_PATH" '{"action":"read_memory","address":4294967296,"size":64}')
 if echo "$READ_RESP" | grep -q '"data"'; then
     pass "read_memory-Antwort enthält 'data'-Feld"
@@ -167,8 +183,8 @@ else
     fail "read_memory-Antwort enthält kein 'data'-Feld: '$READ_RESP'"
 fi
 
-# --- Test 6: Ungültiges Kommando ---
-info "Test 6: Sende ungültiges Kommando..."
+# --- Test 7: Ungültiges Kommando ---
+info "Test 7: Sende ungültiges Kommando..."
 ERR_RESP=$(sock_send "$SOCK_PATH" '{"action":"unknown"}')
 if echo "$ERR_RESP" | grep -q '"error"'; then
     pass "Ungültiges Kommando liefert Fehler-Antwort"
@@ -176,11 +192,11 @@ else
     fail "Ungültiges Kommando liefert keine Fehler-Antwort: '$ERR_RESP'"
 fi
 
-# --- Test 7: Ergebnis ---
+# --- Test 8: Ergebnis ---
 echo ""
 if [[ $FAILED -eq 0 ]]; then
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}Alle Tests bestanden (6/6)${NC}"
+    echo -e "${GREEN}Alle Tests bestanden (7/7)${NC}"
     echo -e "${GREEN}========================================${NC}"
     exit 0
 else

@@ -12,10 +12,13 @@
  *   {"action":"shutdown"}                                  → {"status":"ok"}
  *
  * CLI:
- *   mtga-helper [--sock PATH] [--test-mode] [--version]
+ *   mtga-helper [--sock PATH] [--test-mode] [--dump-regions [--pid PID]] [--version]
  *
  * --sock PATH    UNIX-Socket-Pfad (Default: /var/run/mtga-helper.sock)
  * --test-mode    Mock-Modus: list_regions/read_memory liefern Dummy-Daten
+ * --dump-regions Regionenkarte eines Prozesses als "address size protection"
+ *                auf stdout ausgeben (ohne --pid: dieser Helper-Prozess)
+ * --pid PID      Zielprozess fuer --dump-regions
  * --version      Version ausgeben und beenden
  *
  * Kompilieren: make -C helper
@@ -40,10 +43,11 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <libkern/OSByteOrder.h>
+#include <stdint.h>
 
 /* --- Constants --- */
 
-#define VERSION "1.2.0"
+#define VERSION "1.3.0"
 #define DEFAULT_SOCK_PATH "/var/run/mtga-helper.sock"
 #define MAX_CLIENTS 8
 #define BUF_SIZE 65536
@@ -58,6 +62,8 @@ static char g_sock_path[256] = DEFAULT_SOCK_PATH;
 static int g_test_mode = 0;
 static int server_fd = -1;
 static volatile sig_atomic_t running = 1;
+
+int main(int argc, char *argv[]);
 
 /* --- JSON helpers --- */
 
@@ -321,6 +327,7 @@ static void *read_memory(mach_port_t task, mach_vm_address_t addr,
 typedef struct {
     mach_vm_address_t address;
     mach_vm_size_t size;
+    vm_prot_t protection;
 } region_t;
 
 /* Iterate ALL readable regions of a task (not just writable+private).
@@ -332,11 +339,10 @@ typedef struct {
  * scanner found only 8–16 regions instead of ~80+ and never saw the
  * collection anchor patterns.
  *
- * We deliberately remain at depth 0. Descending into a submap makes `depth`
- * stateful: after a child map ends it is easy to continue at the wrong level
- * and silently omit sibling maps. This was observed as a multi-GiB hole in
- * the live MTGA map. A submap is therefore emitted as one coarse region and
- * skipped with address += size. mach_vm_read_overwrite can read inside it.
+ * mach_vm_region resolves submaps to their leaf mappings. This is essential:
+ * MTGA's GameAssembly/UnityPlayer mappings live in nested submaps, whose
+ * aggregate protection can be VM_PROT_NONE. Enumerating only depth-zero
+ * regions therefore drops the complete lower app-dylib band.
  *
  * Fills regions[] up to max_regions. Returns count or -1 on error. */
 static int get_readable_regions(mach_port_t task, region_t *regions, int max_regions) {
@@ -345,29 +351,85 @@ static int get_readable_regions(mach_port_t task, region_t *regions, int max_reg
     int count = 0;
 
     while (count < max_regions) {
-        /* Reset on every call: enumerate only the top-level map. */
-        natural_t depth = 0;
-        mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
-        struct vm_region_submap_info_64 info;
+        mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+        struct vm_region_basic_info_64 info;
+        mach_port_t object_name = MACH_PORT_NULL;
         memset(&info, 0, sizeof(info));
 
-        kern_return_t kr = mach_vm_region_recurse(task, &address, &size,
-                                                   &depth,
-                                                   (vm_region_recurse_info_t)&info,
-                                                   &info_count);
+        kern_return_t kr = mach_vm_region(task, &address, &size,
+                                          VM_REGION_BASIC_INFO_64,
+                                          (vm_region_info_t)&info,
+                                          &info_count, &object_name);
+        if (object_name != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), object_name);
+        }
         if (kr != KERN_SUCCESS) break;
 
-        /* A submap's aggregate protection may be VM_PROT_NONE even when it
-         * has readable children, so retain every non-empty top-level submap. */
-        int readable = (info.protection & VM_PROT_READ) != 0;
-        if (size > 0 && (info.is_submap || readable)) {
+        if (size == 0 || address + size < address) break;
+        if ((info.protection & VM_PROT_READ) != 0) {
             regions[count].address = address;
             regions[count].size = size;
+            regions[count].protection = info.protection;
             count++;
         }
         address += size;
     }
     return count;
+}
+
+/* Print the actual leaf map for diagnostics.  With no PID the helper maps
+ * itself, which gives helper/tests/test_e2e.sh a sudo-free regression test. */
+static int dump_regions(pid_t pid) {
+    int own_task = (pid == 0 || pid == getpid());
+    mach_port_t task = own_task ? mach_task_self() : attach_to_process(pid);
+    if (task == MACH_PORT_NULL) return 1;
+
+    region_t *regions = calloc(MAX_REGIONS, sizeof(*regions));
+    if (!regions) {
+        if (!own_task) mach_port_deallocate(mach_task_self(), task);
+        fprintf(stderr, "mtga-helper: out of memory allocating region map\n");
+        return 1;
+    }
+    int n_regions = get_readable_regions(task, regions, MAX_REGIONS);
+    if (!own_task) mach_port_deallocate(mach_task_self(), task);
+    if (n_regions <= 0) {
+        free(regions);
+        fprintf(stderr, "mtga-helper: no readable memory regions found\n");
+        return 1;
+    }
+
+    int contains_main = !own_task;
+    int has_macho_magic = !own_task;
+    mach_vm_address_t main_address = (mach_vm_address_t)(uintptr_t)&main;
+    for (int i = 0; i < n_regions; i++) {
+        printf("0x%016llx 0x%016llx 0x%x\n",
+               (unsigned long long)regions[i].address,
+               (unsigned long long)regions[i].size,
+               regions[i].protection);
+        if (own_task && main_address >= regions[i].address &&
+            main_address - regions[i].address < regions[i].size) {
+            contains_main = 1;
+        }
+        if (own_task && regions[i].size >= sizeof(uint32_t)) {
+            mach_vm_size_t bytes_read = 0;
+            uint32_t *magic = read_memory(task, regions[i].address,
+                                          sizeof(*magic), &bytes_read);
+            if (magic) {
+                if (bytes_read == sizeof(*magic) && *magic == 0xfeedfacfU) {
+                    has_macho_magic = 1;
+                }
+                free(magic);
+            }
+        }
+    }
+    free(regions);
+
+    if (!contains_main || !has_macho_magic) {
+        fprintf(stderr, "mtga-helper: self-map check failed (main=%d macho=%d)\n",
+                contains_main, has_macho_magic);
+        return 1;
+    }
+    return 0;
 }
 
 /* --- Action handlers --- */
@@ -447,6 +509,7 @@ static char *handle_list_regions(void) {
         }
         mach_vm_size_t gap_size = regions[i].address - previous_end;
         if (gap_size > LARGE_GAP_THRESHOLD) {
+            map_valid = 0;
             if (!first_gap) sb_append(&gaps, ",");
             sb_appendf(&gaps, "{\"address\":%llu,\"size\":%llu}",
                        (unsigned long long)previous_end,
@@ -455,6 +518,7 @@ static char *handle_list_regions(void) {
         }
     }
     sb_append(&gaps, "]");
+    if (truncated) map_valid = 0;
 
     /* Build JSON response */
     sb_t resp;
@@ -778,6 +842,8 @@ static void usage(const char *prog) {
         "Options:\n"
         "  --sock PATH     UNIX socket path (default: %s)\n"
         "  --test-mode     Mock mode: return dummy data, no task_for_pid\n"
+        "  --dump-regions  Print leaf regions as address size protection\n"
+        "  --pid PID       Target process for --dump-regions (default: self)\n"
         "  --version       Print version and exit\n"
         "  --help, -h      Show this help\n",
         prog, DEFAULT_SOCK_PATH);
@@ -787,13 +853,17 @@ int main(int argc, char *argv[]) {
     static struct option long_opts[] = {
         {"sock",      required_argument, 0, 's'},
         {"test-mode", no_argument,       0, 't'},
+        {"dump-regions", no_argument,    0, 'd'},
+        {"pid",       required_argument, 0, 'p'},
         {"version",   no_argument,       0, 'V'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
+    int dump_regions_mode = 0;
+    pid_t dump_pid = 0;
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:tVh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:tdp:Vh", long_opts, NULL)) != -1) {
         switch (opt) {
             case 's':
                 strncpy(g_sock_path, optarg, sizeof(g_sock_path) - 1);
@@ -802,6 +872,19 @@ int main(int argc, char *argv[]) {
             case 't':
                 g_test_mode = 1;
                 break;
+            case 'd':
+                dump_regions_mode = 1;
+                break;
+            case 'p': {
+                char *end = NULL;
+                long parsed_pid = strtol(optarg, &end, 10);
+                if (!end || *end != '\0' || parsed_pid <= 0 || parsed_pid > INT32_MAX) {
+                    fprintf(stderr, "mtga-helper: invalid PID: %s\n", optarg);
+                    return 1;
+                }
+                dump_pid = (pid_t)parsed_pid;
+                break;
+            }
             case 'V':
                 printf("mtga-helper %s\n", VERSION);
                 return 0;
@@ -813,6 +896,12 @@ int main(int argc, char *argv[]) {
                 return 1;
         }
     }
+
+    if (dump_pid != 0 && !dump_regions_mode) {
+        fprintf(stderr, "mtga-helper: --pid requires --dump-regions\n");
+        return 1;
+    }
+    if (dump_regions_mode) return dump_regions(dump_pid);
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, signal_handler);
