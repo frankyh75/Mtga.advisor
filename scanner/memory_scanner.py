@@ -644,6 +644,7 @@ def get_user_anchors(
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[..., None] = print,
     non_interactive: bool = False,
+    warnings: list[str] | None = None,
 ) -> list[tuple[int, int, str]]:
     """Interaktive Anker-Eingabe mit Auto-Save.
 
@@ -654,12 +655,23 @@ def get_user_anchors(
         name_to_id: Mapping von Kartenname (lower) → grpId
         non_interactive: Wenn True, werden gespeicherte Anker automatisch
             akzeptiert (kein stdin). Für Watch-Modus / Hintergrund-Scans.
+        warnings: Optionale Liste für Hinweise, die in das Scan-Ergebnis
+            übernommen werden.
 
     Returns:
         Liste von (grpId, quantity, name)-Tupeln
     """
     import difflib
     import json
+
+    # Ein nicht-interaktiver Aufruf darf niemals versuchen, stdin zu lesen.
+    # Das gilt auch ohne --non-interactive, etwa für CI, LaunchAgents oder
+    # pytest mit aktivem Capture. Der Scan verwendet dann wie beim expliziten
+    # nicht-interaktiven Modus gespeicherte bzw. Standard-Anker.
+    stdin_is_tty = sys.stdin.isatty()
+    can_prompt = not non_interactive and stdin_is_tty
+    if not stdin_is_tty and warnings is not None:
+        warnings.append("anchor input skipped: no tty")
 
     # Gespeicherte Anker laden
     anchor_file = _anchor_file()
@@ -677,7 +689,7 @@ def get_user_anchors(
                     print_fn("\n📌 [Gespeicherte Anker gefunden]")
                     for i, (_, qty, name) in enumerate(saved, 1):
                         print_fn(f"   {i}. {name} (x{qty})")
-                    if non_interactive:
+                    if not can_prompt:
                         print_fn("   (nicht-interaktiv: gespeicherte Anker verwendet)")
                         return saved
                     choice = input_fn("   Diese verwenden? [Y/n]: ").strip().lower()
@@ -688,7 +700,7 @@ def get_user_anchors(
 
     # Nicht-interaktiv und keine (brauchbare) Datei: Standard-Anker nehmen.
     # Wichtig für Skripte/Launcher — der Scan darf NIE nach Karten fragen.
-    if non_interactive:
+    if not can_prompt:
         print_fn("\n📌 [Standard-Anker] (nicht-interaktiv, keine gespeicherten Anker)")
         for i, (_, qty, name) in enumerate(DEFAULT_ANCHORS, 1):
             print_fn(f"   {i}. {name} (x{qty})")
@@ -1064,11 +1076,13 @@ def scan_collection_detailed(
     known_ids: set[int] = set(db.keys())
 
     name_to_id = {v["name"].lower(): k for k, v in db.items()}
+    anchor_warnings: list[str] = []
     anchors = get_user_anchors(
         name_to_id,
         input_fn=input_fn,
         print_fn=print_fn,
         non_interactive=non_interactive,
+        warnings=anchor_warnings,
     )
     if not anchors:
         print_fn("❌ Keine Anker-Karten angegeben.")
@@ -1182,7 +1196,9 @@ def scan_collection_detailed(
         print_fn("❌ Keine validen Datenblöcke gefunden.")
         if read_coverage["windows_total"]:
             validation = validate_collection({}, db=db, anchors=anchors)
-            validation["warnings"] = sorted(set(validation["warnings"] + coverage_warnings))
+            validation["warnings"] = sorted(
+                set(validation["warnings"] + coverage_warnings + anchor_warnings)
+            )
             return MemoryScanResult(
                 collection={}, anchors=list(anchors), anchor_matches=anchor_matches,
                 validation=validation, scan_stats=aggregate_stats, read_coverage=read_coverage,
@@ -1227,7 +1243,9 @@ def scan_collection_detailed(
         print_fn("   ⚠ Block-Validierung fehlgeschlagen (known_ratio/dupes/total)")
 
     validation = validate_collection(collection, db=db, anchors=anchors)
-    validation["warnings"] = sorted(set(validation["warnings"] + coverage_warnings))
+    validation["warnings"] = sorted(
+        set(validation["warnings"] + coverage_warnings + anchor_warnings)
+    )
     if validation["valid"]:
         print_fn(f"\n✅ {len(collection)} unique Einträge gefunden!")
     else:

@@ -37,15 +37,14 @@ def _make_result(cards: dict[int, int]) -> object:
 def test_scan_command_uses_helper_when_available(tmp_path, monkeypatch):
     """Wenn der Helper verfügbar ist, wird der Scan über den Helper ausgeführt."""
     import cli.main as cli_module
-    import scanner.memory_scanner as ms_mod
 
     # Helper als verfügbar mocken
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
 
-    # scan_collection_detailed mocken (wird von _run_scan_via_helper aufgerufen)
+    # Einheitlichen CLI-Scanner-Einstieg mocken (auch für den Helper-Pfad).
     monkeypatch.setattr(
-        ms_mod,
-        "scan_collection_detailed",
+        cli_module,
+        "scan_memory_collection_detailed",
         lambda **kwargs: _make_result({100: 4, 200: 1}),
     )
 
@@ -97,14 +96,13 @@ def test_scan_command_warns_when_helper_unavailable(tmp_path, monkeypatch, capsy
 def test_run_command_uses_helper_on_macos(tmp_path, monkeypatch):
     """Der 'run' Befehl nutzt auf macOS den Helper, wenn verfügbar."""
     import cli.main as cli_module
-    import scanner.memory_scanner as ms_mod
 
     monkeypatch.setattr(cli_module, "detect_platform", lambda: "macos")
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
 
     monkeypatch.setattr(
-        ms_mod,
-        "scan_collection_detailed",
+        cli_module,
+        "scan_memory_collection_detailed",
         lambda **kwargs: _make_result({100: 4, 200: 1}),
     )
 
@@ -144,10 +142,9 @@ def test_scan_command_returns_error_when_helper_fails_and_direct_fails(tmp_path,
 def test_scan_command_returns_error_when_helper_available_but_scan_fails(tmp_path, monkeypatch):
     """Wenn Helper verfügbar aber Helper-Scan None liefert, exit code 1."""
     import cli.main as cli_module
-    import scanner.memory_scanner as ms_mod
 
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
-    monkeypatch.setattr(ms_mod, "scan_collection_detailed", lambda **kwargs: None)
+    monkeypatch.setattr(cli_module, "scan_memory_collection_detailed", lambda **kwargs: None)
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
     assert exit_code == 1
@@ -161,7 +158,6 @@ def test_scan_non_interactive_flag_reaches_scanner(tmp_path, monkeypatch):
     Ankern.
     """
     import cli.main as cli_module
-    import scanner.memory_scanner as ms_mod
 
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
 
@@ -171,7 +167,7 @@ def test_scan_non_interactive_flag_reaches_scanner(tmp_path, monkeypatch):
         captured.update(kwargs)
         return _make_result({100: 4})
 
-    monkeypatch.setattr(ms_mod, "scan_collection_detailed", fake_scan)
+    monkeypatch.setattr(cli_module, "scan_memory_collection_detailed", fake_scan)
 
     exit_code = main([
         "scan",
@@ -187,7 +183,6 @@ def test_scan_non_interactive_flag_reaches_scanner(tmp_path, monkeypatch):
 def test_scan_defaults_to_interactive_when_flag_absent(tmp_path, monkeypatch):
     """Ohne Flag bleibt der interaktive Weg — Verhalten unverändert."""
     import cli.main as cli_module
-    import scanner.memory_scanner as ms_mod
 
     monkeypatch.setattr(cli_module, "_is_helper_available", lambda: True)
 
@@ -197,7 +192,7 @@ def test_scan_defaults_to_interactive_when_flag_absent(tmp_path, monkeypatch):
         captured.update(kwargs)
         return _make_result({100: 4})
 
-    monkeypatch.setattr(ms_mod, "scan_collection_detailed", fake_scan)
+    monkeypatch.setattr(cli_module, "scan_memory_collection_detailed", fake_scan)
 
     exit_code = main(["scan", "--output", str(tmp_path / "out")])
 

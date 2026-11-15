@@ -1037,9 +1037,9 @@ def _run_deck_cards(args: argparse.Namespace) -> int:
 
 def _run_scan_via_helper(args: argparse.Namespace) -> int:
     """Führt den Memory-Scan über den Helper-Daemon aus (sudo-frei)."""
-    from scanner.memory_scanner import scan_collection_detailed
-
-    result = scan_collection_detailed(
+    # Das auf Modulebene importierte Alias wird auch vom direkten Fallback
+    # verwendet und hält den CLI-Scannerpfad einheitlich testbar.
+    result = scan_memory_collection_detailed(
         debug=args.debug,
         use_helper=True,
         non_interactive=getattr(args, "non_interactive", False),
