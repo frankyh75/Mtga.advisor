@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CombinedScanResult:
     """Ergebnis eines kombinierten Scans (Collection + Decks + Ranks)."""
-    collection: MemoryScanResult | None = None
+    collection: MemoryScanResult | Any | None = None
     decks: list[dict[str, Any]] = field(default_factory=list)
     deck_warnings: list[str] = field(default_factory=list)
     ranks: dict[str, Any] | None = None
@@ -54,6 +54,7 @@ def scan_all(
     scan_ranks: bool = True,
     read_account: bool = True,
     non_interactive: bool = False,
+    method: str = "anchor",
 ) -> CombinedScanResult:
     """Führt Collection-, Deck- und Rank-Scan in einem Durchlauf aus.
 
@@ -91,6 +92,7 @@ def scan_all(
             scan_ranks=scan_ranks,
             read_account=read_account,
             non_interactive=non_interactive,
+            method=method,
             result=result,
         )
 
@@ -103,6 +105,7 @@ def scan_all(
         scan_ranks=scan_ranks,
         read_account=read_account,
         non_interactive=non_interactive,
+        method=method,
         result=result,
     )
 
@@ -117,6 +120,7 @@ def _scan_all_via_helper(
     scan_ranks: bool,
     read_account: bool,
     non_interactive: bool,
+    method: str,
     result: CombinedScanResult,
 ) -> CombinedScanResult:
     """Kombinierter Scan über eine persistente Helper-Verbindung."""
@@ -134,17 +138,16 @@ def _scan_all_via_helper(
         # --- Collection-Scan ---
         if scan_collection:
             print_fn("\n📦 Collection-Scan...")
-            backend = PersistentHelperBackend(conn)
-            from .memory_scanner import scan_collection_detailed
-
-            coll_result = scan_collection_detailed(
-                use_helper=True,
-                sock_path=sock_path,
-                backend=backend,
-                debug=debug,
-                print_fn=print_fn,
-                non_interactive=non_interactive,
-            )
+            if method == "il2cpp":
+                from .collection_il2cpp import scan_collection_il2cpp
+                coll_result = scan_collection_il2cpp(PersistentRemoteMemoryAdapter(conn), debug=debug)
+            else:
+                backend = PersistentHelperBackend(conn)
+                from .memory_scanner import scan_collection_detailed
+                coll_result = scan_collection_detailed(
+                    use_helper=True, sock_path=sock_path, backend=backend, debug=debug,
+                    print_fn=print_fn, non_interactive=non_interactive,
+                )
             result.collection = coll_result
             if coll_result is None:
                 result.errors.append("Collection-Scan: keine Daten")
@@ -200,9 +203,12 @@ def _scan_all_direct(
     scan_ranks: bool,
     read_account: bool,
     non_interactive: bool = False,
-    result: CombinedScanResult,
+    method: str = "anchor",
+    result: CombinedScanResult | None = None,
 ) -> CombinedScanResult:
     """Kombinierter Scan über direkten Pymem-Zugriff (erfordert sudo)."""
+    if result is None:
+        result = CombinedScanResult()
     print_fn("⚠ Kombinierter direkter Scan (erfordert sudo)...")
 
     from .memory_scanner import _attach_process, scan_collection_detailed
