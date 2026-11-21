@@ -554,6 +554,9 @@ document.addEventListener("DOMContentLoaded", () => {
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
       const deckKey = button.dataset.deckKey || "";
+      // Steuer-Buttons (Import, Pagination) tragen die Klasse, haben aber
+      // keinen Deck-Bezug — sie dürfen den Chat nicht auslösen (T10).
+      if (!deckKey) return;
       const deckName = button.dataset.deckName || "Unnamed";
       openChatForDeck(deckKey, deckName);
       await loadChatDeckCards(deckKey);
@@ -631,9 +634,14 @@ document.addEventListener("DOMContentLoaded", () => {
           html += `<br><span style="color:var(--danger)">⚠ ${diag.unresolved.length} Zeile(n) nicht aufgelöst</span>`;
         }
         if (data.saved) {
-          html += `<br><span style="color:var(--green)">✅ Gespeichert — erscheint in der Deck-Liste mit Badge.</span>`;
+          html += `<br><span style="color:var(--green)">✅ Gespeichert — Seite wird neu geladen, das Deck erscheint mit Kartenliste.</span>`;
         }
         importResult.innerHTML = html;
+        if (data.saved) {
+          // deck-cards.json neu lesen: Reload zeigt das importierte Deck in
+          // der Tabelle mit Badge — auch ohne decks.json (T10).
+          window.setTimeout(() => window.location.reload(), 1500);
+        }
       } catch (err) {
         importResult.textContent = "❌ " + err.message;
       }
