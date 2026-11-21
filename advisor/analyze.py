@@ -79,7 +79,16 @@ def analyze_deck(
 
     # Alle Karten des Decks aggregieren (MainDeck + Sideboard + CommandZone + Companions)
     all_card_entries = _collect_deck_cards(deck)
-    total_cards = sum(e["quantity"] for e in all_card_entries)
+    resolved_cards = sum(e["quantity"] for e in all_card_entries)
+
+    # Karten ohne Arena-ID (unresolved-arena-id, z.B. TRK über Scryfall nicht
+    # auflösbar): zählen in totalCards mit, fließen aber NICHT in
+    # owned/missing ein — ihre grpId ist unbekannt, kein Collection-Abgleich
+    # möglich.
+    unresolved_entries = _collect_unresolved_cards(deck)
+    unresolved_cards = sum(int(e["quantity"]) for e in unresolved_entries)
+    unknown_sets = sorted({str(e.get("set")) for e in unresolved_entries if e.get("set")})
+    total_cards = resolved_cards + unresolved_cards
 
     owned_entries: list[dict[str, Any]] = []
     missing_entries: list[dict[str, Any]] = []
@@ -146,9 +155,17 @@ def analyze_deck(
     # Completion-Score: wieviele Karten des Decks sind in der Collection vorhanden?
     # Für jede Karte: min(owned, needed) → deck-relevant
     total_owned = sum(min(e["owned"], e["needed"]) for e in owned_entries + missing_entries)
-    completion_score = 100.0 if total_cards == 0 else round(
-        (total_owned / total_cards) * 100, 1
-    )
+    # Der Score wird nur auf der AUFLÖSBAREN Basis gerechnet (resolved_cards),
+    # nicht auf total — sonst würde eine nicht auflösbare Karte den Score
+    # drücken, ohne dass der Nutzer etwas dagegen tun kann. Die Basis ist über
+    # scoreBasis transparent ausgewiesen. Ohne auflösbare Karten gibt es nichts
+    # zu bewerten: leeres Deck → 100.0 (wie bisher), nur-unresolved → 0.0.
+    if total_cards == 0:
+        completion_score = 100.0
+    elif resolved_cards == 0:
+        completion_score = 0.0
+    else:
+        completion_score = round((total_owned / resolved_cards) * 100, 1)
 
     # Warnings
     warnings: list[str] = []
@@ -161,6 +178,8 @@ def analyze_deck(
     if any(not v["sufficient"] for v in wc_sufficiency.values()):
         insufficient = [r for r, v in wc_sufficiency.items() if not v["sufficient"]]
         warnings.append(f"Wildcard-Bestand nicht ausreichend für: {', '.join(insufficient)}")
+    if any(e.get("reason") == "unresolved-arena-id" for e in unresolved_entries):
+        warnings.append("arena-id-unbekannt")
 
     return {
         "schema": ANALYZE_SCHEMA,
@@ -177,9 +196,21 @@ def analyze_deck(
             "missingCards": sum(e["missing"] for e in missing_entries),
             "ownedUnique": len(owned_entries),
             "missingUnique": len(missing_entries),
+            # Karten ohne Arena-ID: in totalCards enthalten, aber nicht in
+            # ownedCards/missingCards bewertbar (siehe scoreBasis).
+            "unresolvedCards": unresolved_cards,
+            "unknownSets": unknown_sets,
+            # Basis des completionScore: owned/resolved ist der Score, total
+            # enthält auch die nicht auflösbaren Karten.
+            "scoreBasis": {
+                "owned": total_owned,
+                "resolved": resolved_cards,
+                "total": total_cards,
+            },
         },
         "ownedCards": owned_entries,
         "missingCards": missing_entries,
+        "unresolvedCards": unresolved_entries,
         "wildcardNeed": {
             "needed": {k: v for k, v in wc_needed.items() if v > 0},
             "owned": owned_wildcards,
@@ -197,12 +228,26 @@ def arena_deck_to_deck_cards(arena_deck: dict[str, Any]) -> dict[str, Any]:
     Mapping: ``mainboard`` → ``mainDeck``, ``sideboard`` → ``sideboard``,
     ``arenaId`` → ``cardId``, ``count`` → ``quantity``.
     ``commandZone``/``companions`` bleiben leer (Arena-Textexport kennt sie nicht).
+
+    Einträge mit ``arenaId: null`` (``reason: "unresolved-arena-id"`` — Karte
+    über Set+CollectorNumber aufgenommen, aber ohne Arena-ID in der Karten-DB)
+    landen im Feld ``unresolvedCards`` statt in den Zonen. So zählen sie in
+    ``analyze_deck`` in ``totalCards`` mit, ohne owned/missing zu verfälschen.
     """
-    def _convert_zone(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _convert_zone(cards: list[dict[str, Any]], zone: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         out: list[dict[str, Any]] = []
+        unresolved: list[dict[str, Any]] = []
         for card in cards:
             arena_id = card.get("arenaId")
             if arena_id is None:
+                unresolved.append({
+                    "name": card.get("name", "Unknown"),
+                    "set": card.get("set", ""),
+                    "collectorNumber": card.get("collectorNumber", ""),
+                    "quantity": int(card.get("count", 1)),
+                    "zone": zone,
+                    "reason": card.get("reason", "unresolved-arena-id"),
+                })
                 continue
             try:
                 card_id = int(arena_id)
@@ -210,17 +255,31 @@ def arena_deck_to_deck_cards(arena_deck: dict[str, Any]) -> dict[str, Any]:
                 continue
             quantity = int(card.get("count", 1))
             out.append({"cardId": card_id, "quantity": quantity})
-        return out
+        return out, unresolved
 
-    return {
+    main_deck, unresolved_main = _convert_zone(arena_deck.get("mainboard", []), "mainDeck")
+    sideboard, unresolved_side = _convert_zone(arena_deck.get("sideboard", []), "sideboard")
+    unresolved_cards = unresolved_main + unresolved_side
+    unresolved_cards += [
+        {"name": item.get("name", "Unknown"), "quantity": item["count"],
+         "zone": item.get("zone", "mainDeck"), "reason": item["reason"],
+         "line": item.get("line", "")}
+        for item in arena_deck.get("diagnostics", {}).get("unresolved", [])
+        if item.get("reason") == "unknown-card-name" and "count" in item
+    ]
+
+    result = {
         "deckId": arena_deck.get("deckId"),
         "name": arena_deck.get("name", "Imported Deck"),
         "format": arena_deck.get("format", "unknown"),
-        "mainDeck": _convert_zone(arena_deck.get("mainboard", [])),
-        "sideboard": _convert_zone(arena_deck.get("sideboard", [])),
+        "mainDeck": main_deck,
+        "sideboard": sideboard,
         "commandZone": [],
         "companions": [],
     }
+    if unresolved_cards:
+        result["unresolvedCards"] = unresolved_cards
+    return result
 
 
 def load_deck_cards(
@@ -341,6 +400,41 @@ def _collect_deck_cards(deck: dict[str, Any]) -> list[dict[str, Any]]:
                 "quantity": quantity,
                 "zone": zone_name,
             })
+    return entries
+
+
+def _collect_unresolved_cards(deck: dict[str, Any]) -> list[dict[str, Any]]:
+    """Sammle Karten ohne Arena-ID aus ``deck["unresolvedCards"]``.
+
+    Das Feld wird von ``arena_deck_to_deck_cards`` für Einträge mit
+    ``arenaId: null`` (reason ``unresolved-arena-id``) befüllt. Gespeicherte
+    Decks ohne das Feld haben keine unresolved Karten.
+
+    Returns:
+        Liste von Dicts mit name, set, collectorNumber, quantity, zone.
+    """
+    cards = deck.get("unresolvedCards")
+    if not isinstance(cards, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        try:
+            quantity = int(card.get("quantity", 1))
+        except (TypeError, ValueError):
+            continue
+        if quantity <= 0:
+            continue
+        entries.append({
+            "name": str(card.get("name", "Unknown")),
+            "set": str(card.get("set", "")),
+            "collectorNumber": str(card.get("collectorNumber", "")),
+            "quantity": quantity,
+            "zone": str(card.get("zone", "")),
+            "reason": str(card.get("reason", "unresolved-arena-id")),
+            **({"line": card["line"]} if "line" in card else {}),
+        })
     return entries
 
 
