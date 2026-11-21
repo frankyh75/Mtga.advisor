@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import gzip
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -129,7 +130,7 @@ def _load_localizations(cursor: sqlite3.Cursor, tables: set[str]) -> dict[int, s
     return loc_map
 
 
-def fetch_scryfall_database() -> dict[int, dict[str, Any]]:
+def fetch_scryfall_database(*, missing_sets: Counter[str] | None = None) -> dict[int, dict[str, Any]]:
     """Lädt Kartendaten von der Scryfall-API (Bulk-Download)."""
     try:
         import requests
@@ -163,15 +164,43 @@ def fetch_scryfall_database() -> dict[int, dict[str, Any]]:
                 for raw_line in gz:
                     if not raw_line.strip():
                         continue
-                    _add_scryfall_card(lookup, json.loads(raw_line))
+                    card = json.loads(raw_line)
+                    _count_missing_arena_id(missing_sets, card)
+                    _add_scryfall_card(lookup, card)
             return lookup
 
         for c in cards_response.json():
+            _count_missing_arena_id(missing_sets, c)
             _add_scryfall_card(lookup, c)
         return lookup
     except Exception as e:
+        if missing_sets is not None:
+            missing_sets.clear()
         print(f"❌ Scryfall-Download fehlgeschlagen: {e}")
         return {}
+
+
+def _count_missing_arena_id(missing_sets: Counter[str] | None, card: dict[str, Any]) -> None:
+    if missing_sets is not None and not card.get("arena_id"):
+        set_code = str(card.get("set") or "Unbekannt").upper()
+        missing_sets[set_code] += 1
+
+
+def _print_refresh_report(source: str, lookup: dict[int, dict[str, Any]],
+                          missing_sets: Counter[str] | None) -> None:
+    print(f"📊 Refresh-Report: source={source}, cardCount={len(lookup)}")
+    if missing_sets is None:
+        print("Sets ohne Arena-ID: nicht ermittelt (Quelle liefert keine vergleichbare Lückenliste).")
+    elif not missing_sets:
+        print("Sets ohne Arena-ID in den gelieferten Quelldaten: keine festgestellt.")
+    else:
+        top = sorted(missing_sets.items(), key=lambda item: (-item[1], item[0]))[:10]
+        print("Sets ohne Arena-ID in den gelieferten Quelldaten (Top 10; Anzahl Einträge): "
+              + ", ".join(f"{code}: {count}" for code, count in top))
+        print("Hinweis: Diese Einträge sind nicht notwendigerweise Arena-Karten; "
+              "vollständig fehlende Sets sind nicht erkennbar.")
+    print("Ein Refresh ergänzt fehlende Arena-IDs nicht notwendigerweise, "
+          "wenn die Quelle sie nicht liefert.")
 
 
 def _add_scryfall_card(lookup: dict[int, dict[str, Any]], card: dict[str, Any]) -> None:
@@ -280,9 +309,16 @@ def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, An
     source_path = local_path if lookup else None
 
     # 3. Scryfall Fallback
+    missing_sets: Counter[str] | None = None
     if not lookup:
         print("⚠ Keine lokale DB gefunden. Lade von Scryfall...")
-        lookup = fetch_scryfall_database()
+        if refresh_cache:
+            missing_sets = Counter()
+            lookup = fetch_scryfall_database(missing_sets=missing_sets)
+            if not lookup:
+                missing_sets = None  # Fehler bzw. leeres Ergebnis: keine Aussage möglich
+        else:
+            lookup = fetch_scryfall_database()
         source = CACHE_SOURCE_SCRYFALL
         source_path = None
 
@@ -293,5 +329,8 @@ def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, An
             print("💾 Karten-DB gecached")
         except Exception as exc:
             print(f"⚠ Karten-DB-Cache konnte nicht geschrieben werden: {exc}")
+
+    if refresh_cache:
+        _print_refresh_report(source, lookup, missing_sets)
 
     return lookup
