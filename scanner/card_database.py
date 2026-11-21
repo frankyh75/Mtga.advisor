@@ -286,7 +286,22 @@ def load_card_database(*, refresh_cache: bool = False) -> dict[int, dict[str, An
     # 1. Cache
     lookup_file = _lookup_file()
 
-    local_path = get_macos_mtga_data_path()
+    try:
+        local_path = get_macos_mtga_data_path()
+    except PermissionError as exc:
+        # Ein expliziter Refresh darf den Zugriffsfehler nicht verbergen.
+        # Für normale Lesezugriffe bleibt ein vorhandener Cache verwendbar,
+        # aber die eingeschränkte Aktualität wird ausdrücklich gemeldet.
+        if refresh_cache or not lookup_file.exists():
+            raise
+        try:
+            lookup, _ = _read_lookup_cache(lookup_file)
+        except Exception:
+            raise exc
+        if not lookup:
+            raise
+        print(f"⚠ {exc} Verwende vorhandenen Karten-DB-Cache; lokale Aktualisierung nicht geprüft.")
+        return lookup
 
     if lookup_file.exists() and not refresh_cache:
         try:
