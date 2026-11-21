@@ -44,9 +44,10 @@ wartet. Kein manuelles Probing, keine Messung auf Vermutung.
    Namensadresse.
 5. Instanzen je Klasse: 8-Byte-Zeiger auf Klassenstruktur, wobei an Objektadresse `+0` ==
    Klassenstruktur; `count` plausibel (500 < count < 40000), `entries` lesbar.
-6. Dekodieren, **Anker-Gate** (105645 == 1, 104977 == 3) und **Band-Gate** (unique 6.500–9.500).
+6. Dekodieren, dann **Struktur-Prüfung** und **Monotonie-Prüfung** (siehe Abschnitt
+   „Validierung"); Anker nur als Warnung mitschreiben.
 7. Nur bei bestandener Prüfung Snapshot schreiben. Sonst warten und Grund melden:
-   `no_process`, `no_metadata`, `no_class`, `no_instance`, `anchors_mismatch`, `band_mismatch`.
+   `no_process`, `no_metadata`, `no_class`, `no_instance`, `struct_mismatch`, `monotonicity_mismatch`.
 
 ## Warteschleife
 
@@ -58,10 +59,31 @@ wartet. Kein manuelles Probing, keine Messung auf Vermutung.
   Folgeläufe validieren nur die Instanz (Sekunden). Neu-Scan nur bei ungültigem Cache
   (Klassenname passt nicht mehr / Instanz verschwunden / Prozess neu).
 
+## Validierung: bitte NICHT als hartes Anker-Gate
+
+Die Sammlung liegt als **ein** vollständiges Wörterbuch im Speicher. UI-Filter („nur grün",
+Sets, Suche) sind reine Anzeige und bauen dieses Objekt nicht neu — gemessen: 8.610 Einträge
+bei 17.519 Slots (Lastfaktor 0,49) spricht für ein einziges gewachsenes Dictionary, nicht für
+ein Filterergebnis.
+
+Deshalb gilt:
+
+- **Harte Prüfungen (blockieren):**
+  1. *Struktur*: `count` == Anzahl belegter Einträge, alle Mengen 1..4, keine doppelten GRP-Ids,
+     GRP-Ids im plausiblen Bereich (< 2.000.000), `entries` vollständig lesbar.
+  2. *Monotonie*: Arena entfernt keine Karten (bestätigt: „es gibt kein Löschen bei Magic") →
+     `unique` und `total_copies` müssen ≥ letzter Snapshot sein, Zuwachs < 20 %.
+     Erster Lauf ohne Referenz: nur Struktur-Prüfung.
+- **Weiche Prüfung (nur melden):** Anker `105645` (TVA), `104977` (We Say Thee Nay!) werden
+  mitgeschrieben. Abweichung → Warnung `anchor_drift`, **kein** Abbruch. Grund: Mengen ändern
+  sich legal (Craften, Dusten, neue Kopien), ein hartes Gate würde gültige Daten blockieren.
+
+Anker sind also eine **Kalibrierung / ein Kanarienvogel**, kein Bereitschaftstest.
+
 ## Akzeptanzkriterien
 
 - Ein Aufruf wie `python -m scanner.cli collection --wait` liefert ohne Zutun einen Snapshot mit
-  bestandenem Anker-Gate.
+  bestandener Struktur- und Monotonie-Prüfung.
 - Zweiter Aufruf < 15 s (Cache).
 - Bei nicht verfügbarer Sammlung: klare Meldung, **kein** leerer Snapshot, **keine** alten Daten
   als neu ausgegeben.
