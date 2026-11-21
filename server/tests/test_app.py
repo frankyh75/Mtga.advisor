@@ -31,6 +31,8 @@ from server.app import (  # noqa: E402
     _print_server_banner,
     _health_response,
     _helper_status_response,
+    _find_deck_payload,
+    _render_decks_table,
 )
 
 
@@ -104,6 +106,147 @@ def test_render_index_handles_missing_decks_and_advisor() -> None:
     assert "Decks" in html
     assert "decks.json nicht gefunden" in html
     assert "advisor-result.json nicht gefunden" in html
+
+
+def _write_deck_cards(path: Path, deck_id: str = "imported-1", name: str = "Imported Deck") -> None:
+    """Schreibe eine minimale deck-cards.json (Schema deck-cards.v1)."""
+    payload = {
+        "schema": "deck-cards.v1",
+        "source": "local-logs",
+        "decks": [
+            {
+                "deckId": deck_id,
+                "name": name,
+                "format": "historic",
+                "mainDeck": [{"cardId": 123, "quantity": 4}],
+                "sideboard": [],
+                "commandZone": [],
+                "companions": [],
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_render_decks_table_without_decks_shows_import_form(tmp_path: Path) -> None:
+    # T10 AK1: keine decks.json, keine deck-cards.json → Hinweis UND Import-Formular
+    html = _render_decks_table(None, tmp_path)
+
+    assert "Noch keine Decks erkannt" in html
+    assert "Deck → Copy to Clipboard" in html
+    assert 'id="deck-import-btn"' in html
+    assert 'id="deck-import-panel"' in html
+    assert 'id="deck-import-text"' in html
+    assert 'id="deck-import-submit"' in html
+    assert "Noch kein Deck-Export vorhanden" not in html
+
+
+def test_render_decks_table_without_decks_json_merges_deck_cards(tmp_path: Path) -> None:
+    # T10: deck-cards.json ohne decks.json → synthetischer Tabellen-Eintrag
+    # (Deckname statt nackter deckId) mit Kartenliste-Badge + Import-Formular.
+    _write_deck_cards(tmp_path / "deck-cards.json")
+
+    html = _render_decks_table(None, tmp_path)
+
+    assert "Imported Deck" in html
+    assert "✓ Kartenliste" in html
+    assert "data-deck-key='imported-1'" in html
+    assert 'id="deck-import-btn"' in html
+    assert "Noch keine Decks erkannt" not in html
+    assert "<table id='deck-table'>" in html
+
+
+def test_render_decks_table_with_decks_json_is_unchanged(tmp_path: Path) -> None:
+    # T10 AK3: mit vorhandenen decks.json-Daten kein Regress —
+    # Tabelle inkl. Toolbar wie im Bestand, kein Badge ohne deck-cards.json.
+    decks = {
+        "schema": "decks.v1",
+        "decks": [
+            {
+                "name": "Control",
+                "deckId": "1",
+                "deckKey": "1",
+                "attributes": {"Format": "standard"},
+                "isPrecon": False,
+            }
+        ],
+    }
+
+    html = _render_decks_table(decks, tmp_path)
+
+    assert "Control" in html
+    assert "✓ Kartenliste" not in html
+    assert "Noch keine Decks erkannt" not in html
+    assert "<table id='deck-table'>" in html
+    assert 'id="deck-import-btn"' in html
+    assert "Klick auf eine Zeile für Details, Chat-Button für Advisor." in html
+
+
+def test_render_decks_table_merges_deck_cards_into_existing_decks(tmp_path: Path) -> None:
+    # decks.json vorhanden + importiertes Deck in deck-cards.json →
+    # beide erscheinen, importiertes mit Badge, bestehendes ohne.
+    decks = {
+        "schema": "decks.v1",
+        "decks": [{"name": "Control", "deckId": "1", "deckKey": "1", "isPrecon": False}],
+    }
+    _write_deck_cards(tmp_path / "deck-cards.json")
+
+    html = _render_decks_table(decks, tmp_path)
+
+    assert "Control" in html
+    assert "Imported Deck" in html
+    assert "✓ Kartenliste" in html
+
+
+def test_find_deck_payload_reads_deck_cards_json(tmp_path: Path) -> None:
+    # T10: Detailansicht — /api/deck/<key> muss importierte Decks auch
+    # dann liefern, wenn decks.json fehlt.
+    _write_deck_cards(tmp_path / "deck-cards.json")
+
+    payload = _find_deck_payload(tmp_path, "imported-1")
+
+    assert payload is not None
+    assert payload["name"] == "Imported Deck"
+    assert payload["mainDeck"] == [{"cardId": 123, "quantity": 4}]
+    assert _find_deck_payload(tmp_path, "unknown-deck") is None
+
+
+def test_find_deck_payload_prefers_decks_json(tmp_path: Path) -> None:
+    # AK3: decks.json hat Vorrang vor deck-cards.json (kein Regress).
+    (tmp_path / "decks.json").write_text(
+        json.dumps(
+            {
+                "schema": "decks.v1",
+                "decks": [
+                    {
+                        "deckId": "1",
+                        "deckKey": "1",
+                        "name": "Aus decks.json",
+                        "mainDeck": [{"grpId": 1, "name": "Island", "quantity": 2}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_deck_cards(tmp_path / "deck-cards.json", deck_id="1", name="Aus deck-cards.json")
+
+    payload = _find_deck_payload(tmp_path, "1")
+
+    assert payload is not None
+    assert payload["name"] == "Aus decks.json"
+
+
+def test_dashboard_js_reloads_after_saved_import() -> None:
+    js = _dashboard_js()
+
+    # T10: Import-Handler hängt an IDs, nicht an Tabellenzeilen — wird also
+    # auch initialisiert, wenn die Tabelle leer ist.
+    assert 'getElementById("deck-import-btn")' in js
+    # T10: nach gespeichertem Import deck-cards.json neu lesen via Reload.
+    assert "window.location.reload()" in js
+    # T10: Steuer-Buttons ohne Deck-Bezug lösen keinen Chat-Select aus.
+    assert "if (!deckKey) return;" in js
 
 
 def test_dashboard_script_is_loaded_from_asset() -> None:

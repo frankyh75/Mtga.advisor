@@ -403,13 +403,19 @@ def _find_deck_payload(output_dir: Path, deck_key: str) -> dict[str, Any] | None
             if payload is not None:
                 return payload
 
-    decks = _read_json(output_dir / "decks.json")
-    if not decks:
-        return None
-
+    decks = _read_json(output_dir / "decks.json") or {}
     for deck in decks.get("decks", []):
         if normalized in _deck_keys_for_payload(deck):
             return deck
+
+    # Importierte Decks ohne decks.json (z.B. GUI-Import) liegen in
+    # deck-cards.json — auch dort nachschlagen, damit die Detailansicht
+    # des importierten Decks funktioniert, wenn decks.json fehlt (T10).
+    deck_cards = _read_json(output_dir / "deck-cards.json")
+    if deck_cards:
+        for deck in deck_cards.get("decks", []):
+            if normalized in _deck_keys_for_payload(deck):
+                return deck
     return None
 
 
@@ -571,12 +577,39 @@ def _render_deck_format_dropdown(formats: list[str]) -> str:
     )
 
 
+def _render_decks_toolbar(format_dropdown: str, visibility_hint: str) -> str:
+    """Filter-/Import-Toolbar über der Deck-Tabelle.
+
+    Wird auch im Leer-Fall (keine Decks) gerendert, damit der
+    Deck-Import ohne decks.json erreichbar bleibt (T10).
+    """
+    return (
+        '<div class="deck-filter-bar">'
+        '<input type="text" id="deck-search" placeholder="Deck suchen..." '
+        'class="deck-search-input" autocomplete="off">'
+        f'{format_dropdown}'
+        '<label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>'
+        '<button id="deck-import-btn" class="btn-select-deck" type="button">+ Deckliste importieren</button>'
+        f'<span id="deck-visibility" class="meta">{html.escape(visibility_hint)}</span>'
+        '</div>'
+        '<div id="deck-import-panel" class="deck-import-panel" style="display:none">'
+        '<textarea id="deck-import-text" rows="8" placeholder="Arena-Deckliste hier einfügen (Copy to Clipboard aus MTGA)..."></textarea>'
+        '<div class="deck-import-controls">'
+        '<input type="text" id="deck-import-format" placeholder="Format (z.B. historic)" value="historic">'
+        '<input type="text" id="deck-import-name" placeholder="Deckname (optional)">'
+        '<button id="deck-import-submit" class="btn-select-deck" type="button">Analysieren</button>'
+        '<button id="deck-import-cancel" class="btn-select-deck" type="button">Abbrechen</button>'
+        '</div>'
+        '<div id="deck-import-result" class="deck-import-result"></div>'
+        '</div>'
+    )
+
+
 def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = None) -> str:
-    if not decks:
-        return "<p>Noch kein Deck-Export vorhanden. Führe <code>python3 -m cli.main run</code> aus.</p>"
-    deck_list = decks.get("decks", [])
-    if not deck_list:
-        return "<p>Keine Decks gefunden.</p>"
+    # deck-cards.json VOR den Leer-Prüfungen einlesen: Importierte Decks
+    # erscheinen auch ohne decks.json, und das Import-Formular bleibt
+    # erreichbar, wenn noch kein Deck-Export existiert (T10).
+    deck_list: list[dict[str, Any]] = list(decks.get("decks", [])) if decks else []
 
     # Deck-IDs mit Kartenliste aus deck-cards.json laden (für Badge + Sortierung)
     # UND: Decks aus deck-cards.json, die NICHT in decks.json sind, als
@@ -615,16 +648,34 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
     if extra_decks:
         deck_list = deck_list + extra_decks
 
+    # Sammle eindeutige Formate für das Dropdown
+    formats = _collect_deck_formats(decks, deck_cards_format_map)
+    format_dropdown = _render_deck_format_dropdown(formats)
+
+    # Ohne Decks (weder decks.json noch deck-cards.json): kurzer Hinweis +
+    # Import-Formular — die Deck-Sektion ist keine Sackgasse mehr (T10).
+    if not deck_list:
+        hint = (
+            "<p class='meta'>Noch keine Decks erkannt — Deckliste aus Arena einfügen "
+            "(Deck → Copy to Clipboard).</p>"
+        )
+        toolbar = _render_decks_toolbar(
+            format_dropdown,
+            "Nach dem Import erscheint das Deck hier mit Kartenliste.",
+        )
+        return hint + toolbar
+
+    toolbar = _render_decks_toolbar(
+        format_dropdown,
+        "Klick auf eine Zeile für Details, Chat-Button für Advisor.",
+    )
+
     # Sortierung: Decks mit Kartenliste zuerst, dann alphabetisch nach Name
     def _sort_key(deck: dict[str, Any]) -> tuple[int, str]:
         did = str(deck.get("deckKey") or deck.get("deckId") or "")
         has_cards = did in deck_cards_ids
         return (0 if has_cards else 1, str(deck.get("name", "")).lower())
     deck_list = sorted(deck_list, key=_sort_key)
-
-    # Sammle eindeutige Formate für das Dropdown
-    formats = _collect_deck_formats(decks, deck_cards_format_map)
-    format_dropdown = _render_deck_format_dropdown(formats)
 
     # Rendere ALLE Decks (nicht nur 50) — Pagination erfolgt client-seitig
     rows = []
@@ -670,29 +721,7 @@ def _render_decks_table(decks: dict[str, Any] | None, output_dir: Path | None = 
         )
         rows.append(row)
 
-    # Filter- und Pagination-Toolbar über der Tabelle
-    toolbar = (
-        '<div class="deck-filter-bar">'
-        '<input type="text" id="deck-search" placeholder="Deck suchen..." '
-        'class="deck-search-input" autocomplete="off">'
-        f'{format_dropdown}'
-        '<label><input id="hide-precons" type="checkbox" checked> Precons ausblenden</label>'
-        '<button id="deck-import-btn" class="btn-select-deck" type="button">+ Deckliste importieren</button>'
-        '<span id="deck-visibility" class="meta">'
-        'Klick auf eine Zeile für Details, Chat-Button für Advisor.'
-        '</span>'
-        '</div>'
-        '<div id="deck-import-panel" class="deck-import-panel" style="display:none">'
-        '<textarea id="deck-import-text" rows="8" placeholder="Arena-Deckliste hier einfügen (Copy to Clipboard aus MTGA)..."></textarea>'
-        '<div class="deck-import-controls">'
-        '<input type="text" id="deck-import-format" placeholder="Format (z.B. historic)" value="historic">'
-        '<input type="text" id="deck-import-name" placeholder="Deckname (optional)">'
-        '<button id="deck-import-submit" class="btn-select-deck" type="button">Analysieren</button>'
-        '<button id="deck-import-cancel" class="btn-select-deck" type="button">Abbrechen</button>'
-        '</div>'
-        '<div id="deck-import-result" class="deck-import-result"></div>'
-        '</div>'
-    )
+    # Filter- und Pagination-Toolbar über der Tabelle (Import-Formular immer erreichbar)
 
     table = (
         "<table id='deck-table'><thead><tr><th>Name</th><th>Format</th>"
