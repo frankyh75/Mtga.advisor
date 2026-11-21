@@ -1920,21 +1920,10 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 imported = import_arena_deck(
                     deck_text, card_db=card_db, deck_format=deck_format, name=deck_name
                 )
-                # Konvertiere mainboard/arenaId/count -> mainDeck/cardId/quantity
-                def _to_entries(pile):
-                    return [
-                        {"cardId": int(c["arenaId"]), "quantity": int(c["count"])}
-                        for c in pile
-                    ]
-                deck_for_analyze = {
-                    "deckId": imported.get("deckId"),
-                    "name": imported.get("name"),
-                    "format": imported.get("format"),
-                    "mainDeck": _to_entries(imported.get("mainboard", [])),
-                    "sideboard": _to_entries(imported.get("sideboard", [])),
-                    "commandZone": [],
-                    "companions": [],
-                }
+                from advisor.analyze import arena_deck_to_deck_cards
+
+                deck_for_analyze = arena_deck_to_deck_cards(imported)
+                import_unresolved = deck_for_analyze.get("unresolvedCards", [])
                 collection = _read_json(output_dir / "collection.json") or {}
                 wildcards = _read_json(output_dir / "wildcards.json") or {}
                 result = analyze_deck(
@@ -1949,15 +1938,12 @@ class MtgaAdvisorHandler(BaseHTTPRequestHandler):
                 # (damit es in der Deck-Liste mit Badge erscheint).
                 try:
                     from parser.deck_cards import upsert_deck_cards
-                    saved_deck = {
-                        "deckId": imported.get("deckId"),
-                        "name": imported.get("name"),
-                        "format": imported.get("format"),
-                        "mainDeck": _to_entries(imported.get("mainboard", [])),
-                        "sideboard": _to_entries(imported.get("sideboard", [])),
-                        "commandZone": [],
-                        "companions": [],
-                    }
+                    saved_deck = dict(deck_for_analyze)
+                    if import_unresolved:
+                        # Karten ohne Arena-ID mitpersistieren, damit spätere
+                        # Analysen dieses gespeicherten Decks dieselbe
+                        # totalCards-Basis (60 statt 56) verwenden.
+                        saved_deck["unresolvedCards"] = import_unresolved
                     upsert_deck_cards(saved_deck, output_dir)
                     result["saved"] = True
                 except Exception as exc:
