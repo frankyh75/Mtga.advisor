@@ -16,3 +16,6 @@ helper/build/
 
 # Helper binary (wird via `make -C helper build` erzeugt)
 helper/mtga-helper
+
+# Kanban-Worktrees (werden vom Dispatcher angelegt)
+.worktrees/
